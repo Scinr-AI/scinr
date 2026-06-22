@@ -1,0 +1,128 @@
+# =============================================================================
+# CREDENTIALS & SECRETS
+# =============================================================================
+# Never commit real credentials. Copy .env.example and fill in your own values.
+.env
+.env.*
+!.env.example
+
+.github/workflows
+# =============================================================================
+# PYTHON VIRTUAL ENVIRONMENT
+# =============================================================================
+.venv/
+venv/
+env/
+own_models
+
+# =============================================================================
+# PYTHON CACHE & BYTECODE
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# =============================================================================
+# PYTHON BUILD ARTIFACTS
+# =============================================================================
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
+
+# =============================================================================
+# TESTING & COVERAGE
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+*.cover
+
+# =============================================================================
+# TYPE CHECKING & LINTING
+# =============================================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# =============================================================================
+# JUPYTER NOTEBOOKS
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =============================================================================
+# DATA & DOCUMENT FILES
+# =============================================================================
+# Input/output data — may contain sensitive or large files
+data/
+# Source documents (PDFs, XLSX, etc.)
+files/
+processed-files/
+# Output data
+out/
+
+# Runtime log files
+logs/
+
+# =============================================================================
+# IDE & EDITOR SETTINGS
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# =============================================================================
+# OPERATING SYSTEM FILES
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# =============================================================================
+# LOGS & TEMPORARY FILES
+# =============================================================================
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# =============================================================================
+# KEPT IN VERSION CONTROL (explicit reminders — do NOT add these here)
+# =============================================================================
+# pyproject.toml      — project manifest
+# uv.lock             — dependency lockfile
+# src/                — package source code (scinr.newton)
+# tests/              — test suite
+# docs/               — documentation
+# .python-version     — pyenv version pin
+# README.md           — project documentation
+# CHANGELOG.md        — release history
+# LICENSE             — Apache 2.0
+# .env.example        — environment variable reference (no secrets)
