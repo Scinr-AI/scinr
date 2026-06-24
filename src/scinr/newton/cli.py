@@ -52,7 +52,7 @@ Ingest CSV/XLSX files with update mode::
 
     python main.py --stage tabular --input-raw files/ --update
 
-Defaults (stage=all, input=data/json-pruebas/, output=data/output-pruebas/)::
+Defaults (stage=all, input=data/json/, output=data/output/)::
 
     python main.py
 """
@@ -87,8 +87,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_DEFAULT_INPUT = "data/json-pruebas/"
-_DEFAULT_OUTPUT = "data/output-pruebas/"
+_DEFAULT_INPUT = "data/json/"
+_DEFAULT_OUTPUT = "data/output/"
 _DEFAULT_STAGE = "all"
 _DEFAULT_WINDOW_SIZE = 2
 _DEFAULT_PARALLEL_DOCS = 1
