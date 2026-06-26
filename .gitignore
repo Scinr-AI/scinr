@@ -5,7 +5,7 @@
 .env
 .env.*
 !.env.example
-
+src/scinr/newton/models
 .github/workflows
 # =============================================================================
 # PYTHON VIRTUAL ENVIRONMENT

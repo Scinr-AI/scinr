@@ -356,14 +356,14 @@ class Document(StrictModel):
             "the document's main divisions."
         ),
     )
-
-    @model_validator(mode="after")
-    def warn_if_empty_structure(self) -> Document:
-        """Emit a warning when the document has no top-level StructureNodes."""
-        if not self.document_structure:
-            logging.getLogger(__name__).warning(
-                "Document '%s' has an empty document_structure. "
-                "It will be ingested without any StructureNodes.",
-                self.document_name,
-            )
-        return self
+# No tiene sentido que sea siempre que se crea un documento, ya que cuando se crea manualmente también sale este warning y no procede.
+    # @model_validator(mode="after")
+    # def warn_if_empty_structure(self) -> Document:
+    #     """Emit a warning when the document has no top-level StructureNodes."""
+    #     if not self.document_structure:
+    #         logging.getLogger(__name__).warning(
+    #             "Document '%s' has an empty document_structure. "
+    #             "It will be ingested without any StructureNodes.",
+    #             self.document_name,
+    #         )
+    #     return self

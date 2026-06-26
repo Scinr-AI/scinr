@@ -1,12 +1,14 @@
 """
 converters/docx.py — Microsoft Word DOCX to Markdown converter.
 
-The DOCX document is split into pages using a three-layer strategy
+The DOCX document is split into pages using a two-layer strategy
 (tried in order, first match wins):
 
-1. **Manual page breaks** — ``<w:br w:type="page"/>`` inside paragraph runs.
-2. **Section breaks** — ``<w:sectPr>`` as a direct child of the document body.
-3. **Paragraph count** — fallback; a new page every ``_PARAGRAPHS_PER_PAGE``
+1. **Explicit breaks** — any ``<w:br w:type="page"/>`` run or ``<w:sectPr>``
+   section break triggers a page flush.  A safety cap of
+   ``_PARAGRAPHS_PER_PAGE`` elements is also applied so that a single
+   logical section never grows unbounded.
+2. **Paragraph count** — fallback; a new page every ``_PARAGRAPHS_PER_PAGE``
    elements (paragraphs + tables counted together).
 
 No content is ever discarded.
@@ -32,7 +34,7 @@ _HEADING_PREFIX_MAP: dict[str, int] = {
     "Title": 1,
 }
 
-_PARAGRAPHS_PER_PAGE = 150
+_PARAGRAPHS_PER_PAGE = 4
 
 
 class DocxConverter(BaseConverter):
@@ -45,9 +47,9 @@ class DocxConverter(BaseConverter):
 
     Pagination strategy (first applicable wins):
 
-    1. Manual page breaks (``<w:br w:type="page"/>``).
-    2. Section breaks (``<w:sectPr>`` in the body).
-    3. Paragraph/table count — new page every ``_PARAGRAPHS_PER_PAGE``
+    1. Explicit breaks (``<w:br w:type="page"/>`` or ``<w:sectPr>``), with a
+       ``_PARAGRAPHS_PER_PAGE`` safety cap per section.
+    2. Paragraph/table count — new page every ``_PARAGRAPHS_PER_PAGE``
        elements.
     """
 
@@ -135,21 +137,17 @@ class DocxConverter(BaseConverter):
             # ------------------------------------------------------------------
             # Decide pagination strategy
             # ------------------------------------------------------------------
-            has_manual_breaks = any(e["has_page_break"] for e in elements)
-            has_section_breaks = any(e["type"] == "section_break" for e in elements)
+            has_explicit_breaks = any(
+                e["has_page_break"] or e["type"] == "section_break"
+                for e in elements
+            )
+            strategy = "explicit_breaks" if has_explicit_breaks else "paragraph_count"
 
-            if has_manual_breaks:
-                strategy = "manual_breaks"
+            if strategy == "explicit_breaks":
                 logger.info(
-                    "DOCX %s: using manual page breaks for pagination.", source.name
-                )
-            elif has_section_breaks:
-                strategy = "section_breaks"
-                logger.info(
-                    "DOCX %s: using section breaks for pagination.", source.name
+                    "DOCX %s: using explicit breaks for pagination.", source.name
                 )
             else:
-                strategy = "paragraph_count"
                 logger.info(
                     "DOCX %s: no explicit breaks found — paginating every %d elements.",
                     source.name,
@@ -166,26 +164,28 @@ class DocxConverter(BaseConverter):
 
             def flush_page() -> None:
                 nonlocal page_idx
+                if not current_parts:
+                    return
                 md = "\n\n".join(p for p in current_parts if p)
                 pages.append(self._make_page(index=page_idx, markdown=md))
                 current_parts.clear()
                 page_idx += 1
 
             for elem in elements:
-                if elem["type"] == "section_break" and strategy == "section_breaks":
-                    if current_parts:
+                if strategy == "explicit_breaks":
+                    is_break = elem["has_page_break"] or elem["type"] == "section_break"
+                    if is_break:
                         flush_page()
+                    else:
+                        text = elem["text"]
+                        if text:
+                            current_parts.append(text)
+                        if len(current_parts) >= _PARAGRAPHS_PER_PAGE:
+                            flush_page()
                     continue
 
+                # strategy == "paragraph_count"
                 text = elem["text"]
-
-                if strategy == "manual_breaks" and elem["has_page_break"]:
-                    # Include text content before the break on the current page
-                    if text:
-                        current_parts.append(text)
-                    flush_page()
-                    continue
-
                 if text:
                     current_parts.append(text)
                     element_count += 1

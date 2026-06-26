@@ -165,3 +165,135 @@ class TestUnsupportedExtension:
 
         error_msg = str(exc_info.value)
         assert "unknownfmt" in error_msg
+
+
+# ---------------------------------------------------------------------------
+# DOCX explicit_breaks + paragraph cap behaviour
+# ---------------------------------------------------------------------------
+
+# _PARAGRAPHS_PER_PAGE = 4  (defined in scinr.newton.converters.docx)
+_PARAGRAPHS_PER_PAGE = 4
+
+
+def _add_page_break(doc) -> None:  # type: ignore[no-untyped-def]
+    """Append a paragraph containing an explicit <w:br w:type="page"/> to *doc*."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    para = doc.add_paragraph()
+    run = para.add_run()
+    br = OxmlElement("w:br")
+    br.set(qn("w:type"), "page")
+    run._r.append(br)
+
+
+def _add_section_break(doc) -> None:  # type: ignore[no-untyped-def]
+    """Append a <w:sectPr> directly to the document body (section break)."""
+    from docx.oxml import OxmlElement
+
+    sectPr = OxmlElement("w:sectPr")
+    doc.element.body.append(sectPr)
+
+
+class TestDocxExplicitBreaksParagraphCap:
+    def test_docx_page_break_with_paragraph_cap(self, tmp_path):
+        """Page-break strategy also flushes pages when paragraph cap is hit.
+
+        With _PARAGRAPHS_PER_PAGE=4, adding 2*4+1=9 paragraphs on each side
+        of a single explicit page break must produce more than 2 pages (the
+        cap triggers extra flushes beyond the one explicit break).
+        """
+        pytest.importorskip("docx")
+        from docx import Document
+
+        doc = Document()
+        n = _PARAGRAPHS_PER_PAGE * 2 + 1  # 9 paragraphs on each side
+        for i in range(n):
+            doc.add_paragraph(f"Before break paragraph {i + 1}.")
+        _add_page_break(doc)
+        for i in range(n):
+            doc.add_paragraph(f"After break paragraph {i + 1}.")
+
+        p = tmp_path / "page_break_cap.docx"
+        doc.save(str(p))
+
+        converter = get_converter(p)
+        result = converter.convert(p)
+
+        assert isinstance(result, IntermediateDocument)
+        # The single explicit break alone would give 2 pages; the cap must
+        # have added more splits → strictly more than 2 pages expected.
+        assert len(result.pages) > 2
+        # No page should be completely empty.
+        for page in result.pages:
+            assert page.markdown.strip() != "", (
+                f"Page {page.index} has empty markdown"
+            )
+
+    def test_docx_section_break_with_paragraph_cap(self, tmp_path):
+        """Section-break strategy also flushes pages when paragraph cap is hit.
+
+        Same logic as above but using a <w:sectPr> body element as the
+        explicit break instead of a <w:br w:type="page"/> run.
+        """
+        pytest.importorskip("docx")
+        from docx import Document
+
+        doc = Document()
+        n = _PARAGRAPHS_PER_PAGE * 2 + 1  # 9 paragraphs on each side
+        for i in range(n):
+            doc.add_paragraph(f"Before section paragraph {i + 1}.")
+        _add_section_break(doc)
+        for i in range(n):
+            doc.add_paragraph(f"After section paragraph {i + 1}.")
+
+        p = tmp_path / "section_break_cap.docx"
+        doc.save(str(p))
+
+        converter = get_converter(p)
+        result = converter.convert(p)
+
+        assert isinstance(result, IntermediateDocument)
+        # Same reasoning: section break alone → 2 pages; cap → more than 2.
+        assert len(result.pages) > 2
+        # No page should be completely empty.
+        for page in result.pages:
+            assert page.markdown.strip() != "", (
+                f"Page {page.index} has empty markdown"
+            )
+
+    def test_docx_consecutive_breaks_no_empty_pages(self, tmp_path):
+        """Two consecutive page breaks without content between them must not
+        produce empty pages.
+
+        The flush_page() guard (``if not current_parts: return``) prevents
+        empty IntermediatePage objects from being appended when a break is
+        encountered while the current accumulator is already empty.
+        """
+        pytest.importorskip("docx")
+        from docx import Document
+
+        doc = Document()
+        # Some real content before the pair of breaks
+        for i in range(3):
+            doc.add_paragraph(f"Preamble paragraph {i + 1}.")
+        # Two consecutive page breaks — no text between them
+        _add_page_break(doc)
+        _add_page_break(doc)
+        # Some real content after
+        for i in range(3):
+            doc.add_paragraph(f"Postamble paragraph {i + 1}.")
+
+        p = tmp_path / "consecutive_breaks.docx"
+        doc.save(str(p))
+
+        converter = get_converter(p)
+        result = converter.convert(p)
+
+        assert isinstance(result, IntermediateDocument)
+        assert len(result.pages) >= 1
+        # Critical assertion: no page may have empty markdown.
+        for page in result.pages:
+            assert page.markdown.strip() != "", (
+                f"Page {page.index} is empty — consecutive breaks were not filtered"
+            )
