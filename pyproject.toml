@@ -1,5 +1,5 @@
 [project]
-name = "scinr-ingest"
+name = "scinr"
 version = "0.2.0"
 description = "Document ingestion and entity extraction pipeline for Neo4j knowledge graphs"
 readme = "README.md"
