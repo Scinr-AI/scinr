@@ -13,6 +13,7 @@ Unique constraints (MERGE targets):
     :ExtractionResult(uid)
     :ModelField(name, model)  — composite key; prevents cross-model field node sharing
     :LabeledEntity(label, normalized_value)  — NODE KEY
+    :EntityLabel(label)       — schema-level singleton per entity label string
 
 Node existence constraints:
     :Document(name)
@@ -27,6 +28,7 @@ Regular indexes (query performance):
     :StructureNode(source_page_ids)
     :LabeledEntity(label)
     :ExtractionResult(node_full_id)
+    :ModelInstance(model_class)
 
 Fulltext indexes (semantic search):
     infoUnitDescription  → :InfoUnit(description)
@@ -85,6 +87,11 @@ _UNIQUE_CONSTRAINTS: list[tuple[str, str]] = [
         "constraint_entity_key",
         "CREATE CONSTRAINT constraint_entity_key IF NOT EXISTS "
         "FOR (e:Entity) REQUIRE e.uid IS UNIQUE",
+    ),
+    (
+        "constraint_entity_label_label",
+        "CREATE CONSTRAINT constraint_entity_label_label IF NOT EXISTS "
+        "FOR (el:EntityLabel) REQUIRE el.label IS UNIQUE",
     ),
 ]
 
@@ -146,6 +153,11 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "idx_extraction_result_node",
         "CREATE INDEX idx_extraction_result_node_full_id IF NOT EXISTS "
         "FOR (e:ExtractionResult) ON (e.node_full_id)",
+    ),
+    (
+        "idx_model_instance_model_class",
+        "CREATE INDEX idx_model_instance_model_class IF NOT EXISTS "
+        "FOR (mi:ModelInstance) ON (mi.model_class)",
     ),
 ]
 

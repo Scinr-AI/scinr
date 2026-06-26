@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re as _re
 import typing
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -206,6 +208,25 @@ def _collect_all_model_classes(seed_classes: dict[str, type]) -> dict[str, type]
                     queue.append(ref_cls)
 
     return all_models
+
+
+_VALID_REL_TYPE_RE = _re.compile(r'^[A-Z][A-Z0-9_]*$')
+
+
+def _validate_rel_type(rel_type: str, context: str) -> bool:
+    """Return True if rel_type is a valid Neo4j relationship type identifier.
+
+    Valid: SCREAMING_SNAKE_CASE starting with a letter (e.g. HAS_PROCEDURE_TYPE).
+    Logs a warning and returns False if invalid, preventing unsafe Cypher interpolation.
+    """
+    if _VALID_REL_TYPE_RE.match(rel_type):
+        return True
+    log.warning(
+        "ensure_catalog_models: invalid rel_type %r in %s — "
+        "must match [A-Z][A-Z0-9_]*, skipping",
+        rel_type, context,
+    )
+    return False
 
 
 async def _fetch_node_context_with_session(
@@ -487,13 +508,170 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
                     )
                     agg_count += 1
 
+        # Pass A: Enrich ModelField nodes with json_schema_extra metadata
+        entity_label_count = 0
+        instance_key_count = 0
+        for model_name, cls in all_models.items():
+            if not hasattr(cls, "model_fields"):
+                continue
+            for field_name, field_info in cls.model_fields.items():
+                extra = field_info.json_schema_extra or {}
+                if not isinstance(extra, dict):
+                    continue
+                is_instance_key = bool(extra.get("instance_key", False))
+                entity_label = extra.get("entity_label")  # str or None
+                if not is_instance_key and entity_label is None:
+                    continue  # Nothing to enrich
+                await session.run(
+                    """
+                    MERGE (mf:ModelField {name: $field_name, model: $model_name})
+                    SET mf.is_instance_key = $is_instance_key,
+                        mf.entity_label    = $entity_label
+                    """,
+                    field_name=field_name,
+                    model_name=model_name,
+                    is_instance_key=is_instance_key,
+                    entity_label=entity_label,
+                )
+                if is_instance_key:
+                    instance_key_count += 1
+                if entity_label is not None:
+                    entity_label_count += 1
+
+        # Pass B: Create EntityLabel schema nodes and PRODUCES_ENTITY relationships
+        produces_entity_count = 0
+        for model_name, cls in all_models.items():
+            if not hasattr(cls, "model_fields"):
+                continue
+            for field_name, field_info in cls.model_fields.items():
+                extra = field_info.json_schema_extra or {}
+                if not isinstance(extra, dict):
+                    continue
+                entity_label = extra.get("entity_label")
+                if entity_label is None:
+                    continue
+                await session.run(
+                    """
+                    MERGE (el:EntityLabel {label: $entity_label})
+                    WITH el
+                    MATCH (cm:CatalogModel {name: $model_name})
+                    MERGE (cm)-[:PRODUCES_ENTITY {field_name: $field_name}]->(el)
+                    """,
+                    entity_label=entity_label,
+                    model_name=model_name,
+                    field_name=field_name,
+                )
+                produces_entity_count += 1
+
+        # Pass C: Create schema-level EntityLabel→EntityLabel edges from field_relationships
+        field_rel_count = 0
+        for model_name, cls in all_models.items():
+            if not hasattr(cls, "model_fields"):
+                continue
+            for field_name, field_info in cls.model_fields.items():
+                extra = field_info.json_schema_extra or {}
+                if not isinstance(extra, dict):
+                    continue
+                field_rels = extra.get("field_relationships")
+                if not field_rels:
+                    continue
+                source_entity_label = extra.get("entity_label")
+                if source_entity_label is None:
+                    continue  # source field must have entity_label
+                for rel in field_rels:
+                    to_field_name = rel.get("to_field")
+                    rel_type = rel.get("rel_type")
+                    if not to_field_name or not rel_type:
+                        continue
+                    # Resolve entity_label of the to_field on the same model
+                    to_field_info = cls.model_fields.get(to_field_name)
+                    if to_field_info is None:
+                        continue
+                    to_extra = to_field_info.json_schema_extra or {}
+                    if not isinstance(to_extra, dict):
+                        continue
+                    target_entity_label = to_extra.get("entity_label")
+                    if target_entity_label is None:
+                        continue  # to_field must also have entity_label
+                    # Use a parameterised rel_type via apoc or build query dynamically
+                    # Since Neo4j does not support parameterised relationship types, build the query string
+                    if not _validate_rel_type(rel_type, f"{model_name}.{field_name}.field_relationships"):
+                        continue
+                    cypher = f"""
+                    MERGE (el_src:EntityLabel {{label: $source_label}})
+                    MERGE (el_tgt:EntityLabel {{label: $target_label}})
+                    MERGE (el_src)-[r:`{rel_type}` {{via_model: $via_model, from_field: $from_field, to_field: $to_field}}]->(el_tgt)
+                    """
+                    await session.run(
+                        cypher,
+                        source_label=source_entity_label,
+                        target_label=target_entity_label,
+                        via_model=model_name,
+                        from_field=field_name,
+                        to_field=to_field_name,
+                    )
+                    field_rel_count += 1
+
+        # Pass D: Create schema-level CatalogModel→CatalogModel edges from instance_relationships
+        instance_rel_count = 0
+        for model_name, cls in all_models.items():
+            if not hasattr(cls, "model_fields"):
+                continue
+            for field_name, field_info in cls.model_fields.items():
+                extra = field_info.json_schema_extra or {}
+                if not isinstance(extra, dict):
+                    continue
+                instance_rels = extra.get("instance_relationships")
+                if not instance_rels:
+                    continue
+                for rel in instance_rels:
+                    target_model = rel.get("target_model")
+                    join_via = rel.get("join_via", {})
+                    rel_type = rel.get("rel_type")
+                    if not target_model or not rel_type:
+                        continue
+                    if target_model not in all_models:
+                        log.warning(
+                            "ensure_catalog_models: instance_relationship on "
+                            "%s.%s references unknown target_model=%r — skipping",
+                            model_name, field_name, target_model,
+                        )
+                        continue
+                    is_composite = len(join_via) > 1
+                    join_via_json = json.dumps(join_via, sort_keys=True)
+                    # Use dynamic rel_type in query string (not parameterisable in Neo4j)
+                    if not _validate_rel_type(rel_type, f"{model_name}.{field_name}.instance_relationships"):
+                        continue
+                    cypher = f"""
+                    MERGE (src:CatalogModel {{name: $src_name}})
+                    MERGE (tgt:CatalogModel {{name: $tgt_name}})
+                    MERGE (src)-[r:`{rel_type}` {{via_field: $via_field, join_via: $join_via_json}}]->(tgt)
+                    SET r.composite = $is_composite
+                    """
+                    await session.run(
+                        cypher,
+                        src_name=model_name,
+                        tgt_name=target_model,
+                        via_field=field_name,
+                        join_via_json=join_via_json,
+                        is_composite=is_composite,
+                    )
+                    instance_rel_count += 1
+
     log.info(
         "ensure_catalog_models: %d CatalogModel nodes (%d selectable), "
-        "%d HAS_FIELD relationships, %d AGGREGATES relationships created",
+        "%d HAS_FIELD, %d AGGREGATES, %d PRODUCES_ENTITY relationships, "
+        "%d ModelField nodes with entity_label, %d instance_key fields, "
+        "%d field_relationship edges, %d instance_relationship edges",
         len(all_models),
         len(selectable_names),
         field_count,
         agg_count,
+        produces_entity_count,
+        entity_label_count,
+        instance_key_count,
+        field_rel_count,
+        instance_rel_count,
     )
 
 
