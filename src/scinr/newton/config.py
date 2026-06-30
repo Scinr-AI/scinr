@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -36,6 +37,23 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Public type aliases (for IDE autocomplete — no runtime cost)
 # ---------------------------------------------------------------------------
+
+
+class PromptFamily(str, Enum):
+    """Selects which prompt variant family to use for LLM calls.
+
+    GENERIC (default): Simplified, model-agnostic prompts. Work correctly
+        across all LLM families (OpenAI, Kimi, GLM, Claude, Ollama, etc.).
+    CLAUDE: Prompts optimized for Claude/Sonnet. Use XML-structured instructions,
+        multi-step protocols, and internal checklists that leverage Claude's
+        extended reasoning capabilities.
+
+    To add support for a new model family in the future, add a new member here
+    and create the corresponding prompt files (_newmodel.py) in each stage directory.
+    """
+    GENERIC = "generic"
+    CLAUDE = "claude"
+
 
 ThemePath = Literal[
     "default",
@@ -104,6 +122,8 @@ class ScinrConfig:
     neo4j_concurrency: int = 10
     # Logging
     log_level: str = "INFO"
+    # Prompt family
+    prompt_family: PromptFamily = PromptFamily.GENERIC
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +192,8 @@ def configure(
     neo4j_concurrency: int | None = None,
     # Logging
     log_level: str = "INFO",
+    # Prompt family
+    prompt_family: PromptFamily | Literal["generic", "claude"] | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -232,6 +254,14 @@ def configure(
         and entity extraction. Env: NEO4J_CONCURRENCY. Default: 10.
     log_level:
         Logging level string. Default: 'INFO'.
+    prompt_family:
+        Which prompt variant family to use. Accepts a PromptFamily enum member or
+        a plain string: "generic" (default) or "claude".
+        PromptFamily.GENERIC / "generic": simplified, model-agnostic prompts that work
+            across all LLM families (OpenAI, Kimi, GLM, Claude, Ollama, etc.).
+        PromptFamily.CLAUDE / "claude": prompts optimized for Claude/Sonnet with XML
+            instruction structure and extended reasoning protocols.
+        Env: PROMPT_FAMILY (values: "generic", "claude"). Default: "generic".
 
     Returns
     -------
@@ -337,6 +367,27 @@ def configure(
     _neo4j_concurrency_env = os.getenv("NEO4J_CONCURRENCY", "10")
     resolved_neo4j_concurrency = neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
 
+    # ── Prompt family ─────────────────────────────────────────────────────────
+    _env_prompt_family = os.getenv("PROMPT_FAMILY", "generic").lower()
+    if prompt_family is not None:
+        try:
+            resolved_prompt_family = PromptFamily(prompt_family)
+        except ValueError:
+            valid = [m.value for m in PromptFamily]
+            raise ConfigurationError(
+                f"Invalid prompt_family: {prompt_family!r}. "
+                f"Valid values: {valid}"
+            ) from None
+    else:
+        try:
+            resolved_prompt_family = PromptFamily(_env_prompt_family)
+        except ValueError:
+            resolved_prompt_family = PromptFamily.GENERIC
+            log.warning(
+                "Unknown PROMPT_FAMILY env value %r, defaulting to 'generic'.",
+                _env_prompt_family,
+            )
+
     # ── Resolve extra_models_paths ────────────────────────────────────────────
     resolved_extra_models_paths: list[Path] = []
     if extra_models_paths:
@@ -378,6 +429,7 @@ def configure(
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,
         log_level=log_level,
+        prompt_family=resolved_prompt_family,
     )
 
     # ── Post-init: apply converter overrides ──────────────────────────────────
@@ -399,6 +451,12 @@ def configure(
         _reset_async_driver_singleton()
     except Exception:
         pass  # ingest module may not be initialized yet
+
+    try:
+        from scinr.newton.storage.mongodb.client import reset_client
+        reset_client()
+    except Exception:
+        pass  # storage mongodb module may not be initialized yet
 
     log.debug(
         "scinr-ingest configured: storage=%s, llm_concurrency=%d, neo4j_concurrency=%d",
@@ -501,6 +559,15 @@ def get_repair_llm(temperature: float = 0.0):
         return cfg.repair_llm.bind(temperature=temperature)
     except Exception:
         return cfg.repair_llm
+
+
+def get_prompt_family() -> PromptFamily:
+    """Return the configured prompt family (GENERIC or CLAUDE).
+
+    Controls which prompt variant is used for all LLM calls in the pipeline.
+    Set via configure(prompt_family=PromptFamily.CLAUDE) or PROMPT_FAMILY=claude env var.
+    """
+    return get_config().prompt_family
 
 
 def make_system_message(text: str):

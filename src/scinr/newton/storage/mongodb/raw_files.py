@@ -15,7 +15,6 @@ import logging
 from datetime import UTC, datetime
 
 from scinr.newton.storage.base import RawFileRepository
-from scinr.newton.storage.config import RAW_FILES_COLLECTION
 from scinr.newton.storage.mongodb.client import get_db, get_gridfs_bucket
 
 logger = logging.getLogger(__name__)
@@ -61,6 +60,8 @@ class MongoDBRawFileRepository(RawFileRepository):
         """
         bucket = get_gridfs_bucket()
         db = get_db()
+        from scinr.newton.config import get_config
+        cfg = get_config()
 
         # 1. Compute SHA-256 checksum before uploading
         checksum = hashlib.sha256(content).hexdigest()
@@ -82,7 +83,7 @@ class MongoDBRawFileRepository(RawFileRepository):
             "stored_at": datetime.now(UTC),
             "gridfs_id": gridfs_id,
         }
-        result = await db[RAW_FILES_COLLECTION].insert_one(doc)
+        result = await db[cfg.mongodb_raw_files_collection].insert_one(doc)
         raw_file_id = str(result.inserted_id)
 
         logger.debug(

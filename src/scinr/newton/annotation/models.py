@@ -85,8 +85,8 @@ class AnnotationDecision(BaseModel):
         default="low",
         description=(
             "Confidence in the match: high (>= 75% of the model's fields satisfied by the node), "
-            "medium (50-74% of the model's fields satisfied), "
-            "low (< 50% of the model's fields satisfied but still selected as best available option). "
+            "medium (25-74% of the model's fields satisfied), "
+            "low (< 25% of the model's fields satisfied but still selected as best available option). "
             "Always 'low' when matched_model_class is null."
         ),
     )
@@ -124,7 +124,7 @@ class AnnotationDecision(BaseModel):
     propose_new_model: bool = Field(
         default=False,
         description=(
-            "True when no existing catalog model has >= 50% of its own fields satisfied "
+            "True when no existing catalog model has >= 25% of its own fields satisfied "
             "by this node's InfoUnits. Must be True when matched_model_class is null."
         ),
     )

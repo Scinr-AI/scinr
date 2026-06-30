@@ -25,8 +25,6 @@ import logging
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 
-from scinr.newton.storage.config import GRIDFS_BUCKET, MONGODB_DATABASE, MONGODB_URI
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -49,9 +47,23 @@ def get_client() -> AsyncIOMotorClient:
     """
     global _client
     if _client is None:
-        logger.debug("Creating MongoDB Motor client (URI: %s)", MONGODB_URI)
-        _client = AsyncIOMotorClient(MONGODB_URI)
+        from scinr.newton.config import get_config
+        cfg = get_config()
+        logger.debug("Creating MongoDB Motor client (URI: %s)", cfg.mongodb_uri)
+        _client = AsyncIOMotorClient(cfg.mongodb_uri)
     return _client
+
+
+def reset_client() -> None:
+    """Reset the singleton Motor client.
+
+    Forces :func:`get_client` to create a new client on the next call.
+    Must be called whenever the configuration changes (e.g. after
+    :func:`~scinr.newton.config.configure`) so that the new URI and
+    database settings are picked up.
+    """
+    global _client
+    _client = None
 
 
 def get_db():
@@ -60,23 +72,27 @@ def get_db():
     Returns
     -------
     AsyncIOMotorDatabase
-        The Motor database identified by :data:`~storage.config.MONGODB_DATABASE`.
+        The Motor database identified by ``cfg.mongodb_database``.
     """
-    return get_client()[MONGODB_DATABASE]
+    from scinr.newton.config import get_config
+    cfg = get_config()
+    return get_client()[cfg.mongodb_database]
 
 
 def get_gridfs_bucket() -> AsyncIOMotorGridFSBucket:
     """Return the GridFS bucket for binary file storage.
 
-    The bucket name is configured via
-    :data:`~storage.config.GRIDFS_BUCKET` (default ``"raw_binaries"``).
+    The bucket name is read from ``cfg.mongodb_gridfs_bucket``
+    (default ``"raw_binaries"``).
 
     Returns
     -------
     AsyncIOMotorGridFSBucket
         GridFS bucket ready for upload/download operations.
     """
-    return AsyncIOMotorGridFSBucket(get_db(), bucket_name=GRIDFS_BUCKET)
+    from scinr.newton.config import get_config
+    cfg = get_config()
+    return AsyncIOMotorGridFSBucket(get_db(), bucket_name=cfg.mongodb_gridfs_bucket)
 
 
 # ---------------------------------------------------------------------------
@@ -94,22 +110,23 @@ async def ensure_indexes() -> None:
     Should be called once at application startup to guarantee optimal query
     performance from the first request.
     """
-    from scinr.newton.storage.config import PAGES_COLLECTION, RAW_FILES_COLLECTION
+    from scinr.newton.config import get_config
+    cfg = get_config()
 
     db = get_db()
 
     # converted_pages: primary lookup by raw_file_id + page_index ordering
-    await db[PAGES_COLLECTION].create_index(
+    await db[cfg.mongodb_pages_collection].create_index(
         [("raw_file_id", 1), ("page_index", 1)],
         name="pages_by_raw_file_and_index",
     )
     # converted_pages: secondary lookup by filename + folder_path
-    await db[PAGES_COLLECTION].create_index(
+    await db[cfg.mongodb_pages_collection].create_index(
         [("filename", 1), ("folder_path", 1)],
         name="pages_by_filename_folder",
     )
     # raw_files: deduplication by SHA-256 checksum
-    await db[RAW_FILES_COLLECTION].create_index(
+    await db[cfg.mongodb_raw_files_collection].create_index(
         [("checksum_sha256", 1)],
         name="raw_files_by_checksum",
     )

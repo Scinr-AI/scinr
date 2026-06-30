@@ -12,7 +12,7 @@ Usage:
     from utils.theme_registry import get_theme_registry
     registry = get_theme_registry()
     theme = registry.find_best_theme("structural_specs")
-    catalog_xml = registry.build_catalog_block(theme)
+    catalog_block = registry.build_catalog_block(theme)
 
 Custom user models:
     Pass extra_models_paths to configure() to scan additional directories:
@@ -595,52 +595,41 @@ class ThemeRegistry:
 
     def build_catalog_block(self, theme: ThemeNode) -> str:
         """
-        Build the XML <model_catalog> block to inject into LLM decision prompts.
+        Build the plain-text model catalog block to inject into LLM decision prompts.
 
-        Format mirrors the existing get_catalog_prompt_block() output:
-            <model_catalog>
-              <model name="ClassName">
-                <description>First line of class docstring</description>
-                <fields>field1, field2, ...</fields>
-              </model>
-              ...
-            </model_catalog>
+        Format:
+            Available annotation models:
 
-        For list_container models (exactly one field whose annotation is list[SomePydanticModel]):
-          - The <model> tag receives type="list_container"
-          - An <item_schema> block describes the child model:
-            - If the child is in the theme's selectable_names: <item_schema ref="ChildClassName" />
-            - Otherwise: full expansion with docstring summary + fields of the child
+            1. ClassName — First line of docstring
+               Fields: field1: str, field2: int | None
+
+            2. ContainerClass [list container] — Description
+               Fields: items: list[ItemClass]
+               Each item (ItemClass): field1: str, field2: str
+
+        This format is readable by all LLM families (Claude, OpenAI, Kimi, GLM, etc.)
+        and replaces the previous XML <model_catalog> format.
         """
-        selectable_names = {cls.__name__ for cls in theme.models}
-        lines = ["<model_catalog>"]
-        for cls in theme.models:
+        lines = ["Available annotation models:", ""]
+        for idx, cls in enumerate(theme.models, start=1):
             if self._is_list_container(cls):
                 item_cls = self._get_list_item_class(cls)
                 summary = self._get_docstring_summary(cls)
                 fields = self._get_field_names(cls)
-                lines.append(f'  <model name="{cls.__name__}" type="list_container">')
-                lines.append(f"    <description>{summary}</description>")
-                lines.append(f"    <fields>{', '.join(fields)}</fields>")
+                lines.append(f"{idx}. {cls.__name__} [list container] — {summary}")
+                lines.append(f"   Fields: {', '.join(fields)}")
                 if item_cls is not None:
-                    if item_cls.__name__ in selectable_names:
-                        lines.append(f'    <item_schema ref="{item_cls.__name__}" />')
-                    else:
-                        item_summary = self._get_docstring_summary(item_cls)
-                        item_fields = self._get_field_names(item_cls)
-                        lines.append(f'    <item_schema name="{item_cls.__name__}">')
-                        lines.append(f"      <description>{item_summary}</description>")
-                        lines.append(f"      <fields>{', '.join(item_fields)}</fields>")
-                        lines.append("    </item_schema>")
-                lines.append("  </model>")
+                    item_fields = self._get_field_names(item_cls)
+                    lines.append(f"   Each item ({item_cls.__name__}): {', '.join(item_fields)}")
             else:
                 summary = self._get_docstring_summary(cls)
                 fields = self._get_field_names(cls)
-                lines.append(f'  <model name="{cls.__name__}">')
-                lines.append(f"    <description>{summary}</description>")
-                lines.append(f"    <fields>{', '.join(fields)}</fields>")
-                lines.append("  </model>")
-        lines.append("</model_catalog>")
+                lines.append(f"{idx}. {cls.__name__} — {summary}")
+                lines.append(f"   Fields: {', '.join(fields)}")
+            lines.append("")  # blank line between models
+        # Remove trailing blank line if present
+        if lines and lines[-1] == "":
+            lines.pop()
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

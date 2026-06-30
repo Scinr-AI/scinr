@@ -13,7 +13,6 @@ import logging
 from datetime import UTC, datetime
 
 from scinr.newton.storage.base import PageRepository
-from scinr.newton.storage.config import PAGES_COLLECTION
 from scinr.newton.storage.models import ConvertedPageRecord
 from scinr.newton.storage.mongodb.client import get_db
 
@@ -57,6 +56,8 @@ class MongoDBPageRepository(PageRepository):
             The ``page_id``: ``str(ObjectId)`` of the newly inserted document.
         """
         db = get_db()
+        from scinr.newton.config import get_config
+        cfg = get_config()
         doc = {
             "raw_file_id": raw_file_id,
             "filename": filename,
@@ -65,7 +66,7 @@ class MongoDBPageRepository(PageRepository):
             "markdown": markdown,
             "converted_at": datetime.now(UTC),
         }
-        result = await db[PAGES_COLLECTION].insert_one(doc)
+        result = await db[cfg.mongodb_pages_collection].insert_one(doc)
         page_id = str(result.inserted_id)
 
         logger.debug(
@@ -92,7 +93,9 @@ class MongoDBPageRepository(PageRepository):
             if no pages have been stored for this ``raw_file_id``.
         """
         db = get_db()
-        cursor = db[PAGES_COLLECTION].find(
+        from scinr.newton.config import get_config
+        cfg = get_config()
+        cursor = db[cfg.mongodb_pages_collection].find(
             {"raw_file_id": raw_file_id},
             sort=[("page_index", 1)],
         )

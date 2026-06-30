@@ -27,57 +27,11 @@ class StrictModel(BaseModel):
 
 class NodeRole(str, Enum):
     """
-    Assign the most precise role using the following decision tree (evaluate top-to-bottom,
-    stop at the first match):
-
-      1. Is supplementary, ancillary, or reference material to the main document body?
-         This includes sections explicitly or implicitly labelled as Annex, Appendix,
-         Attachment, Supplement, Addendum, or any equivalent term in any language.
-         These sections typically appear after the main numbered content and contain
-         supporting material referenced from the main body.
-         → appendix
-
-      2. Has a rows-and-columns tabular layout?
-         → table
-
-      3. Is a group of named data fields (form-like structure)?
-         → field_group  (numbering is irrelevant for this category)
-
-      4. Carries an ordered identifier traceable as a sequence across the document?
-         Identifiers may be numeric, alphabetic, Roman numeral, or any mixed combination
-         (e.g. "1.1", "A.b", "I.iv", "A.b.3.I").
-         → section  (if top-level in the document hierarchy)
-         → subsection  (if nested under another section or subsection)
-
-      5. Is top-level in the document hierarchy and has NO identifier?
-         → section
-
-      6. Everything else — unnumbered, nested, prose continuation, or any block that does
-         not match steps 1–5:
-         → freeform_block
-
-    Role definitions:
-      section        — Top-level heading. May carry an ordered identifier or be unnumbered
-                       when it is genuinely the highest-level structural division.
-      subsection     — Nested heading that carries an ordered identifier (numeric, alphabetic,
-                       Roman numeral, or mixed). A heading WITHOUT any ordered identifier is
-                       NEVER a subsection — assign freeform_block instead.
-      table          — Tabular layout with rows and columns.
-      appendix       — Any supplementary, ancillary, or reference section that is not
-                       part of the main document body. Covers sections labelled as
-                       Annex, Appendix, Attachment, Supplement, Addendum, or equivalent
-                       terms in any language. May be numbered (Annex A, Appendix 1) or
-                       unnumbered. Typically appears after the main content.
-      field_group    — Group of named data fields (form-like structure). Numbering is
-                       irrelevant — a form block is always field_group regardless of whether
-                       it has an identifier.
-       freeform_block — Catch-all for any block that does not qualify as section, subsection,
-                        table, appendix, or field_group. Typical cases: unnumbered
-                        headings nested inside a section, prose continuation blocks, mixed
-                        content without a clear structural role.
-       row            — A single data row within a tabular (CSV/XLSX) Table node. Used
-                        exclusively by the tabular ingestion pipeline; never assigned by
-                        the LLM document-extraction pipeline.
+    Structural role of a document node. Assign using the decision tree in the extraction prompt
+    (evaluate top-to-bottom, stop at first match):
+    appendix → table → field_group → section/subsection (ordered identifier present)
+    → section (top-level, no identifier) → freeform_block (catch-all).
+    Row is reserved for the tabular ingestion pipeline and is never assigned by the extraction LLM.
     """
 
     SECTION = "section"
@@ -118,38 +72,11 @@ class InfoUnit(StrictModel):
     )
     description: str = Field(
         description=(
-            "Comprehensive technical note capturing ALL semantically significant details "
-            "expressed in this InfoUnit. This field is the sole representation of the "
-            "concept available to downstream agents — no access to the original document "
-            "text exists at that stage.\n\n"
-            "CONTENT REQUIREMENTS — the description MUST preserve:\n"
-            "  • All quantitative values: numbers, percentages, concentrations, temperatures,\n"
-            "    ranges, tolerances, limits, thresholds (e.g. '2–8°C', '≤0.1%', '24 months').\n"
-            "  • All named entities: substance names, method names, standard references,\n"
-            "    regulatory codes, equipment identifiers, personnel roles.\n"
-            "  • All conditions and qualifiers: 'only if', 'unless', 'provided that',\n"
-            "    'when stored correctly', 'subject to ongoing litigation'.\n"
-            "  • All restrictions and prohibitions: 'do not freeze', 'must not exceed',\n"
-            "    'rejected without review'.\n"
-            "  • All format specifications, identifier patterns, and enumerated lists.\n\n"
-            "WRITING STYLE:\n"
-            "  • Synthesise — do NOT copy the source text verbatim sentence-by-sentence.\n"
-            "  • Do NOT reduce to a one-line topic label (e.g. 'Storage requirements').\n"
-            "  • Write as a self-contained technical note: a reader with no access to the\n"
-            "    source document must be able to extract precise structured data from this\n"
-            "    description alone.\n"
-            "  • Prefer active, declarative sentences. Preserve all original numeric\n"
-            "    values and units exactly as they appear in the source.\n\n"
-            "GROUNDING CONSTRAINT:\n"
-            "  • Include ONLY information present in CURRENT_PAGE.\n"
-            "  • Do NOT infer, extrapolate, or add background knowledge.\n"
-            "  • If the source text is ambiguous, reflect the ambiguity — do not resolve it.\n\n"
-            "BAD (too superficial): 'Storage requirements for the product.'\n"
-            "BAD (verbatim copy): 'The product must be stored at 2°C to 8°C, protected "
-            "from light and moisture. Do not freeze. Shelf life is 24 months when stored correctly.'\n"
-            "GOOD (synthesised, detail-preserving): 'The product requires refrigerated storage "
-            "at 2–8°C, protected from light and moisture; freezing is prohibited. Shelf life "
-            "is 24 months under these conditions.'"
+            "Self-contained technical note preserving all quantitative values, named entities, "
+            "conditions, restrictions, and qualifiers from the source passage. Written as "
+            "synthesised prose — not a verbatim copy and not a one-line topic label. "
+            "Grounded exclusively in CURRENT_PAGE content. "
+            "Downstream agents access no other representation of this content."
         ),
     )
 
@@ -167,29 +94,13 @@ class StructureNode(StrictModel):
 
     node_id: str = Field(
         description=(
-            "Unique identifier for this node. Two formats depending on the heading:\n\n"
-            "FORMAT A — Numeric/code heading (has a section number, supplement letter, or table number):\n"
-            "  Extract the code directly. Replace dots and spaces with underscores. Lowercase.\n"
-            "  Drop the descriptive title entirely — the code alone is the id.\n"
-            "  Examples:\n"
-            "    '1 Introduction'                       → 1\n"
-            "    '2.1 Scope'                            → 2_1\n"
-            "    'Supplement A'                          → supplement_a\n"
-            "    'Table 1 – Comparability'               → table_1\n"
-            "    'Section 1 – Introduction'              → section_1\n\n"
-            "FORMAT B — Unnumbered heading (no numeric or letter code in the title):\n"
-            "  Use: {appearance_order}-{1-to-3-word-slug} where slug is lowercase words from the title.\n"
-            "  Examples:\n"
-            "    'General Information' (order=1)         → 1-general\n"
-            "    'Purification and Modification' (order=3)→ 3-purification\n"
-            "    'Manufacturing Process' (order=2)       → 2-manufacturing-process\n\n"
-            "Rules:\n"
-            "  - Allowed characters for FORMAT A: [a-z0-9_] only (underscores).\n"
-            "  - Allowed characters for FORMAT B: [a-z0-9-] only (hyphens as separator).\n"
-            "  - Must be unique across the entire output tree.\n"
-            "  - ORPHANED numbered subsections MUST use FORMAT A with the full numeric path\n"
-            "    (e.g. '2.1.3 Background' → 2_1_3). Post-processing uses this prefix\n"
-            "    for re-nesting. FORMAT B orphans rely solely on parent_id."
+            "Unique identifier for this node.\n"
+            "FORMAT A (numbered/coded heading): extract the numeric or letter code, replace dots "
+            "and spaces with underscores, lowercase — e.g. '2.1 Scope' → '2_1', "
+            "'Supplement A' → 'supplement_a'. FORMAT B (unnumbered heading): "
+            "'{appearance_order}-{slug}' where slug is 1–3 lowercase words from the title — "
+            "e.g. appearance_order=1, title 'General Information' → '1-general'. "
+            "Must be unique across the full output tree. See extraction prompt for full FORMAT A/B rules."
         ),
     )
     title: str | None = Field(
@@ -202,32 +113,24 @@ class StructureNode(StrictModel):
     )
     role: NodeRole = Field(
         description=(
-            "Structural role of this node. Must be one of: "
+            "Structural role of this node. One of: "
             "section, subsection, table, freeform_block, field_group, appendix. "
-            "See NodeRole docstring for the full role assignment guide."
+            "Apply the decision tree from the extraction prompt to assign this field."
         ),
     )
     appearance_order: int = Field(
         description=(
-            "1-based integer indicating the sequential position of this node among its siblings at "
-            "the same hierarchical level.\n"
-            "  - Top-level nodes: if headings are numbered (e.g. '3.', '4.'), use the numeric "
-            "value of the section number as the integer (e.g. '3.' → 3, '4.' → 4, '10.' → 10). "
-            "Otherwise continue from the last top-level section visible on the previous page; "
-            "if none visible, start at 1.\n"
-            "  - Child nodes: restart at 1 within each parent independently."
+            "1-based position among siblings at the same hierarchy level. "
+            "For numbered top-level headings use the numeric section value (e.g. '3.' → 3). "
+            "Child nodes restart at 1 within each parent independently."
         ),
     )
     parent_id: str | None = Field(
         default=None,
         description=(
-            "node_id of this node's parent when the parent is not visible on the current page. "
-            "Set when: the parent's node_id is listed in the active hierarchy AND the parent "
-            "heading is not present on the current page. "
-            "Must be an exact copy of a node_id from the active hierarchy. "
-            "Set to null when: the parent is already visible on the current page (node is nested "
-            "normally inside it), or the parent cannot be found in the active hierarchy. "
-            "Null is always safer than an incorrect parent_id."
+            "node_id of this node's parent when the parent heading is not visible on CURRENT_PAGE "
+            "but appears in active_hierarchy. Set to null when the parent is already visible on "
+            "this page or cannot be identified. Null is always safer than an incorrect parent_id."
         ),
     )
     theme: str = "default"
@@ -241,9 +144,14 @@ class StructureNode(StrictModel):
     info_units: list[InfoUnit] = Field(
         default_factory=list,
         description=(
-            "Ordered list of semantic information units extracted from the body content "
-            "of this structural node. Create one InfoUnit per semantically distinct concept "
-            "found in this node's body text. Do NOT create InfoUnits for the heading itself."
+            "Ordered list of semantic information units extracted from this structural node. "
+            "When the node's title carries semantic content — entity names, numeric values, "
+            "conditions, or qualifiers — represent it as the first InfoUnit (order=0): write a "
+            "description that synthesises what the title communicates. Body-text InfoUnits follow "
+            "at order=1 and above. Omit the heading InfoUnit only for pure structural labels "
+            "such as 'Introduction', 'Scope', or 'Overview' with no independently useful content. "
+            "InfoUnits are the sole content representation available to downstream extraction "
+            "agents — the original title and body text are not re-accessed after this stage."
         ),
     )
     children: list[StructureNode] = Field(
