@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from neo4j import AsyncDriver
 from pydantic import BaseModel
 
+from scinr.newton.entity_extraction.schema_composer import _to_snake_case
 from scinr.newton.tabular.reader import row_to_markdown
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.uid import make_uid
@@ -65,7 +66,6 @@ async def write_tabular_subgraph(
     from scinr.newton.annotation.neo4j_ops import write_annotation
     from scinr.newton.entity_extraction.model_resolver import resolve_model_class
     from scinr.newton.entity_extraction.schema_composer import (
-        _to_snake_case,
         compose_extraction_schema,
     )
 
@@ -293,53 +293,117 @@ async def _write_row_batch(
             await tx.rollback()
             raise
 
-    # Write ExtractionResult per row (parallelised, max 10 concurrent writes)
+    # ── Phase 1: Instantiate composite models for all rows ────────────────────
+    composite_results: list[tuple[int, list[str], BaseModel | None, str]] = []
+
+    async def _instantiate_row(i: int, row_values: list[str]) -> tuple[int, list[str], BaseModel | None, str]:
+        row_index = batch_start_index + i
+        row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
+        row_dict = _build_row_dict(headers, row_values)
+        extraction_uid = make_uid(
+            "tabular_extraction",
+            row_composite_id,
+            decision.matched_model_class or "raw",
+        )
+
+        if (
+            composite_cls is not None
+            and primary_cls is not None
+            and primary_field_name is not None
+        ):
+            composite_instance = _instantiate_composite_from_row(
+                primary_cls=primary_cls,
+                composite_cls=composite_cls,
+                primary_field_name=primary_field_name,
+                mapping=mapping,
+                row_dict=row_dict,
+                comp_cls_map=comp_cls_map,
+            )
+            return (i, row_values, composite_instance, extraction_uid)
+        else:
+            return (i, row_values, None, extraction_uid)
+
+    instantiate_tasks = [
+        _instantiate_row(i, row_values)
+        for i, row_values in enumerate(rows_batch)
+    ]
+    composite_results = await asyncio.gather(*instantiate_tasks)
+
+    # ── Phase 2: Normalization hook (batch) ──────────────────────────────────
+    if primary_cls is not None:
+        from scinr.newton.config import get_config
+        from scinr.newton.tabular.normalization.engine import NormalizationEngine
+
+        cfg = get_config()
+        normalization_instances: list[tuple[type[BaseModel], BaseModel]] = []
+
+        for _i, _row_values, composite_instance, _extraction_uid in composite_results:
+            if composite_instance is not None:
+                # Extract primary instance from composite for normalization
+                primary_instance = getattr(composite_instance, primary_field_name, None)
+                if primary_instance is not None:
+                    normalization_instances.append((primary_cls, primary_instance))
+
+                # Extract complementary instances for normalization too
+                for class_name in comp_class_names:
+                    comp_cls = comp_cls_map.get(class_name)
+                    if comp_cls is None:
+                        continue
+                    snake_name = _to_snake_case(class_name)
+                    comp_instance = getattr(composite_instance, snake_name, None)
+                    if comp_instance is not None:
+                        normalization_instances.append((comp_cls, comp_instance))
+
+        if normalization_instances and cfg.normalization_enabled:
+            # Build normalization engine
+            norm_llm = cfg.normalization_llm or cfg.llm
+            engine = NormalizationEngine(
+                llm=norm_llm,
+                batch_size=cfg.normalization_batch_size,
+            )
+            try:
+                normalized = await engine.normalize_instances(normalization_instances)
+                logger.debug(
+                    "tabular: normalized %d instances", len(normalized)
+                )
+            except Exception as _exc:
+                logger.error(
+                    "tabular: normalization batch failed: %s", _exc, exc_info=True
+                )
+
+    # ── Phase 3: Write to Neo4j (parallel) ────────────────────────────────────
     sem = asyncio.Semaphore(_PARALLEL_ROW_WRITES)
 
-    async def _write_single_row(i: int, row_values: list[str]) -> None:
+    async def _write_single_row(
+        i: int,
+        row_values: list[str],
+        composite_instance: BaseModel | None,
+        extraction_uid: str,
+    ) -> None:
         async with sem:
             row_index = batch_start_index + i
             row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
-            row_dict = _build_row_dict(headers, row_values)
-            extraction_uid = make_uid(
-                "tabular_extraction",
-                row_composite_id,
-                decision.matched_model_class or "raw",
-            )
 
-            if (
-                composite_cls is not None
-                and primary_cls is not None
-                and primary_field_name is not None
-            ):
-                # Build composite instance from row data + mapping
-                composite_instance = _instantiate_composite_from_row(
-                    primary_cls=primary_cls,
-                    composite_cls=composite_cls,
-                    primary_field_name=primary_field_name,
-                    mapping=mapping,
-                    row_dict=row_dict,
-                    comp_cls_map=comp_cls_map,
-                )
-                if composite_instance is not None:
-                    try:
-                        await write_extraction_subgraph(
-                            driver=driver,
-                            node_full_id=row_composite_id,
-                            composite_instance=composite_instance,
-                            primary_model_class=decision.matched_model_class,
-                            complementary_model_classes=comp_class_names,
-                            document_name=document_name,
-                            extraction_uid=extraction_uid,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "tabular: write_extraction_subgraph failed for %s: %s",
-                            row_composite_id,
-                            exc,
-                        )
+            if composite_instance is not None:
+                try:
+                    await write_extraction_subgraph(
+                        driver=driver,
+                        node_full_id=row_composite_id,
+                        composite_instance=composite_instance,
+                        primary_model_class=decision.matched_model_class,
+                        complementary_model_classes=comp_class_names,
+                        document_name=document_name,
+                        extraction_uid=extraction_uid,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "tabular: write_extraction_subgraph failed for %s: %s",
+                        row_composite_id,
+                        exc,
+                    )
             else:
                 # No-model fallback: store raw row data as properties
+                row_dict = _build_row_dict(headers, row_values)
                 try:
                     await _write_raw_row_extraction(
                         driver, row_composite_id, row_dict, document_name, extraction_uid
@@ -352,8 +416,8 @@ async def _write_row_batch(
                     )
 
     await asyncio.gather(*[
-        _write_single_row(i, row_values)
-        for i, row_values in enumerate(rows_batch)
+        _write_single_row(i, row_values, composite_instance, extraction_uid)
+        for i, row_values, composite_instance, extraction_uid in composite_results
     ])
 
 
@@ -387,8 +451,6 @@ def _instantiate_composite_from_row(
 
     Empty values are skipped (model uses its own defaults).
     """
-    from scinr.newton.entity_extraction.schema_composer import _to_snake_case
-
     comp_cls_map = comp_cls_map or {}
     primary_field_set = set(primary_cls.model_fields.keys())
     primary_kwargs: dict[str, str] = {}

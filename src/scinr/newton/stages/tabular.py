@@ -111,11 +111,22 @@ async def run_tabular_pipeline(
         setup_schema(driver)
 
         # Fix: ensure_catalog_models and ensure_theme_structure are async and need AsyncDriver
+        logger.info("Getting async neo4j driver")
+        
         async_driver = get_async_driver()
+        
+        logger.info("Ensuring catalog models are loaded")
+        
         await ensure_catalog_models(async_driver)
+        
+        logger.info("Ensuring themes are loaded")
+        
+    
         await ensure_theme_structure(async_driver, theme_registry)
+        logger.info("Setup of theme and catalog complete")
 
         with driver.session() as session:
+            logger.info("Verifying previous documents")
             if update_mode:
                 result = session.run(
                     "MATCH (d:Document {latest: true}) WHERE d.path IN $paths "
@@ -123,6 +134,7 @@ async def run_tabular_pipeline(
                     paths=all_paths,
                 )
             else:
+                
                 result = session.run(
                     "MATCH (d:Document) WHERE d.path IN $paths "
                     "RETURN max(d.version) AS max_version",
@@ -131,6 +143,8 @@ async def run_tabular_pipeline(
             record = result.single()
             max_version = record["max_version"] if record else None
             resolved_version = max_version if (update_mode and max_version is not None) else ((max_version + 1) if max_version is not None else 1)
+            logger.info("Max version of ingested document selected")
+            
 
         logger.info("run_tabular_pipeline: batch version=%d (update_mode=%s)", resolved_version, update_mode)
 

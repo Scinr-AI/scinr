@@ -124,6 +124,10 @@ class ScinrConfig:
     log_level: str = "INFO"
     # Prompt family
     prompt_family: PromptFamily = PromptFamily.GENERIC
+    # Normalization
+    normalization_enabled: bool = False
+    normalization_batch_size: int = 5
+    normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +198,10 @@ def configure(
     log_level: str = "INFO",
     # Prompt family
     prompt_family: PromptFamily | Literal["generic", "claude"] | None = None,
+    # Normalization
+    normalization_enabled: bool | None = None,
+    normalization_batch_size: int | None = None,
+    normalization_llm: Any | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -262,6 +270,17 @@ def configure(
         PromptFamily.CLAUDE / "claude": prompts optimized for Claude/Sonnet with XML
             instruction structure and extended reasoning protocols.
         Env: PROMPT_FAMILY (values: "generic", "claude"). Default: "generic".
+    normalization_enabled:
+        Enable post-extraction normalization for tabular pipeline.
+        When enabled, fields marked with ``normalization_model: True`` in their
+        ``json_schema_extra`` are normalized via LLM structured output before
+        writing to Neo4j. Env: NORMALIZATION_ENABLED. Default: False.
+    normalization_batch_size:
+        Maximum number of normalization entries per LLM call batch.
+        Env: NORMALIZATION_BATCH_SIZE. Default: 5.
+    normalization_llm:
+        Dedicated LangChain BaseChatModel for normalization calls.
+        Falls back to the main ``llm`` if None.
 
     Returns
     -------
@@ -388,6 +407,19 @@ def configure(
                 _env_prompt_family,
             )
 
+    # ── Normalization ─────────────────────────────────────────────────────────
+    resolved_normalization_enabled = (
+        normalization_enabled
+        if normalization_enabled is not None
+        else os.getenv("NORMALIZATION_ENABLED", "false").lower() == "true"
+    )
+    resolved_normalization_batch_size = (
+        normalization_batch_size
+        if normalization_batch_size is not None
+        else int(os.getenv("NORMALIZATION_BATCH_SIZE", "5"))
+    )
+    resolved_normalization_llm = normalization_llm  # Can be None — engine uses main llm as fallback
+
     # ── Resolve extra_models_paths ────────────────────────────────────────────
     resolved_extra_models_paths: list[Path] = []
     if extra_models_paths:
@@ -430,6 +462,9 @@ def configure(
         neo4j_concurrency=resolved_neo4j_concurrency,
         log_level=log_level,
         prompt_family=resolved_prompt_family,
+        normalization_enabled=resolved_normalization_enabled,
+        normalization_batch_size=resolved_normalization_batch_size,
+        normalization_llm=resolved_normalization_llm,
     )
 
     # ── Post-init: apply converter overrides ──────────────────────────────────

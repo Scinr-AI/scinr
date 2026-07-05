@@ -31,6 +31,7 @@ from scinr.newton.stages import (
     run_preprocess,
     run_tabular_pipeline,
 )
+from scinr.newton.tabular.normalization import NormalizationEngine
 
 __version__ = "0.2.0"
 
@@ -62,6 +63,8 @@ __all__ = [
     "run_annotation",
     "run_entity_extraction",
     "run_tabular_pipeline",
+    # Normalization
+    "NormalizationEngine",
     # Version
     "__version__",
 ]
