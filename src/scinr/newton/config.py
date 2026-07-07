@@ -47,12 +47,17 @@ class PromptFamily(str, Enum):
     CLAUDE: Prompts optimized for Claude/Sonnet. Use XML-structured instructions,
         multi-step protocols, and internal checklists that leverage Claude's
         extended reasoning capabilities.
+    GPT_REASONING: Prompts for OpenAI reasoning models (GPT-5.5, o3, o4-mini).
+        Use Markdown section headers and goal-based language. No step-by-step
+        protocols, no auto-checklists, no XML instruction wrappers. Use GENERIC
+        for non-reasoning GPT models (GPT-4o, GPT-4.1, GPT-4.5).
 
     To add support for a new model family in the future, add a new member here
     and create the corresponding prompt files (_newmodel.py) in each stage directory.
     """
-    GENERIC = "generic"
-    CLAUDE = "claude"
+    GENERIC       = "generic"        # default — model-agnostic, all LLM families
+    CLAUDE        = "claude"         # XML-structured, extended reasoning protocols
+    GPT_REASONING = "gpt_reasoning"  # OpenAI reasoning models (GPT-5.5, o3, o4-mini) — goal-based Markdown, no CoT elicitation; use GENERIC for non-reasoning GPT models
 
 
 ThemePath = Literal[
@@ -193,7 +198,7 @@ def configure(
     # Logging
     log_level: str = "INFO",
     # Prompt family
-    prompt_family: PromptFamily | Literal["generic", "claude"] | None = None,
+    prompt_family: PromptFamily | Literal["generic", "claude", "gpt_reasoning"] | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -256,12 +261,15 @@ def configure(
         Logging level string. Default: 'INFO'.
     prompt_family:
         Which prompt variant family to use. Accepts a PromptFamily enum member or
-        a plain string: "generic" (default) or "claude".
+        a plain string: "generic" (default), "claude", or "gpt_reasoning".
         PromptFamily.GENERIC / "generic": simplified, model-agnostic prompts that work
             across all LLM families (OpenAI, Kimi, GLM, Claude, Ollama, etc.).
         PromptFamily.CLAUDE / "claude": prompts optimized for Claude/Sonnet with XML
             instruction structure and extended reasoning protocols.
-        Env: PROMPT_FAMILY (values: "generic", "claude"). Default: "generic".
+        PromptFamily.GPT_REASONING / "gpt_reasoning": prompts for OpenAI reasoning
+            models (GPT-5.5, o3, o4-mini) with Markdown section headers and
+            goal-based language. Use GENERIC for non-reasoning GPT models.
+        Env: PROMPT_FAMILY (values: "generic", "claude", "gpt_reasoning"). Default: "generic".
 
     Returns
     -------
@@ -562,7 +570,7 @@ def get_repair_llm(temperature: float = 0.0):
 
 
 def get_prompt_family() -> PromptFamily:
-    """Return the configured prompt family (GENERIC or CLAUDE).
+    """Return the configured prompt family (GENERIC, CLAUDE, or GPT_REASONING).
 
     Controls which prompt variant is used for all LLM calls in the pipeline.
     Set via configure(prompt_family=PromptFamily.CLAUDE) or PROMPT_FAMILY=claude env var.

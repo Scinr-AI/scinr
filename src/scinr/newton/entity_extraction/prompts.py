@@ -3,7 +3,7 @@ entity_extraction/prompts.py — LLM prompt dispatcher and shared utilities
 for the entity extraction stage.
 
 Shared utility functions (_build_schema_description, _has_complementary_fields,
-build_extraction_human_message, etc.) live here and are imported by both
+build_extraction_human_message, etc.) live here and are imported by all
 family-specific prompt modules.
 
 build_extraction_system_prompt() dispatches to the correct variant based on
@@ -41,6 +41,8 @@ def build_extraction_system_prompt(composite_schema: type) -> str:
     family = get_prompt_family()
     if family == PromptFamily.CLAUDE:
         from scinr.newton.entity_extraction import prompts_claude as m
+    elif family == PromptFamily.GPT_REASONING:
+        from scinr.newton.entity_extraction import prompts_gpt_reasoning as m
     else:
         from scinr.newton.entity_extraction import prompts_generic as m
     return m.build_extraction_system_prompt(composite_schema)
@@ -48,9 +50,22 @@ def build_extraction_system_prompt(composite_schema: type) -> str:
 
 # ── Shared: human message builder ─────────────────────────────────────────────
 
-def build_extraction_human_message(info_units: list[dict]) -> str:
+def build_extraction_human_message(
+    info_units: list[dict],
+    node_id: str | None = None,
+    node_title: str | None = None,
+) -> str:
     """Build the human message containing the ordered InfoUnit content."""
-    lines = ["<document_content>"]
+    lines = []
+    if node_id or node_title:
+        lines.append("<structure_node>")
+        if node_id:
+            lines.append(f"  <id>{node_id}</id>")
+        if node_title:
+            lines.append(f"  <title>{node_title}</title>")
+        lines.append("</structure_node>")
+        lines.append("")
+    lines.append("<document_content>")
     for iu in info_units:
         order = iu.get("order", "?")
         title = iu.get("title") or ""
