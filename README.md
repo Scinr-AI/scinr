@@ -12,7 +12,7 @@ Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a com
 
 ## About Scinr
 
-SCINR is the first AI-native supply chain autonomous orchestration platform purpose-built for the life sciences industry. It embeds AI at every step of the supply chain — enabling master data orchestration, continuous planning, and self-healing resiliency — to help pharmaceutical and biotech companies prevent medicine shortages, accelerate time-to-market, and maintain full regulatory compliance. Learn more at [scinr.com](https://www.scinr.com/).
+SCINR is the first AI-native supply chain autonomous orchestration platform purpose-built for the life sciences and multiple regulated industries. It embeds AI at every step of the supply chain — enabling master data orchestration, continuous planning, and self-healing resiliency — to help pharmaceutical and biotech companies prevent medicine shortages, accelerate time-to-market, and maintain full regulatory compliance. Learn more at [scinr.com](https://www.scinr.com/).
 
 `scinr` is the open library layer of the Newton platform, providing AI-driven extraction of structured knowledge from complex biomedical and supply chain documents. Its `newton` module is the document ingestion foundation.
 
