@@ -19,7 +19,7 @@ class ThemeClassification(BaseModel):
         description=(
             "The path of the most specific matching theme from the available themes list. "
             "Must exactly match one of the theme paths shown in the prompt "
-            "(e.g. 'pharmaceutical', 'structural_specs', 'default'). "
+            "(e.g. 'quality_control', 'legal_clauses', 'default'). "
             "Use 'default' if no specific theme clearly applies."
         )
     )
@@ -140,7 +140,7 @@ class AnnotationDecision(BaseModel):
         default=None,
         description=(
             "If matched_model_class is null, the proposed Python class name for a new model "
-            "(e.g. 'BioinformaticsPipelineSection'). Must be null if matched_model_class is not null."
+            "(e.g. 'MaintenanceScheduleEntry', 'ContractClauseRecord'). Must be null if matched_model_class is not null."
         ),
     )
     proposed_schema_fields: list[ProposedField] = Field(

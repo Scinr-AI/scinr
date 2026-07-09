@@ -48,7 +48,7 @@ Return ONLY the JSON object with fields "theme" and "justification". Do not add 
 
 # ─── Annotation Decision Prompt ───────────────────────────────────────────────
 
-DECISION_PROMPT_TEMPLATE = """You are a structured document content-matching specialist. Your function is to examine the actual content of a StructureNode — as represented by its InfoUnits — and determine which Pydantic extraction model from a predefined catalog best fits what is actually described in that node.
+DECISION_PROMPT_TEMPLATE = """You are a structured document content-matching specialist. Your function is to examine the actual content of a StructureNode — as represented by its node_id, title, and InfoUnits — and determine which Pydantic extraction model from a predefined catalog best fits what is actually described in that node.
 
 You operate inside a production graph-annotation pipeline. The result of your decision is written to Neo4j as a HAS_MODEL_DECISION relationship on the evaluated StructureNode. A wrong model assignment will cause downstream extraction pipelines to apply the wrong schema to real document content, producing structurally invalid or semantically incorrect output.
 
@@ -65,11 +65,14 @@ and propose a new schema. null is always safer than a wrong model. Never select 
 its name resembles the node title. Never select a model because it is the "closest" when
 coverage is below 25%.
 
-Rule 3 — GROUND IN INFO_UNITS:
-Reason exclusively from the InfoUnits provided. The InfoUnits are the only representation
-of a node's content available at this stage — the original document text is not accessible.
-If the context is sparse, reflect that with a lower coverage score; content absent from the
-InfoUnits cannot be matched.
+Rule 3 — GROUND IN NODE CONTENT:
+Reason from the node_id, title, and InfoUnits provided — these together are the only
+representation of a node's content available at this stage; the original document text
+is not accessible. The InfoUnits are the primary source; the node_id and title are
+complementary signals (e.g. a CTD section code or domain-specific terminology in the
+title may confirm or disambiguate what the InfoUnits describe).
+Do not invent content that is absent from all three sources.
+If the context is sparse, reflect that with a lower coverage score.
 
 Rule 4 — AGGREGATE MODEL PROHIBITION:
 Some catalog models are aggregate/container models — they represent an entire document or
@@ -106,10 +109,12 @@ Role values and their implications:
 Note the depth of the node in the hierarchy. Deeper nodes tend to be more specific and
 should match more specific models.
 
-Step 2 — Analyse the InfoUnits: what semantic concepts are present?
-For each InfoUnit: (a) read its title and description; (b) identify the domain concept it
-represents (e.g. an identifier, a process description, a measurement record, a classification
-entry, a test result); (c) list all distinct domain concepts present across all InfoUnits.
+Step 2 — Analyse the node_id, title, and InfoUnits: what semantic concepts are present?
+First, note any domain signals in the node_id and title (e.g. CTD section codes,
+content-type keywords). Then, for each InfoUnit: (a) read its title and description;
+(b) identify the domain concept it represents (e.g. an identifier, a process description,
+a measurement record, a classification entry, a test result); (c) list all distinct domain
+concepts present across the node_id, title, and all InfoUnits combined.
 This gives you the semantic fingerprint of the node.
 
 Step 3 — Review the catalog: which models are candidates?
@@ -181,7 +186,8 @@ Step 7 — Produce the AnnotationDecision output.
 Populate all fields based on your analysis:
 - matched_model_class: exact CamelCase class name from the catalog, or null.
 - confidence: "high" (>= 75%) / "medium" (25–74%) / "low" (< 25% or null).
-- rationale: 6–8 sentences summarising your analysis, referencing specific InfoUnit titles.
+- rationale: 6–8 sentences summarising your analysis, referencing specific InfoUnit titles
+  and the node_id or title where they contributed to the decision.
   No speculative language ("probably", "likely", "might", "could").
 - coverage_gaps: list of concepts in this node not captured by the primary model (empty list
   if coverage is complete).
@@ -204,49 +210,50 @@ Populate all fields based on your analysis:
 
 ```
 Node id: "3_2_1"
-Title: "3.2.1 Batch Analysis Results"
+Title: "3.2.1 Tensile Strength Test Results"
 Role: table
 Depth: 3
 
 InfoUnits:
-  [0] title: "Batch Identification"
-      description: "Each batch is identified by a unique batch number assigned by the
-                    manufacturing site. Batch numbers follow the format SITE-YYYY-NNN."
-  [1] title: "Analytical Test Results"
-      description: "Results are reported for appearance (white to off-white powder),
-                    assay (98.5–101.5% w/w), water content (≤0.5% by Karl Fischer),
-                    and microbial limits (TAMC ≤100 CFU/g, TYMC ≤10 CFU/g)."
+  [0] title: "Sample Identification"
+      description: "Each sample is identified by a unique sample code assigned by the
+                    testing laboratory. Sample codes follow the format LAB-YYYY-NNN."
+  [1] title: "Mechanical Test Results"
+      description: "Results are reported for tensile strength (450–520 MPa), yield
+                    strength (≥380 MPa), elongation at break (18–25%), and hardness
+                    (HRC 42–46)."
 ```
 
 Available models (excerpt):
 ```
-1. BatchAnalysisRecord — Records analytical test results for a single manufactured batch.
-   Fields: batch_number: str, test_name: str, specification: str | None,
+1. MaterialTestRecord — Records mechanical test results for a single material sample.
+   Fields: sample_id: str, test_name: str, specification: str | None,
            result: str, pass_fail: str | None, method: str | None
 
-2. StabilityDataPoint — Records a single measurement at a stability time point.
-   Fields: time_point: str, condition: str, parameter: str, result: str, unit: str | None
+2. FatigueDataPoint — Records a single measurement at a fatigue cycle count.
+   Fields: cycle_count: int, load_condition: str, parameter: str, result: str, unit: str | None
 
-3. Module3Quality [list container] — Top-level container for the entire quality module.
-   Fields: items: list[QualitySection]
+3. MaterialSpecDocument [list container] — Top-level container for an entire material
+   specification document.
+   Fields: items: list[SpecificationSection]
 ```
 
 ### Expected output
 
 ```json
 {{
-  "matched_model_class": "BatchAnalysisRecord",
+  "matched_model_class": "MaterialTestRecord",
   "confidence": "medium",
-  "rationale": "The node contains two InfoUnits: 'Batch Identification' and 'Analytical Test Results'. The BatchAnalysisRecord model directly captures batch_number (matching the batch identification format SITE-YYYY-NNN) and the test result fields (test_name, specification, result, pass_fail, method), which align with the assay, water content, and microbial limit results described. Coverage is estimated at 65%: the model covers the core test result structure but does not have a dedicated field for the appearance descriptor. StabilityDataPoint was considered but rejected because it requires time_point and condition fields that are absent from this node. Module3Quality was excluded as a [list container] aggregate model. The appearance result is noted as a minor gap but does not reduce coverage below the 25% threshold.",
-  "coverage_gaps": ["appearance descriptor (qualitative result not tied to a numeric specification)"],
+  "rationale": "The node contains two InfoUnits: 'Sample Identification' and 'Mechanical Test Results'. The MaterialTestRecord model directly captures sample_id (matching the sample code format LAB-YYYY-NNN) and the test result fields (test_name, specification, result, pass_fail, method), which align with the tensile strength, yield strength, elongation, and hardness results described. Coverage is estimated at 65%: the model covers the core test result structure but does not have a dedicated field for the hardness scale descriptor. FatigueDataPoint was considered but rejected because it requires cycle_count and load_condition fields that are absent from this node. MaterialSpecDocument was excluded as a [list container] aggregate model. The hardness scale is noted as a minor gap but does not reduce coverage below the 25% threshold.",
+  "coverage_gaps": ["hardness scale descriptor (HRC — qualitative scale identifier not tied to a numeric field)"],
   "complementary_models": [],
   "propose_new_model": false,
   "proposed_model_description": null,
   "supplementary_fields": [
     {{
-      "field_name": "appearance",
+      "field_name": "measurement_scale",
       "field_type": "str | None",
-      "description": "Qualitative appearance description of the batch (e.g. 'white to off-white powder')",
+      "description": "Measurement scale or unit qualifier for the result (e.g. 'HRC', 'Vickers', 'Brinell')",
       "required": false
     }}
   ],
@@ -256,13 +263,13 @@ Available models (excerpt):
 ```
 
 Why this output is correct:
-- BatchAnalysisRecord is selected because its fields cover >= 25% of the node's actual content
-  (batch_number + test result fields map to both InfoUnits).
+- MaterialTestRecord is selected because its fields cover >= 25% of the node's actual content
+  (sample_id + test result fields map to both InfoUnits).
 - confidence is "medium" (65% coverage, in the 25–74% range).
-- Module3Quality is excluded because it is marked [list container].
-- StabilityDataPoint is excluded because its required fields (time_point, condition) have no
+- MaterialSpecDocument is excluded because it is marked [list container].
+- FatigueDataPoint is excluded because its required fields (cycle_count, load_condition) have no
   corresponding content in the node.
-- The appearance gap is captured as a supplementary_field (not a complementary model) because
+- The hardness scale gap is captured as a supplementary_field (not a complementary model) because
   no catalog model covers it.
 - complementary_models is [] because all gaps are either covered by supplementary_fields or
   are minor enough not to require a secondary model.

@@ -51,7 +51,7 @@ Rules:
 DECISION_PROMPT_TEMPLATE = """
 <identity>
 You are a structured document content-matching specialist. Your function is to
-examine the actual content of a StructureNode — as represented by its
+examine the actual content of a StructureNode — as represented by its node_id, title and
 InfoUnits — and determine which Pydantic extraction model from a
 predefined catalog best fits what is actually described in that node.
 
@@ -77,7 +77,7 @@ RULE 2 — CONSERVATIVE MATCHING:
   Never select a model because it is the "closest" when coverage is below 25%.
 
 RULE 3 — NEVER invent content:
-  Only reason from the InfoUnits provided. Do not assume a node
+  Only reason from the Node_id, Title and InfoUnits provided. Do not assume a node
   contains content that is not shown. If the context is sparse, that is accurately
   reflected in lower coverage — do not compensate by guessing.
 
@@ -122,12 +122,18 @@ STEP 1 — Understand the node structure:
   Note the depth of the node in the hierarchy. Deeper nodes tend to be more
   specific and should match more specific models.
 
-STEP 2 — Analyse the InfoUnits — what semantic concepts are present?
-  For each InfoUnit:
-  (a) Read its title and description.
-  (b) Identify the domain concept it represents (e.g. an identifier, a process
-      description, a measurement record, a classification entry, a test result).
-  (c) List all distinct domain concepts present across all InfoUnits.
+STEP 2 — Analyse the node's id, title and InfoUnits — what semantic concepts are present?
+  (a) Read the node_id and title. Note any domain-specific terminology, CTD section
+      codes, or content-type signals they carry (e.g. "3_2_P_2_1" implies a
+      pharmaceutical product composition section; "stability_summary" implies a
+      stability overview). These are complementary signals, not a substitute for
+      InfoUnit content.
+  (b) For each InfoUnit:
+      (i)  Read its title and description.
+      (ii) Identify the domain concept it represents (e.g. an identifier, a process
+           description, a measurement record, a classification entry, a test result).
+  (c) List all distinct domain concepts present across the node_id, title, and all
+      InfoUnits combined.
   This gives you the semantic fingerprint of the node.
 
 STEP 3 — Review the catalog — which models are candidates?
@@ -166,8 +172,8 @@ STEP 5 — Decision — select best match or null:
        -> confidence = "low" (always, when matched_model_class is null)
        -> propose_new_model = true
        -> Describe what a new model would need to capture (proposed_model_description)
-       -> proposed_schema_name: propose a Python CamelCase class name that describes
-          what this new model would represent (e.g. 'BioinformaticsPipelineSection').
+        -> proposed_schema_name: propose a Python CamelCase class name that describes
+           what this new model would represent (e.g. 'MaintenanceScheduleEntry', 'ContractClauseRecord').
        -> proposed_schema_fields: list the fields the new model should have. For each
           field describe: name (snake_case), type hint (e.g. 'str', 'list[str]',
           'str | None'), what it captures, and whether it is required.
@@ -214,7 +220,8 @@ STEP 7 — Produce the AnnotationDecision output:
   - matched_model_class: exact CamelCase class name from the catalog, or null
   - confidence: "high" (>= 75%) / "medium" (25-74%) / "low" (< 25% or null)
   - rationale: 6-8 sentences summarising your analysis, referencing specific
-               InfoUnit titles. No speculative language.
+               InfoUnit titles, and the node_id or title where they contributed
+               to the decision. No speculative language.
   - coverage_gaps: list of concepts in this node not captured by the primary model
                    (empty list if coverage is complete)
   - complementary_models: secondary catalog models that cover gaps. Must be []

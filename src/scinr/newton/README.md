@@ -1,6 +1,6 @@
 # scinr.newton — Technical Reference
 
-> Part of the [scinr-ingest](../../README.md) library. See root README for installation, quick start, and product overview.
+> Part of the [scinr](../../README.md) library. `scinr.newton` is the document ingestion module. See root README for installation, quick start, and platform overview.
 
 > **Requires Python 3.11+** and a running Neo4j 5.x instance.
 
@@ -87,7 +87,7 @@ configure(
 
 **Module:** `scinr.newton.pipeline`
 
-Async function. Orchestrates the full scinr-ingest pipeline end-to-end, chaining Stages 0–4 in sequence. Passes data between stages in memory when intermediate directory parameters are omitted. Tabular files (`.csv`, `.xlsx`, `.xls`) found in `input_raw` are automatically routed to the tabular pipeline.
+Async function. Orchestrates the full scinr.newton pipeline end-to-end, chaining Stages 0–4 in sequence. Passes data between stages in memory when intermediate directory parameters are omitted. Tabular files (`.csv`, `.xlsx`, `.xls`) found in `input_raw` are automatically routed to the tabular pipeline.
 
 ```python
 import asyncio
@@ -261,7 +261,7 @@ Converters are registered in `src/scinr/newton/converters/registry.py` (keyed by
 
 ```bash
 # CLI
-scinr-ingest --stage preprocess --input-raw files/ --input data/json/
+newton --stage preprocess --input-raw files/ --input data/json/
 
 # Library API
 result, docs = asyncio.run(run_preprocess("files/", output_dir="data/json/"))
@@ -289,7 +289,7 @@ A **2-phase extraction + repair loop** handles malformed LLM output: if Pydantic
 
 ```bash
 # CLI
-scinr-ingest --stage extract --input data/json/ --output data/output/ --parallel-docs 4
+newton --stage extract --input data/json/ --output data/output/ --parallel-docs 4
 
 # Library API
 result, docs = asyncio.run(run_extraction(input_folder="data/json/", output_folder="data/output/", parallel_docs=4))
@@ -313,13 +313,13 @@ Key behaviours:
 
 ```bash
 # CLI — ingest from output folder
-scinr-ingest --stage ingest --output data/output/
+newton --stage ingest --output data/output/
 
 # CLI — update in-place (no new version created)
-scinr-ingest --stage ingest --output data/output/ --update
+newton --stage ingest --output data/output/ --update
 
 # CLI — link as successor of another document
-scinr-ingest --stage all --input-raw files/new/ --input data/json/ --output data/output/ --replaces "OldDocumentName"
+newton --stage all --input-raw files/new/ --input data/json/ --output data/output/ --replaces "OldDocumentName"
 
 # Library API
 result = asyncio.run(run_ingestion(output_folder="data/output/"))
@@ -347,13 +347,13 @@ The **ThemeRegistry** auto-discovers all `src/scinr/newton/models/*/catalog.py` 
 
 ```bash
 # CLI — annotate all nodes
-scinr-ingest --stage annotate --document "MyDocument"
+newton --stage annotate --document "MyDocument"
 
 # CLI — resume (skip already-annotated nodes)
-scinr-ingest --stage annotate --document "MyDocument" --only-unannotated
+newton --stage annotate --document "MyDocument" --only-unannotated
 
 # CLI — manual override (assign a fixed model without LLM)
-scinr-ingest --stage annotate --document "MyDocument" --manual --model "Triple"
+newton --stage annotate --document "MyDocument" --manual --model "Triple"
 
 # Library API
 result = asyncio.run(run_annotation("MyDocument"))
@@ -384,10 +384,10 @@ The **`compose_schema`** step dynamically constructs a composite Pydantic model 
 
 ```bash
 # CLI — extract entities for all annotated nodes
-scinr-ingest --stage entity_extract --document "MyDocument"
+newton --stage entity_extract --document "MyDocument"
 
 # CLI — resume (skip nodes that already have an ExtractionResult)
-scinr-ingest --stage entity_extract --document "MyDocument" --only-unextracted --parallel-docs 4
+newton --stage entity_extract --document "MyDocument" --only-unextracted --parallel-docs 4
 
 # Library API
 result = asyncio.run(run_entity_extraction("MyDocument"))
@@ -412,10 +412,10 @@ Ingests tabular files directly into Neo4j, bypassing Stages 0–4. For each shee
 
 ```bash
 # CLI — ingest all CSV/XLSX files in a folder
-scinr-ingest --stage tabular --input-raw files/data/
+newton --stage tabular --input-raw files/data/
 
 # CLI — update mode (wipe and re-ingest)
-scinr-ingest --stage tabular --input-raw files/data/ --update
+newton --stage tabular --input-raw files/data/ --update
 
 # Library API
 result = asyncio.run(run_tabular_pipeline("files/data/"))
@@ -428,10 +428,10 @@ The tabular pipeline is also automatically invoked by `--stage all` (and `run_pi
 
 ### CLI Reference
 
-The CLI entry point is `scinr.newton.cli:main_sync`, registered as `scinr-ingest` via `pyproject.toml`:
+The CLI entry point is `scinr.newton.cli:main_sync`, registered as `newton` via `pyproject.toml`:
 
 ```bash
-scinr-ingest --stage <STAGE> [options]
+newton --stage <STAGE> [options]
 ```
 
 | `--stage` choice | Equivalent `run_pipeline()` stages | Description |
@@ -652,4 +652,4 @@ configure(
 )
 ```
 
-See [model-creation/README.md](model-creation/README.md) for the full developer guide including worked examples, entity label conventions, nested model patterns, and `field_relationships` syntax.
+See [model-creation/README.md](model-creation/README.md) for the full developer guide including worked examples, entity label conventions, nested model patterns, `field_relationships` syntax, and `instance_relationships` syntax. For AI agent instructions on creating models, see [model-creation/AGENTS.md](model-creation/AGENTS.md).
