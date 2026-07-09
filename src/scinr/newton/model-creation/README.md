@@ -1,8 +1,10 @@
 # Adding New Extraction Domains
 
-> **Audience:** developers and data engineers adding new extraction capabilities to the `scinr-ingest` pipeline.
+> **Audience:** developers and data engineers adding new extraction capabilities to the `scinr.newton` pipeline.
 >
 > **Stack:** AWS Bedrock (Claude Sonnet) · LangGraph · Pydantic v2 · Neo4j · Python 3.11+
+
+> For AI agent instructions and best practices, see [`model-creation/AGENTS.md`](AGENTS.md).
 
 ---
 
@@ -15,12 +17,13 @@
 5. [catalog.py Reference](#5-catalogpy-reference)
 6. [Model Class Conventions](#6-model-class-conventions)
 7. [field_relationships Syntax](#7-field_relationships-syntax)
-8. [Entity Label Convention](#8-entity-label-convention)
-9. [Sub-Theme Catalogs](#9-sub-theme-catalogs)
-10. [The Triple Fallback Model](#10-the-triple-fallback-model)
-11. [Reference Implementations](#11-reference-implementations)
-12. [Integration Checklist](#12-integration-checklist)
-13. [User Theme Structure (external packages)](#13-user-theme-structure-external-packages)
+8. [instance_relationships Syntax](#8-instance_relationships-syntax)
+9. [Entity Label Convention](#9-entity-label-convention)
+10. [Sub-Theme Catalogs](#10-sub-theme-catalogs)
+11. [The Triple Fallback Model](#11-the-triple-fallback-model)
+12. [Reference Implementations](#12-reference-implementations)
+13. [Integration Checklist](#13-integration-checklist)
+14. [User Theme Structure (external packages)](#14-user-theme-structure-external-packages)
 
 ---
 
@@ -94,7 +97,34 @@ themes. A vague description leads to misclassification.
 
 A class-level annotation on individual model fields (placed inside `json_schema_extra`)
 that tells the graph mapper to create a directed edge in Neo4j between two
-`:LabeledEntity` nodes. See [§7](#7-field_relationships-syntax) for full syntax.
+`:LabeledEntity` nodes. See [§7](#7-field_relationships-syntax) for full syntax. For cross-model linking between
+different document sections, use `instance_relationships` instead — see [§8](#8-instance_relationships-syntax).
+
+### instance_relationships
+
+A `json_schema_extra` key on a model field that instructs the graph mapper to create a
+**directed edge between two `:ModelInstance` nodes** — potentially in completely different
+documents or document sections. Unlike `field_relationships` (which connects `:LabeledEntity`
+nodes within the same extracted record), `instance_relationships` connects the structured
+extraction records themselves and supports **forward references**: the target model may not
+yet exist when the relationship is written. The engine creates a "shell" `ModelInstance`
+node on first encounter and populates it when the target model is later extracted.
+
+See [§8](#8-instance_relationships-syntax) for the full syntax.
+
+### instance_key
+
+A `json_schema_extra` key (`"instance_key": True`) that marks which fields of a model form
+its **composite key** for `ModelInstance` deduplication. The engine combines all
+`instance_key` fields into a deterministic UID (`make_instance_uid`) so that:
+
+1. Shell nodes created by an `instance_relationships` source and real nodes created by
+   the target model extraction merge into the same Neo4j node.
+2. Multiple documents referencing the same logical model instance (e.g. the same
+   variation code `"Q.I.a.1(a)"`) share one node in the graph.
+
+Every model that is referenced as a `target_model` in an `instance_relationships`
+declaration **must** mark its key fields with `instance_key: True`.
 
 ### LabeledEntity
 
@@ -448,7 +478,240 @@ Produces the following Cypher edge when both fields are non-null:
 
 ---
 
-## 8. Entity Label Convention
+## 8. `instance_relationships` Syntax
+
+`instance_relationships` is declared inside `json_schema_extra` on a model field. It
+instructs the graph mapper to create a directed Neo4j edge between the `:ModelInstance`
+node of the current model and a `:ModelInstance` node of a **target model**, which may
+live in a completely different document section or even a different document.
+
+### When to use
+
+Use `instance_relationships` when:
+- Two extraction models reference the same real-world entity but are extracted from
+  **different structural sections** (different `StructureNode` nodes in Neo4j).
+- You need a **forward reference** — model A mentions IDs that will be fully defined
+  by model B in a sibling or parent section extracted later.
+- You want to build a **cross-document knowledge graph** by linking the same logical
+  entity as it appears across multiple ingested files.
+
+Use `field_relationships` (§7) instead when both entities are extracted from the same
+model instance (same structural section).
+
+### Format
+
+```python
+json_schema_extra={
+    "instance_relationships": [
+        {
+            "target_model": "TargetModelClassName",   # string — PascalCase class name
+            "join_via": {
+                "local_field_name": "remote_field_name",   # scalar sibling → target key field
+                "list_field_name":  "remote_key_field",    # list field (fan-out) → target key field
+            },
+            "rel_type": "RELATIONSHIP_TYPE",              # UPPER_SNAKE_CASE
+        }
+    ]
+}
+```
+
+**`join_via` key rules:**
+- Each entry maps a **local field name** (from the same model) to a **remote field name** (from the target model that must be marked `instance_key: True`).
+- If a local field is the **same field** that carries `instance_relationships` AND it is a `list[str]`, it acts as the **fan-out key**: one target `ModelInstance` is created per list item.
+- All other entries in `join_via` are **fixed keys**: scalar values from sibling fields of the same model, narrowing the scope of the target instance.
+
+### `instance_key: True` — mandatory on the target model
+
+Every model that appears as a `target_model` in an `instance_relationships` declaration
+**must** mark its identifier fields with `instance_key: True` in `json_schema_extra`.
+Without this, the engine cannot compute a deterministic UID and the shell node will not
+merge with the target when it is later extracted.
+
+```python
+class TargetModel(ExtractionModel):
+    """..."""
+
+    target_key_field: str = Field(
+        ...,
+        json_schema_extra={
+            "entity_label": "TargetLabel",
+            "instance_key": True,          # ← required for cross-model resolution
+        },
+    )
+    anchor_field: str = Field(
+        ...,
+        json_schema_extra={"instance_key": True},   # ← part of composite key
+    )
+```
+
+When multiple fields are marked `instance_key: True`, the UID is the combination of all
+of them (e.g. `Fee` is uniquely identified by `country_code + procedure_type + role`).
+
+### Example 1 — Fan-out with a fixed anchor (one-to-many)
+
+A `VariationCodeModel` lists the IDs of related conditions (`condition_ids`). Each ID
+references a separate `ConditionModel` instance that will be extracted from a sibling
+section. The `root_variation_code` scopes the condition to the correct parent code.
+
+```python
+# Source model
+condition_ids: list[str] = Field(
+    default_factory=list,
+    description=(
+        "Identifiers of conditions for this code (e.g. ['1', '2', 'A']). "
+        "Each ID references a ConditionModel in a sibling section."
+    ),
+    json_schema_extra={
+        "instance_relationships": [
+            {
+                "target_model": "ConditionModel",
+                "join_via": {
+                    "root_variation_code": "variation_code",  # fixed: scopes to parent code
+                    "condition_ids": "condition_id",          # fan-out: one target per list item
+                },
+                "rel_type": "HAS_CONDITION",
+            }
+        ]
+    },
+)
+```
+
+For a `VariationCodeModel` with `root_variation_code="Q.I.a.1"` and
+`condition_ids=["1", "2"]`, the engine produces:
+
+```cypher
+// Shell nodes (created immediately, populated when ConditionModel is extracted)
+MERGE (:ModelInstance {model_class: "ConditionModel", variation_code: "q.i.a.1", condition_id: "1"})
+MERGE (:ModelInstance {model_class: "ConditionModel", variation_code: "q.i.a.1", condition_id: "2"})
+
+// Typed edges
+(variationCodeMI)-[:HAS_CONDITION]->(conditionMI_1)
+(variationCodeMI)-[:HAS_CONDITION]->(conditionMI_2)
+```
+
+```python
+# Target model — must mark its key fields with instance_key: True
+class ConditionModel(ExtractionModel):
+    """A specific condition associated with a variation."""
+
+    variation_code: str = Field(
+        ...,
+        json_schema_extra={"entity_label": "VariationCode", "instance_key": True},
+    )
+    condition_id: str = Field(
+        ...,
+        json_schema_extra={"instance_key": True},
+    )
+    description: str = Field(..., description="Verbatim text of the condition.")
+```
+
+### Example 2 — Simple scalar join (one-to-one)
+
+A `VariationCodeModel` links to one `ProcedureTypeModel` via a single scalar field.
+The field simultaneously creates a `:LabeledEntity` node (via `entity_label`) **and**
+a cross-model `ModelInstance` link (via `instance_relationships`).
+
+```python
+procedure_type: str = Field(
+    default="",
+    description="Procedure type code: IA, IAIN, IB, II, A, or BA.",
+    json_schema_extra={
+        "entity_label": "ProcedureType",        # creates a :LabeledEntity node
+        "instance_relationships": [
+            {
+                "target_model": "ProcedureTypeModel",
+                "join_via": {
+                    "procedure_type": "procedure_type",  # local → remote key field
+                },
+                "rel_type": "HAS_PROCEDURE_TYPE",
+            }
+        ],
+    },
+)
+```
+
+### Example 3 — Multiple relationships on the same field
+
+A `BPGRecommendationModel` links to variation code models via two relationship types
+simultaneously — one by exact code (`variation_code`) and one by root code
+(`root_variation_code`). Both relationships target the same `VariationCodeModel` class.
+
+```python
+variation_codes_referenced: list[str] = Field(
+    default_factory=list,
+    description="Variation codes this recommendation applies to (e.g. ['Q.I.a.1(a)', 'B.II.b.1']).",
+    json_schema_extra={
+        "entity_label": "VariationCode",
+        "instance_relationships": [
+            {
+                "target_model": "VariationCodeModel",
+                "join_via": {
+                    "variation_codes_referenced": "variation_code",
+                },
+                "rel_type": "BPG_MENTIONS_VARIATION_CODE",
+            },
+            {
+                "target_model": "VariationCodeModel",
+                "join_via": {
+                    "variation_codes_referenced": "root_variation_code",
+                },
+                "rel_type": "BPG_MENTIONS_ROOT_VARIATION_CODE",
+            },
+        ],
+    },
+)
+```
+
+### Example 4 — Composite key with multiple `instance_key` fields
+
+When a model is uniquely identified by a combination of fields (e.g. `Fee` is identified
+by `country_code + procedure_type + role`), mark ALL key fields with `instance_key: True`.
+
+```python
+class Fee(ExtractionModel):
+    """Variation fee for one country + procedure_type + role combination."""
+
+    country_code: str = Field(
+        ...,
+        json_schema_extra={
+            "entity_label": "Country",
+            "instance_key": True,   # part 1 of composite key
+            "instance_relationships": [
+                {"target_model": "Country", "join_via": {"country_code": "country_code"}, "rel_type": "APPLIES_TO_COUNTRY"}
+            ],
+        },
+    )
+    procedure_type: str = Field(
+        ...,
+        json_schema_extra={
+            "instance_key": True,   # part 2 of composite key
+            "entity_label": "ProcedureType",
+            "instance_relationships": [
+                {"target_model": "ProcedureTypeModel", "join_via": {"procedure_type": "procedure_type"}, "rel_type": "FEE_APPLIES_TO"}
+            ],
+        },
+    )
+    role: str = Field(
+        ...,
+        json_schema_extra={"entity_label": "FeeRole", "instance_key": True},  # part 3 of composite key
+    )
+    rate: str = Field(..., description="Fee amount without currency symbol (e.g. '511.29').")
+```
+
+### Rules
+
+- `target_model` must be a **string** containing the PascalCase class name of the target model (not the class itself).
+- Every field listed as a remote key in `join_via` **must** be marked `instance_key: True` on the target model.
+- A **list field** acting as the fan-out key must be the same field that declares `instance_relationships`. One `:ModelInstance` edge is created per list item.
+- **Scalar fields** in `join_via` (other than the fan-out field) act as fixed scope keys — they narrow the target to a specific parent context.
+- A field may declare **multiple** `instance_relationships` entries (list); each creates a different typed edge.
+- A field may simultaneously declare `entity_label` AND `instance_relationships` — this creates both a `:LabeledEntity` singleton (for global dedup) and a `:ModelInstance` relationship edge.
+- `rel_type` must be `UPPER_SNAKE_CASE`.
+- `instance_relationships` can be placed on both scalar and list fields. On scalar fields, exactly one target instance is created (or zero if the value is empty). On list fields, one target instance is created per non-empty list item.
+
+---
+
+## 9. Entity Label Convention
 
 The `entity_label` value in `json_schema_extra` becomes the Neo4j node label:
 
@@ -474,7 +737,7 @@ node, enabling cross-document graph queries.
 
 ---
 
-## 9. Sub-Theme Catalogs
+## 10. Sub-Theme Catalogs
 
 Nest sub-folders inside a parent theme folder when a domain has clearly differentiated
 sub-domains that need distinct model sets. Each sub-folder that contains its own `catalog.py`
@@ -531,7 +794,7 @@ SELECTABLE_MODELS: list[type] = [
 
 ---
 
-## 10. The `Triple` Fallback Model
+## 11. The `Triple` Fallback Model
 
 `models/default/triple.py` defines a generic RDF-style extractor used when no specific
 domain model matches a document section:
@@ -556,7 +819,7 @@ for sections that lack a dedicated model, ensuring no document content is silent
 
 ---
 
-## 11. Reference Implementations
+## 12. Reference Implementations
 
 | Path | What to learn from it |
 |---|---|
@@ -568,10 +831,13 @@ for sections that lack a dedicated model, ensuring no document content is silent
 | `models/pharmaceutical_quality/base.py` | `ExtractionModel` definition |
 | `model-creation/templates/models.py` | Copy-paste template for a new model file |
 | `model-creation/templates/catalog.py` | Copy-paste template for a new `catalog.py` |
+| `own_models/pharma_regulatory/variation_guidelines/models.py` | `field_relationships` + `instance_relationships` + `instance_key` on the same field; fan-out with fixed anchor (`condition_ids`, `document_ids`) |
+| `own_models/pharma_regulatory/bpg/models.py` | Multiple `instance_relationships` on a single list field; dual `entity_label` + `instance_relationships` pattern |
+| `own_models/pharma_regulatory/fees/models.py` | Composite `instance_key` across three fields (`country_code`, `procedure_type`, `role`) |
 
 ---
 
-## 12. Integration Checklist
+## 13. Integration Checklist
 
 Use this checklist before merging a new extraction domain.
 
@@ -590,6 +856,9 @@ Use this checklist before merging a new extraction domain.
 - [ ] Every list field uses `default_factory=list` (never `default=[]`)
 - [ ] `entity_label` added to all fields representing real-world named entities
 - [ ] `field_relationships` defined wherever a directed edge between two entities is needed
+- [ ] `instance_key: True` set on all fields that form the composite key of any model that is a `target_model` in another model's `instance_relationships`
+- [ ] `instance_relationships` defined on any field that references an entity extracted from a **different** structural section or document
+- [ ] For list fields with `instance_relationships`, the fan-out field name appears as a key in `join_via` mapping to the correct remote key field of the target model
 
 ### Theme registration
 
@@ -611,13 +880,13 @@ Use this checklist before merging a new extraction domain.
 
 ---
 
-## 13. User Theme Structure (external packages)
+## 14. User Theme Structure (external packages)
 
-This section is for **user-defined models loaded from outside the `scinr-ingest` package**
+This section is for **user-defined models loaded from outside the `scinr` package**
 via `extra_models_paths`. The rules here differ from §3–§4 because your code lives in a
 separate directory that is dynamically added to Python's import machinery.
 
-### 13.1 Required directory layout
+### 14.1 Required directory layout
 
 ```
 my_models/                        ← package root (pass this path to extra_models_paths)
@@ -638,8 +907,9 @@ my_models/                        ← package root (pass this path to extra_mode
 Every directory that contains Python files **must** have an `__init__.py`, even if it is
 empty. Without it, Python does not treat the directory as a package and relative imports
 will fail with `ImportError: attempted relative import with no known parent package`.
+This applies without exception to every level of nesting — theme folders, sub-theme folders, shared helper folders, and the package root. The first file to create in any new folder is always `__init__.py`.
 
-### 13.2 The golden rule: always use relative imports
+### 14.2 The golden rule: always use relative imports
 
 When your code lives in an external package, you **must** use relative imports for any
 module that belongs to that same package. Using bare (absolute) imports is fragile because
@@ -662,7 +932,7 @@ from models import MyModel
 # ❌ INCORRECT — absolute path using your own package name
 from my_models.my_theme.models import MyModel
 
-# ❌ INCORRECT — absolute path using the scinr package (only valid for ExtractionModel itself)
+# ✅ CORRECT — scinr is an installed package; this absolute import always resolves correctly
 from scinr.newton.models.base import ExtractionModel
 ```
 
@@ -674,11 +944,11 @@ from scinr.newton.models.base import ExtractionModel
 > the entire `sys.path` — fragile and prone to name collisions when two packages define a
 > module with the same name.
 
-The only exception is the `scinr_ingest` library itself: because it is installed as a
-proper package, `from scinr_ingest.models.base import ExtractionModel` always resolves
+The only exception is the `scinr` library itself: because it is installed as a
+proper package, `from scinr.newton.models.base import ExtractionModel` always resolves
 correctly regardless of where your code lives.
 
-### 13.3 Correct `catalog.py` example
+### 14.3 Correct `catalog.py` example
 
 ```python
 """My custom theme."""
@@ -698,7 +968,7 @@ SELECTABLE_MODELS: list[type] = [
 ]
 ```
 
-### 13.4 Correct `models.py` example
+### 14.4 Correct `models.py` example
 
 ```python
 """Pydantic models for my theme."""
@@ -706,8 +976,8 @@ from __future__ import annotations
 
 from pydantic import Field
 
-# ✅ scinr_ingest is an installed package — absolute import is correct here
-from scinr_ingest.models.base import ExtractionModel
+# ✅ scinr is an installed package — absolute import is correct here
+from scinr.newton.models.base import ExtractionModel
 
 
 class MyDetailModel(ExtractionModel):
@@ -724,7 +994,7 @@ class MyTopLevelModel(ExtractionModel):
     details: list[MyDetailModel] = Field(default_factory=list, description="Details.")
 ```
 
-### 13.5 Sub-theme with a shared base
+### 14.5 Sub-theme with a shared base
 
 When a sub-theme defines base classes that other files in the same sub-theme inherit from,
 use relative imports throughout:
@@ -732,7 +1002,7 @@ use relative imports throughout:
 ```python
 # my_models/my_group/my_sub_theme/base.py
 from __future__ import annotations
-from scinr_ingest.models.base import ExtractionModel
+from scinr.newton.models.base import ExtractionModel
 
 class MySubThemeBase(ExtractionModel):
     """Shared base for all models in my_sub_theme."""
@@ -762,14 +1032,14 @@ THEME_DESCRIPTION: str = "Description of my_sub_theme."
 SELECTABLE_MODELS: list[type] = [ConcreteModel]
 ```
 
-### 13.6 How to register user themes
+### 14.6 How to register user themes
 
 Pass the **root directory** of your package (the folder that contains the top-level
 `__init__.py`) to `extra_models_paths`. The discovery engine walks that directory tree and
 registers every sub-folder that contains a `catalog.py`.
 
 ```python
-from scinr_ingest import configure
+from scinr import configure
 
 configure(
     llm=my_llm,
@@ -784,13 +1054,13 @@ configure(
 `enabled_user_themes` accepts theme paths relative to the package root
 (e.g. `"my_theme"`, `"my_group/my_sub_theme"`). Omit it to activate all discovered themes.
 
-### 13.7 Checklist for user themes
+### 14.7 Checklist for user themes
 
 - [ ] Package root directory contains `__init__.py`
 - [ ] Every sub-directory that contains `.py` files also contains `__init__.py`
 - [ ] All internal imports use relative syntax (`from .module import ...`)
 - [ ] `catalog.py` uses `from .models import ...` (not bare or absolute imports)
-- [ ] `models.py` imports `ExtractionModel` from `scinr_ingest.models.base` (absolute — installed package)
+- [ ] `models.py` imports `ExtractionModel` from `scinr.newton.models.base` (absolute — installed package)
 - [ ] `extra_models_paths` points to the package **root** directory (not a sub-theme directory)
 - [ ] No import errors: `python -c "import my_models.my_theme.catalog"` runs without error
 
@@ -806,3 +1076,6 @@ configure(
 | Sub-model never selected by agent | Not in `SELECTABLE_MODELS` | Add it if it should be a primary extraction target |
 | `entity_label` node not created | Field value is `None` in the extraction result | Improve the `description` so the LLM knows when and how to populate it |
 | `ThemeRegistry: failed to import catalog` | Syntax or import error in `catalog.py` | Fix the error; run `python -c "import models.my_domain.catalog"` to surface it |
+| `instance_relationships` target node never merged (shell stays empty) | Target model does not declare `instance_key: True` on its key fields; UID mismatch between shell and real node | Add `instance_key: True` to the correct key fields of the target model |
+| Fan-out creates zero target nodes | The list field is empty OR the fan-out field name in `join_via` does not match the actual field name | Check `join_via` key matches the exact Python field name |
+| Two models create duplicate `ModelInstance` nodes | `instance_key` fields include a non-normalized value (e.g. mixed case); or a required key field is missing from `join_via` | Normalize values in a `field_validator`; verify all remote key fields are in `join_via` |

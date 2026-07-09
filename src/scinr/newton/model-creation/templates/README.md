@@ -14,6 +14,8 @@ Esta carpeta contiene plantillas listas para copiar como punto de partida para n
 > los sub-modelos referenciados transitivamente. Crear una nueva carpeta con `catalog.py` es
 > suficiente para que el tema y todos sus modelos queden disponibles en el pipeline.
 
+> Para instrucciones detalladas orientadas a agentes IA, consulta [`AGENTS.md`](../AGENTS.md).
+
 ## Cómo usar las plantillas
 
 1. Crea la carpeta del nuevo tema: `models/<mi_tema>/`
@@ -31,6 +33,7 @@ Clase:        class MiModelo              → PascalCase
 Campo:        campo_de_modelo             → snake_case
 entity_label: "MiEntidad"                → PascalCase
 rel_type:     "MI_RELACION"              → UPPER_SNAKE_CASE
+instance_key: True (boolean)             → "instance_key": True
 ```
 
 ## Checklist mínimo por tema nuevo
@@ -38,5 +41,7 @@ rel_type:     "MI_RELACION"              → UPPER_SNAKE_CASE
 - [ ] `__init__.py` (puede estar vacío)
 - [ ] `<modelos>.py` con clases heredando de `ExtractionModel`
 - [ ] `catalog.py` con `THEME_DESCRIPTION` y `SELECTABLE_MODELS`
+- [ ] Si los modelos se referencian entre sí desde secciones distintas: `instance_key: True` en los campos clave del modelo destino
+- [ ] `instance_relationships` declarado en los campos que enlazan con modelos en otros StructureNode
 
 Ver el [README principal](../README.md) para la guía completa y el checklist de integración.
