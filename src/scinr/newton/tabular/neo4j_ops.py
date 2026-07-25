@@ -1,4 +1,5 @@
 """tabular/neo4j_ops.py — Neo4j write operations for the tabular ingestion pipeline."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +11,17 @@ from typing import TYPE_CHECKING
 from neo4j import AsyncDriver
 from pydantic import BaseModel
 
+from scinr.newton.entity_extraction.schema_composer import _to_snake_case
+from scinr.newton.tabular.normalization.detector import (
+    extract_source_values_from_dict,
+    get_normalization_specs,
+    instance_has_normalizable_fields,
+)
+from scinr.newton.tabular.normalization.models import NormalizationEntry
 from scinr.newton.tabular.reader import row_to_markdown
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.uid import make_uid
+from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
 if TYPE_CHECKING:
     from scinr.newton.annotation.models import AnnotationDecision
@@ -23,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _ROW_BATCH_SIZE = 500
 _PARALLEL_ROW_WRITES = 10
+_NORMALIZATION_LLM_CONCURRENCY = 5
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -65,7 +75,6 @@ async def write_tabular_subgraph(
     from scinr.newton.annotation.neo4j_ops import write_annotation
     from scinr.newton.entity_extraction.model_resolver import resolve_model_class
     from scinr.newton.entity_extraction.schema_composer import (
-        _to_snake_case,
         compose_extraction_schema,
     )
 
@@ -113,9 +122,7 @@ async def write_tabular_subgraph(
         except Exception:
             await tx.rollback()
             raise
-    logger.info(
-        "write_tabular_subgraph: Table node created: %s", table_composite_id
-    )
+    logger.info("write_tabular_subgraph: Table node created: %s", table_composite_id)
 
     # Step 4: write ModelDecision on the Table (full subgraph via write_annotation)
     await write_annotation(driver, table_composite_id, decision, document_name)
@@ -124,9 +131,7 @@ async def write_tabular_subgraph(
     decision_uid = make_uid(
         "model_decision",
         table_composite_id,
-        decision.matched_model_class
-        if decision.matched_model_class is not None
-        else "null",
+        decision.matched_model_class if decision.matched_model_class is not None else "null",
     )
 
     # Step 6: resolve model class and build composite schema (once, reused for all rows)
@@ -156,9 +161,7 @@ async def write_tabular_subgraph(
             composite_cls = compose_extraction_schema(
                 primary_class=primary_cls,
                 complementary_classes=comp_cls_list,
-                supplementary_fields=[
-                    sf.model_dump() for sf in decision.supplementary_fields
-                ],
+                supplementary_fields=[sf.model_dump() for sf in decision.supplementary_fields],
             )
             primary_field_name = _to_snake_case(primary_cls.__name__)
             logger.info(
@@ -174,16 +177,37 @@ async def write_tabular_subgraph(
             )
             primary_cls = None
 
-    # Step 7: process rows in batches
+    # Step 7: process rows — bifurcate based on normalization
+    from scinr.newton.config import get_config
+
+    cfg = get_config()
+    has_normalization = (
+        primary_cls is not None
+        and cfg.normalization_enabled
+        and (
+            instance_has_normalizable_fields(primary_cls)
+            or any(
+                instance_has_normalizable_fields(comp_cls_map[cn])
+                for cn in comp_class_names
+                if comp_cls_map.get(cn) is not None
+            )
+        )
+    )
+
     total_rows = len(all_rows)
-    for batch_start in range(0, total_rows, _ROW_BATCH_SIZE):
-        batch = all_rows[batch_start : batch_start + _ROW_BATCH_SIZE]
-        await _write_row_batch(
+
+    if has_normalization:
+        logger.info(
+            "tabular: using normalization-first write path for '%s' sheet '%s' (%d rows)",
+            doc_path,
+            sheet["sheet_name"],
+            total_rows,
+        )
+        await _write_tabular_with_normalization(
             driver=driver,
             table_composite_id=table_composite_id,
             headers=headers,
-            rows_batch=batch,
-            batch_start_index=batch_start,
+            all_rows=all_rows,
             decision_uid=decision_uid,
             decision=decision,
             mapping=mapping,
@@ -196,12 +220,33 @@ async def write_tabular_subgraph(
             theme=theme,
             sheet_page_id=sheet_page_id,
         )
-        logger.debug(
-            "tabular: wrote batch rows %d-%d of %d",
-            batch_start + 1,
-            min(batch_start + _ROW_BATCH_SIZE, total_rows),
-            total_rows,
-        )
+    else:
+        for batch_start in range(0, total_rows, _ROW_BATCH_SIZE):
+            batch = all_rows[batch_start : batch_start + _ROW_BATCH_SIZE]
+            await _write_row_batch(
+                driver=driver,
+                table_composite_id=table_composite_id,
+                headers=headers,
+                rows_batch=batch,
+                batch_start_index=batch_start,
+                decision_uid=decision_uid,
+                decision=decision,
+                mapping=mapping,
+                primary_cls=primary_cls,
+                composite_cls=composite_cls,
+                primary_field_name=primary_field_name,
+                comp_class_names=comp_class_names,
+                comp_cls_map=comp_cls_map,
+                document_name=document_name,
+                theme=theme,
+                sheet_page_id=sheet_page_id,
+            )
+            logger.debug(
+                "tabular: wrote batch rows %d-%d of %d",
+                batch_start + 1,
+                min(batch_start + _ROW_BATCH_SIZE, total_rows),
+                total_rows,
+            )
 
     logger.info(
         "write_tabular_subgraph: complete for '%s' sheet '%s' (%d rows)",
@@ -213,6 +258,294 @@ async def write_tabular_subgraph(
 
 
 # ── Batch row writer ──────────────────────────────────────────────────────────
+
+
+async def _write_tabular_with_normalization(
+    driver: AsyncDriver,
+    table_composite_id: str,
+    headers: list[str],
+    all_rows: list[list[str]],
+    decision_uid: str,
+    decision: AnnotationDecision,
+    mapping: ColumnMapping,
+    primary_cls: type,
+    composite_cls: type,
+    primary_field_name: str,
+    comp_class_names: list[str],
+    comp_cls_map: dict[str, type],
+    document_name: str,
+    theme: str,
+    sheet_page_id: str,
+) -> None:
+    """Write all rows using normalization-first batching.
+
+    Flow:
+    1. Pre-scan all rows → global dedup map
+    2. Group unique keys by target_type
+    3. For each type → for each batch of keys:
+       a. LLM extraction via engine.process_key_batch()
+       b. Collect affected row indices
+       c. Instantiate composites with cached normalization
+       d. Write to Neo4j in batches
+    4. Write any remaining rows (normalization failures) with None
+    """
+    from scinr.newton.config import get_config
+    from scinr.newton.tabular.normalization.engine import NormalizationEngine
+
+    cfg = get_config()
+    norm_llm = cfg.normalization_llm or cfg.llm
+
+    # Step 1: Pre-scan all rows → dedup map
+    logger.info("tabular: building normalization dedup map for %d rows", len(all_rows))
+    # Cache normalization specs by class (called O(rows) times otherwise)
+    _specs_cache: dict[type, list] = {}
+
+    def _get_specs_cached(cls: type) -> list:
+        if cls not in _specs_cache:
+            _specs_cache[cls] = get_normalization_specs(cls)
+        return _specs_cache[cls]
+
+    dedup_map = _build_normalization_dedup_map(
+        headers=headers,
+        all_rows=all_rows,
+        primary_cls=primary_cls,
+        comp_cls_map=comp_cls_map,
+        comp_class_names=comp_class_names,
+        mapping=mapping,
+        get_specs_fn=_get_specs_cached,
+    )
+    logger.info(
+        "tabular: dedup map has %d unique keys across %d rows",
+        len(dedup_map),
+        len(all_rows),
+    )
+
+    if not dedup_map:
+        # No normalizable fields found — fall back to standard path
+        logger.info("tabular: no normalizable fields, using standard write path")
+        total_rows = len(all_rows)
+        for batch_start in range(0, total_rows, _ROW_BATCH_SIZE):
+            batch = all_rows[batch_start : batch_start + _ROW_BATCH_SIZE]
+            await _write_row_batch(
+                driver=driver,
+                table_composite_id=table_composite_id,
+                headers=headers,
+                rows_batch=batch,
+                batch_start_index=batch_start,
+                decision_uid=decision_uid,
+                decision=decision,
+                mapping=mapping,
+                primary_cls=primary_cls,
+                composite_cls=composite_cls,
+                primary_field_name=primary_field_name,
+                comp_class_names=comp_class_names,
+                comp_cls_map=comp_cls_map,
+                document_name=document_name,
+                theme=theme,
+                sheet_page_id=sheet_page_id,
+            )
+        return
+
+    # Step 2: Create engine (persists across all key batches)
+    engine = NormalizationEngine(
+        llm=norm_llm,
+        batch_size=cfg.normalization_batch_size,
+    )
+
+    # Step 3: Group unique keys by target_type (LLM needs homogeneous batches)
+    keys_by_type: dict[str, list[NormalizationEntry]] = {}
+    for entry in dedup_map.values():
+        type_key = entry.target_type.__name__
+        if type_key not in keys_by_type:
+            keys_by_type[type_key] = []
+        keys_by_type[type_key].append(entry)
+
+    written_row_indices: set[int] = set()
+    total_rows = len(all_rows)
+    write_batch_size = _ROW_BATCH_SIZE
+
+    # Step 4a: Collect all key batches
+    all_key_batches: list[tuple[list[NormalizationEntry], str]] = []
+    for type_name, type_entries in keys_by_type.items():
+        for key_batch_start in range(0, len(type_entries), cfg.normalization_batch_size):
+            key_batch = type_entries[
+                key_batch_start : key_batch_start + cfg.normalization_batch_size
+            ]
+            all_key_batches.append((key_batch, type_name))
+
+    # Step 4b: LLM extraction for ALL key batches concurrently
+    sem = asyncio.Semaphore(_NORMALIZATION_LLM_CONCURRENCY)
+
+    async def _extract_key_batch(
+        key_batch: list[NormalizationEntry],
+        type_name: str,
+    ) -> None:
+        async with sem:
+            logger.info(
+                "tabular: normalizing batch of %d keys (type: %s)",
+                len(key_batch),
+                type_name,
+            )
+            results = await engine.process_key_batch(key_batch)
+            logger.info("tabular: normalization batch returned %d results", len(results))
+
+    extraction_tasks = [
+        asyncio.create_task(_extract_key_batch(kb, tn)) for kb, tn in all_key_batches
+    ]
+    await asyncio.gather(*extraction_tasks)
+
+    # Step 4c-d: Instantiate and write ALL rows with cached normalization
+    # Iterate by row (not by key_batch) so that rows with multiple
+    # normalizable fields of different target types get ALL normalizations applied.
+    # Rows in dedup_map: have at least one normalizable field
+    # Rows NOT in dedup_map: no normalizable fields (or all empty) → plain path
+
+    # Build set of row indices that appear in dedup_map
+    rows_with_normalization: set[int] = set()
+    for entry in dedup_map.values():
+        for ri in entry.row_indices:
+            rows_with_normalization.add(ri)
+
+    # Write rows WITH normalization
+    normalized_indices = sorted(rows_with_normalization)
+    for chunk_start in range(0, len(normalized_indices), write_batch_size):
+        chunk_indices = normalized_indices[chunk_start : chunk_start + write_batch_size]
+
+        # Instantiate composites with cached normalization
+        composites = [
+            _instantiate_composite_with_normalization(
+                table_composite_id=table_composite_id,
+                row_index=ri,
+                headers=headers,
+                row_values=all_rows[ri],
+                mapping=mapping,
+                decision=decision,
+                primary_cls=primary_cls,
+                composite_cls=composite_cls,
+                primary_field_name=primary_field_name,
+                comp_cls_map=comp_cls_map,
+                comp_class_names=comp_class_names,
+                engine=engine,
+                get_specs_fn=_get_specs_cached,
+            )
+            for ri in chunk_indices
+        ]
+
+        # Transform absolute row indices to offsets from min_idx
+        min_idx = min(chunk_indices)
+        composites = [
+            (ri - min_idx, row_values, composite_instance, extraction_uid)
+            for ri, row_values, composite_instance, extraction_uid in composites
+        ]
+
+        # Write to Neo4j
+        rows_batch = [all_rows[ri] for ri in chunk_indices]
+        await _write_row_batch(
+            driver=driver,
+            table_composite_id=table_composite_id,
+            headers=headers,
+            rows_batch=rows_batch,
+            batch_start_index=min_idx,
+            decision_uid=decision_uid,
+            decision=decision,
+            mapping=mapping,
+            primary_cls=primary_cls,
+            composite_cls=composite_cls,
+            primary_field_name=primary_field_name,
+            comp_class_names=comp_class_names,
+            comp_cls_map=comp_cls_map,
+            document_name=document_name,
+            theme=theme,
+            sheet_page_id=sheet_page_id,
+            composite_results=list(composites),
+            row_indices=chunk_indices,
+        )
+
+        for ri in chunk_indices:
+            written_row_indices.add(ri)
+
+        logger.debug(
+            "tabular: wrote %d rows with normalization (indices %s)",
+            len(chunk_indices), chunk_indices,
+        )
+
+    # Step 5: Write any remaining rows (normalization failures)
+    remaining_indices = [i for i in range(total_rows) if i not in written_row_indices]
+    if remaining_indices:
+        logger.warning(
+            "tabular: %d rows not written during normalization batches. "
+            "Writing with best-effort (normalization fields may be None).",
+            len(remaining_indices),
+        )
+
+        # Log which rows and why (first 20)
+        for ri in remaining_indices[:20]:
+            row_dict = _build_row_dict(headers, all_rows[ri])
+            primary_kwargs, _, _ = _route_row_values(row_dict, mapping, primary_cls)
+            for spec in _get_specs_cached(primary_cls):
+                source_values = extract_source_values_from_dict(spec, primary_kwargs, primary_cls)
+                if source_values:
+                    unique_key = (
+                        f"{spec.target_type.__name__}:"
+                        f"{NormalizationEngine._hash_source_values(source_values)}"
+                    )
+                    if unique_key not in engine.result_cache:
+                        logger.warning(
+                            "tabular: row %d missing normalization for key %s (source: %s)",
+                            ri,
+                            unique_key,
+                            source_values,
+                        )
+
+        # Write remaining in batches — instantiate without normalization
+        for chunk_start in range(0, len(remaining_indices), write_batch_size):
+            chunk_indices = remaining_indices[chunk_start : chunk_start + write_batch_size]
+
+            # Instantiate composites WITHOUT normalization (fields stay as-is)
+            composites = [
+                _instantiate_composite_plain(
+                    table_composite_id=table_composite_id,
+                    row_index=ri,
+                    headers=headers,
+                    row_values=all_rows[ri],
+                    mapping=mapping,
+                    decision=decision,
+                    primary_cls=primary_cls,
+                    composite_cls=composite_cls,
+                    primary_field_name=primary_field_name,
+                    comp_cls_map=comp_cls_map,
+                )
+                for ri in chunk_indices
+            ]
+
+            # Transform indices
+            min_idx = min(chunk_indices)
+            composites = [
+                (ri - min_idx, row_values, composite_instance, extraction_uid)
+                for ri, row_values, composite_instance, extraction_uid in composites
+            ]
+
+            rows_batch = [all_rows[ri] for ri in chunk_indices]
+            await _write_row_batch(
+                driver=driver,
+                table_composite_id=table_composite_id,
+                headers=headers,
+                rows_batch=rows_batch,
+                batch_start_index=min_idx,
+                decision_uid=decision_uid,
+                decision=decision,
+                mapping=mapping,
+                primary_cls=primary_cls,
+                composite_cls=composite_cls,
+                primary_field_name=primary_field_name,
+                comp_class_names=comp_class_names,
+                comp_cls_map=comp_cls_map,
+                document_name=document_name,
+                theme=theme,
+                sheet_page_id=sheet_page_id,
+                composite_results=list(composites),
+                row_indices=chunk_indices,
+            )
 
 
 async def _write_row_batch(
@@ -232,6 +565,8 @@ async def _write_row_batch(
     document_name: str,
     theme: str = "default",
     sheet_page_id: str = "",
+    composite_results: list[tuple[int, list[str], BaseModel | None, str]] | None = None,
+    row_indices: list[int] | None = None,
 ) -> None:
     """Write a batch of Row nodes + InfoUnits + HAS_MODEL_DECISION links in one
     UNWIND transaction, then write ExtractionResult per row.
@@ -240,20 +575,40 @@ async def _write_row_batch(
 
     # Prepare row data for UNWIND
     rows_data = []
-    for i, row_values in enumerate(rows_batch):
-        row_index = batch_start_index + i
-        row_node_id = f"row_{row_index + 1}"
-        row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
-        row_markdown = row_to_markdown(headers, row_values)
-        info_uid = make_uid(row_composite_id, "row_data")
-        rows_data.append({
-            "id": row_composite_id,
-            "node_id": row_node_id,
-            "row_index": row_index,
-            "appearance_order": row_index + 1,
-            "info_uid": info_uid,
-            "description": row_markdown,
-        })
+    if row_indices is not None:
+        # Pre-built composites: use actual row indices
+        for idx, row_values in zip(row_indices, rows_batch):
+            row_node_id = f"row_{idx + 1}"
+            row_composite_id = f"{table_composite_id}/row_{idx + 1}"
+            row_markdown = row_to_markdown(headers, row_values)
+            info_uid = make_uid(row_composite_id, "row_data")
+            rows_data.append(
+                {
+                    "id": row_composite_id,
+                    "node_id": row_node_id,
+                    "row_index": idx,
+                    "appearance_order": idx + 1,
+                    "info_uid": info_uid,
+                    "description": row_markdown,
+                }
+            )
+    else:
+        for i, row_values in enumerate(rows_batch):
+            row_index = batch_start_index + i
+            row_node_id = f"row_{row_index + 1}"
+            row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
+            row_markdown = row_to_markdown(headers, row_values)
+            info_uid = make_uid(row_composite_id, "row_data")
+            rows_data.append(
+                {
+                    "id": row_composite_id,
+                    "node_id": row_node_id,
+                    "row_index": row_index,
+                    "appearance_order": row_index + 1,
+                    "info_uid": info_uid,
+                    "description": row_markdown,
+                }
+            )
 
     # One transaction: create Row nodes + InfoUnits + HAS_MODEL_DECISION links (UNWIND)
     async with driver.session() as session:
@@ -293,11 +648,14 @@ async def _write_row_batch(
             await tx.rollback()
             raise
 
-    # Write ExtractionResult per row (parallelised, max 10 concurrent writes)
-    sem = asyncio.Semaphore(_PARALLEL_ROW_WRITES)
+    # ── Phase 1 + 2: Use pre-built composites or instantiate inline ────────────
+    if composite_results is None:
+        # Standard path: instantiate + normalize inline (same as before)
+        composite_results: list[tuple[int, list[str], BaseModel | None, str]] = []
 
-    async def _write_single_row(i: int, row_values: list[str]) -> None:
-        async with sem:
+        async def _instantiate_row(
+            i: int, row_values: list[str]
+        ) -> tuple[int, list[str], BaseModel | None, str]:
             row_index = batch_start_index + i
             row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
             row_dict = _build_row_dict(headers, row_values)
@@ -312,7 +670,6 @@ async def _write_row_batch(
                 and primary_cls is not None
                 and primary_field_name is not None
             ):
-                # Build composite instance from row data + mapping
                 composite_instance = _instantiate_composite_from_row(
                     primary_cls=primary_cls,
                     composite_cls=composite_cls,
@@ -321,25 +678,82 @@ async def _write_row_batch(
                     row_dict=row_dict,
                     comp_cls_map=comp_cls_map,
                 )
+                return (i, row_values, composite_instance, extraction_uid)
+            else:
+                return (i, row_values, None, extraction_uid)
+
+        instantiate_tasks = [
+            _instantiate_row(i, row_values) for i, row_values in enumerate(rows_batch)
+        ]
+        composite_results = await asyncio.gather(*instantiate_tasks)
+
+        # ── Phase 2: Normalization hook (inline, for standard path) ────────────
+        if primary_cls is not None:
+            from scinr.newton.config import get_config
+            from scinr.newton.tabular.normalization.engine import NormalizationEngine
+
+            cfg = get_config()
+            normalization_instances: list[tuple[type[BaseModel], BaseModel]] = []
+
+            for _i, _row_values, composite_instance, _extraction_uid in composite_results:
                 if composite_instance is not None:
-                    try:
-                        await write_extraction_subgraph(
-                            driver=driver,
-                            node_full_id=row_composite_id,
-                            composite_instance=composite_instance,
-                            primary_model_class=decision.matched_model_class,
-                            complementary_model_classes=comp_class_names,
-                            document_name=document_name,
-                            extraction_uid=extraction_uid,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "tabular: write_extraction_subgraph failed for %s: %s",
-                            row_composite_id,
-                            exc,
-                        )
+                    primary_instance = getattr(composite_instance, primary_field_name, None)
+                    if primary_instance is not None:
+                        normalization_instances.append((primary_cls, primary_instance))
+                    for class_name in comp_class_names:
+                        comp_cls = comp_cls_map.get(class_name)
+                        if comp_cls is None:
+                            continue
+                        snake_name = _to_snake_case(class_name)
+                        comp_instance = getattr(composite_instance, snake_name, None)
+                        if comp_instance is not None:
+                            normalization_instances.append((comp_cls, comp_instance))
+
+            if normalization_instances and cfg.normalization_enabled:
+                norm_llm = cfg.normalization_llm or cfg.llm
+                engine = NormalizationEngine(
+                    llm=norm_llm,
+                    batch_size=cfg.normalization_batch_size,
+                )
+                try:
+                    normalized = await engine.normalize_instances(normalization_instances)
+                    logger.debug("tabular: normalized %d instances", len(normalized))
+                except Exception as _exc:
+                    logger.error("tabular: normalization batch failed: %s", _exc, exc_info=True)
+
+    # ── Phase 3: Write to Neo4j (parallel) ────────────────────────────────────
+    sem = asyncio.Semaphore(_PARALLEL_ROW_WRITES)
+
+    async def _write_single_row(
+        i: int,
+        row_values: list[str],
+        composite_instance: BaseModel | None,
+        extraction_uid: str,
+    ) -> None:
+        async with sem:
+            row_index = batch_start_index + i
+            row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
+
+            if composite_instance is not None:
+                try:
+                    await write_extraction_subgraph(
+                        driver=driver,
+                        node_full_id=row_composite_id,
+                        composite_instance=composite_instance,
+                        primary_model_class=decision.matched_model_class,
+                        complementary_model_classes=comp_class_names,
+                        document_name=document_name,
+                        extraction_uid=extraction_uid,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "tabular: write_extraction_subgraph failed for %s: %s",
+                        row_composite_id,
+                        exc,
+                    )
             else:
                 # No-model fallback: store raw row data as properties
+                row_dict = _build_row_dict(headers, row_values)
                 try:
                     await _write_raw_row_extraction(
                         driver, row_composite_id, row_dict, document_name, extraction_uid
@@ -351,10 +765,12 @@ async def _write_row_batch(
                         exc,
                     )
 
-    await asyncio.gather(*[
-        _write_single_row(i, row_values)
-        for i, row_values in enumerate(rows_batch)
-    ])
+    await asyncio.gather(
+        *[
+            _write_single_row(i, row_values, composite_instance, extraction_uid)
+            for i, row_values, composite_instance, extraction_uid in composite_results
+        ]
+    )
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
@@ -363,6 +779,56 @@ async def _write_row_batch(
 def _build_row_dict(headers: list[str], row_values: list[str]) -> dict[str, str]:
     """Build {header: value} dict for a single row."""
     return {h: v for h, v in zip(headers, row_values) if h}
+
+
+def _route_row_values(
+    row_dict: dict[str, str],
+    mapping: ColumnMapping,
+    primary_cls: type,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, str]]]:
+    """Route row dict values to primary, supplementary, and complementary kwargs.
+
+    Returns (primary_kwargs, supplementary_kwargs, comp_kwargs) where comp_kwargs
+    is {CamelCaseClassName: {field_name: value}}.
+
+    Same routing logic as _instantiate_composite_from_row but returns raw dicts
+    instead of instantiating models. Reusable for both pre-scan and instantiation.
+    """
+    primary_field_set = set(primary_cls.model_fields.keys())
+    primary_kwargs: dict[str, str] = {}
+    supplementary_kwargs: dict[str, str] = {}
+    comp_kwargs: dict[str, dict[str, str]] = {}
+
+    for col_mapping in mapping.mappings:
+        if col_mapping.confidence == "low":
+            continue
+        field_name = col_mapping.model_field_name
+        if field_name == "__extra__":
+            continue
+
+        value = row_dict.get(col_mapping.column_name, "")
+        if not value:
+            continue
+
+        target = col_mapping.target_model
+
+        if target == "primary":
+            if field_name in primary_field_set:
+                primary_kwargs[field_name] = value
+            else:
+                logger.warning(
+                    "_route_row_values: field %r not found in primary model %r — skipping",
+                    field_name,
+                    primary_cls.__name__,
+                )
+        elif target == "supplementary":
+            supplementary_kwargs[field_name] = value
+        else:
+            if target not in comp_kwargs:
+                comp_kwargs[target] = {}
+            comp_kwargs[target][field_name] = value
+
+    return primary_kwargs, supplementary_kwargs, comp_kwargs
 
 
 def _instantiate_composite_from_row(
@@ -387,57 +853,22 @@ def _instantiate_composite_from_row(
 
     Empty values are skipped (model uses its own defaults).
     """
-    from scinr.newton.entity_extraction.schema_composer import _to_snake_case
-
     comp_cls_map = comp_cls_map or {}
-    primary_field_set = set(primary_cls.model_fields.keys())
-    primary_kwargs: dict[str, str] = {}
-    supplementary_kwargs: dict[str, str] = {}
-    comp_kwargs: dict[str, dict[str, str]] = {}
 
-    for col_mapping in mapping.mappings:
-        # Skip low-confidence and unmapped entries
-        if col_mapping.confidence == "low":
-            continue
-        field_name = col_mapping.model_field_name
-        if field_name == "__extra__":
-            continue
-
-        value = row_dict.get(col_mapping.column_name, "")
-        if not value:
-            continue  # skip empty values; model uses its own default
-
-        target = col_mapping.target_model
-
-        if target == "primary":
-            if field_name in primary_field_set:
-                primary_kwargs[field_name] = value
-            else:
-                logger.warning(
-                    "_instantiate_composite_from_row: field %r not found in primary model %r "
-                    "(target_model='primary' but field is not a primary field) — skipping",
-                    field_name, primary_cls.__name__,
-                )
-        elif target == "supplementary":
-            supplementary_kwargs[field_name] = value
-        else:
-            # Complementary model — keyed by CamelCase class name
-            if target not in comp_kwargs:
-                comp_kwargs[target] = {}
-            comp_kwargs[target][field_name] = value
+    primary_kwargs, supplementary_kwargs, comp_kwargs = _route_row_values(
+        row_dict, mapping, primary_cls
+    )
 
     # ── Instantiate primary model ──────────────────────────────────────────────
     try:
-        primary_instance = primary_cls(**primary_kwargs)
+        primary_instance = primary_cls.model_construct(**primary_kwargs)
     except Exception:
-        try:
-            primary_instance = primary_cls.model_construct(**primary_kwargs)
-        except Exception:
-            logger.warning(
-                "tabular: could not instantiate '%s' from row data (kwargs: %s)",
-                primary_cls.__name__, list(primary_kwargs.keys()),
-            )
-            return None
+        logger.warning(
+            "tabular: could not instantiate '%s' from row data (kwargs: %s)",
+            primary_cls.__name__,
+            list(primary_kwargs.keys()),
+        )
+        return None
 
     # ── Build composite with primary + supplementary + complementary fields ────
     composite_init = {primary_field_name: primary_instance}
@@ -448,9 +879,7 @@ def _instantiate_composite_from_row(
         if k in composite_field_names:
             composite_init[k] = v
         else:
-            logger.debug(
-                "tabular: supplementary field '%s' not in composite schema, skipping", k
-            )
+            logger.debug("tabular: supplementary field '%s' not in composite schema, skipping", k)
 
     # Complementary model instances
     for class_name, kwargs in comp_kwargs.items():
@@ -481,6 +910,242 @@ def _instantiate_composite_from_row(
     except Exception as exc:
         logger.warning("tabular: could not build composite instance: %s", exc)
         return None
+
+
+def _build_normalization_dedup_map(
+    headers: list[str],
+    all_rows: list[list[str]],
+    primary_cls: type,
+    comp_cls_map: dict[str, type],
+    comp_class_names: list[str],
+    mapping: ColumnMapping,
+    get_specs_fn: callable | None = None,
+) -> dict[str, NormalizationEntry]:
+    """Pre-scan all rows to build a global dedup map of unique normalization keys.
+
+    For each row, extracts source values for all normalizable fields (primary +
+    complementary), computes a unique key, and tracks which row indices have
+    that key. No LLM calls, no composite instantiation.
+
+    Returns {unique_key: NormalizationEntry} where each entry's row_indices
+    contains all row indices that share that key.
+    """
+    from scinr.newton.tabular.normalization.engine import NormalizationEngine
+
+    fn = get_specs_fn or get_normalization_specs
+
+    dedup_map: dict[str, NormalizationEntry] = {}
+
+    # Collect specs for primary and all complementary models
+    primary_specs = fn(primary_cls)
+
+    for row_index, row_values in enumerate(all_rows):
+        row_dict = _build_row_dict(headers, row_values)
+        primary_kwargs, _supp_kwargs, comp_kwargs = _route_row_values(
+            row_dict, mapping, primary_cls
+        )
+
+        # Primary model specs
+        for spec in primary_specs:
+            source_values = extract_source_values_from_dict(spec, primary_kwargs, primary_cls)
+            if not source_values:
+                continue
+            unique_key = (
+                f"{spec.target_type.__name__}:"
+                f"{NormalizationEngine._hash_source_values(source_values)}"
+            )
+            if unique_key not in dedup_map:
+                dedup_map[unique_key] = NormalizationEntry(
+                    instance_id=0,
+                    model_class_name=primary_cls.__name__,
+                    field_name=spec.field_name,
+                    target_type=spec.target_type,
+                    source_values=source_values,
+                    unique_key=unique_key,
+                    row_indices=[],
+                )
+            dedup_map[unique_key].row_indices.append(row_index)
+
+        # Complementary model specs
+        for class_name in comp_class_names:
+            comp_cls = comp_cls_map.get(class_name)
+            if comp_cls is None:
+                continue
+            comp_model_kwargs = comp_kwargs.get(class_name, {})
+            for spec in fn(comp_cls):
+                source_values = extract_source_values_from_dict(spec, comp_model_kwargs, comp_cls)
+                if not source_values:
+                    continue
+                unique_key = (
+                    f"{spec.target_type.__name__}:"
+                    f"{NormalizationEngine._hash_source_values(source_values)}"
+                )
+                if unique_key not in dedup_map:
+                    dedup_map[unique_key] = NormalizationEntry(
+                        instance_id=0,
+                        model_class_name=comp_cls.__name__,
+                        field_name=spec.field_name,
+                        target_type=spec.target_type,
+                        source_values=source_values,
+                        unique_key=unique_key,
+                        row_indices=[],
+                    )
+                dedup_map[unique_key].row_indices.append(row_index)
+
+    # Validate comp_kwargs coverage: warn if any comp_class_names have no rows
+    # with mapped values (possible mismatch between col_mapping.target_model
+    # and decision.complementary_models.model_class)
+    for class_name in comp_class_names:
+        comp_cls = comp_cls_map.get(class_name)
+        if comp_cls is None:
+            continue
+        if not instance_has_normalizable_fields(comp_cls):
+            continue
+        # Check if any entry in dedup_map references this class
+        has_entries = any(e.model_class_name == class_name for e in dedup_map.values())
+        if not has_entries:
+            logger.warning(
+                "tabular: complementary model '%s' has normalizable fields "
+                "but no rows were mapped to it (possible target_model mismatch "
+                "between column mapping and decision)",
+                class_name,
+            )
+
+    return dedup_map
+
+
+def _instantiate_composite_plain(
+    table_composite_id: str,
+    row_index: int,
+    headers: list[str],
+    row_values: list[str],
+    mapping: ColumnMapping,
+    decision: AnnotationDecision,
+    primary_cls: type,
+    composite_cls: type,
+    primary_field_name: str,
+    comp_cls_map: dict[str, type],
+) -> tuple[int, list[str], BaseModel | None, str]:
+    """Instantiate a composite model WITHOUT normalization.
+
+    Used for remaining rows where normalization failed or is not applicable.
+    """
+    row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
+    row_dict = _build_row_dict(headers, row_values)
+    extraction_uid = make_uid(
+        "tabular_extraction",
+        row_composite_id,
+        decision.matched_model_class or "raw",
+    )
+
+    composite_instance = _instantiate_composite_from_row(
+        primary_cls=primary_cls,
+        composite_cls=composite_cls,
+        primary_field_name=primary_field_name,
+        mapping=mapping,
+        row_dict=row_dict,
+        comp_cls_map=comp_cls_map,
+    )
+
+    return (row_index, row_values, composite_instance, extraction_uid)
+
+
+def _instantiate_composite_with_normalization(
+    table_composite_id: str,
+    row_index: int,
+    headers: list[str],
+    row_values: list[str],
+    mapping: ColumnMapping,
+    decision: AnnotationDecision,
+    primary_cls: type,
+    composite_cls: type,
+    primary_field_name: str,
+    comp_cls_map: dict[str, type],
+    comp_class_names: list[str],
+    engine: NormalizationEngine,
+    get_specs_fn: callable | None = None,
+) -> tuple[int, list[str], BaseModel | None, str]:
+    """Instantiate a composite model with cached normalization applied.
+
+    Builds the composite from raw row values, then applies cached normalization
+    results from the engine for all normalizable fields.
+
+    Uses dict-based hash (same as pre-scan) to ensure cache lookup consistency.
+    """
+    fn = get_specs_fn or get_normalization_specs
+
+    row_composite_id = f"{table_composite_id}/row_{row_index + 1}"
+    row_dict = _build_row_dict(headers, row_values)
+    extraction_uid = make_uid(
+        "tabular_extraction",
+        row_composite_id,
+        decision.matched_model_class or "raw",
+    )
+
+    # Route values FIRST (needed for dict-based hash, same as pre-scan)
+    primary_kwargs, _supp_kwargs, comp_kwargs = _route_row_values(row_dict, mapping, primary_cls)
+
+    composite_instance = _instantiate_composite_from_row(
+        primary_cls=primary_cls,
+        composite_cls=composite_cls,
+        primary_field_name=primary_field_name,
+        mapping=mapping,
+        row_dict=row_dict,
+        comp_cls_map=comp_cls_map,
+    )
+
+    if composite_instance is None:
+        return (row_index, row_values, None, extraction_uid)
+
+    # Apply cached normalization to primary instance — dict-based hash
+    primary_instance = getattr(composite_instance, primary_field_name, None)
+    if primary_instance is not None:
+        for spec in fn(primary_cls):
+            source_values = extract_source_values_from_dict(spec, primary_kwargs, primary_cls)
+            if not source_values:
+                continue
+            unique_key = (
+                f"{spec.target_type.__name__}:"
+                f"{NormalizationEngine._hash_source_values(source_values)}"
+            )
+            applied = engine.apply_cached_to_instance(
+                primary_instance, spec.field_name, unique_key
+            )
+            if not applied:
+                logger.warning(
+                    "tabular: cache miss for row %d, field '%s', key '%s' "
+                    "(normalization LLM may have failed)",
+                    row_index, spec.field_name, unique_key,
+                )
+
+    # Apply cached normalization to complementary instances — dict-based hash
+    for class_name in comp_class_names:
+        comp_cls = comp_cls_map.get(class_name)
+        if comp_cls is None:
+            continue
+        comp_model_kwargs = comp_kwargs.get(class_name, {})
+        snake_name = _to_snake_case(class_name)
+        comp_instance = getattr(composite_instance, snake_name, None)
+        if comp_instance is None:
+            continue
+        for spec in fn(comp_cls):
+            source_values = extract_source_values_from_dict(spec, comp_model_kwargs, comp_cls)
+            if not source_values:
+                continue
+            unique_key = (
+                f"{spec.target_type.__name__}:"
+                f"{NormalizationEngine._hash_source_values(source_values)}"
+            )
+            applied = engine.apply_cached_to_instance(
+                comp_instance, spec.field_name, unique_key
+            )
+            if not applied:
+                logger.warning(
+                    "tabular: cache miss for row %d, comp '%s' field '%s', key '%s'",
+                    row_index, class_name, spec.field_name, unique_key,
+                )
+
+    return (row_index, row_values, composite_instance, extraction_uid)
 
 
 def _sanitize_rel_type(col_name: str) -> str:
@@ -573,7 +1238,9 @@ async def _write_raw_row_extraction(
         except Exception as exc:
             logger.warning(
                 "_write_raw_row_extraction: failed to write column '%s' for %s after retries: %s",
-                col_name, row_composite_id, exc,
+                col_name,
+                row_composite_id,
+                exc,
             )
 
 
@@ -696,6 +1363,4 @@ async def delete_tabular_subgraph(
             await tx.rollback()
             raise
 
-    logger.info(
-        "delete_tabular_subgraph: deleted table at %s", table_composite_id
-    )
+    logger.info("delete_tabular_subgraph: deleted table at %s", table_composite_id)
