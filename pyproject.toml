@@ -32,10 +32,10 @@ openai = ["langchain-openai>=0.2"]
 ollama = ["langchain-ollama>=0.1"]
 mongodb = ["motor>=3.3", "pymongo>=4.6"]
 docs = [
-    "mkdocs-material>=9.5.30",
-    "mkdocstrings[python]>=0.27.0",
-    "griffe>=0.48.0",
-    "ruff>=0.4.0",
+    "mkdocs-material==9.5.30",
+    "mkdocstrings[python]==1.0.6",
+    "griffe==2.1.0",
+    "ruff==0.15.20",
 ]
 dev = [
     "pytest>=8",

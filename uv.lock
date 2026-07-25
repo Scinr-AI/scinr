@@ -414,14 +414,28 @@ wheels = [
 
 [[package]]
 name = "griffe"
-version = "0.48.0"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "griffecli" },
+    { name = "griffelib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/44/63913c007814cab5ba9d36f25ad40dfc640c2e2931d195bd2d05f774a5d6/griffe-2.1.0.tar.gz", hash = "sha256:c58845df5a364feaabd05ee8c767b97b03e478da8aa18b9923553c812fb0d955", size = 244879, upload-time = "2026-06-19T12:05:41.262Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/fb/3c65d392feae6c36dc2b55a14dd8270b7b35a3171c93b71a4d2ee4abf241/griffe-2.1.0-py3-none-any.whl", hash = "sha256:2ccdab17fb9cd76f278d7b5611cfc8f68cbe846d8d48df63dff80b62ecfa6f65", size = 5140, upload-time = "2026-06-19T12:05:39.913Z" },
+]
+
+[[package]]
+name = "griffecli"
+version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama" },
+    { name = "griffelib" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a8/3c/7f439fe3f55373602c66fcd100abfdbf274f9f4cc832cdc67f2bfd013180/griffe-0.48.0.tar.gz", hash = "sha256:f099461c02f016b6be4af386d5aa92b01fb4efe6c1c2c360dda9a5d0a863bb7f", size = 369612, upload-time = "2024-07-15T09:23:42.318Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/c6/90f85d47af96300d629b38c25b71aad9467a620cac964a39280e822efc8a/griffecli-2.1.0.tar.gz", hash = "sha256:2ff68dbee9395fdb668b10374c51683392d697b226ac60159798f4add1ee716c", size = 56913, upload-time = "2026-06-19T12:05:43.119Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/de/521ff6028fc8977d5669b48d84b002b7bf5c99a3e9c551c92d4c6bf95ec1/griffe-0.48.0-py3-none-any.whl", hash = "sha256:f944c6ff7bd31cf76f264adcd6ab8f3d00a2f972ae5cc8db2d7b6dcffeff65a2", size = 140816, upload-time = "2024-07-15T09:23:36.966Z" },
+    { url = "https://files.pythonhosted.org/packages/80/2f/513232ec1d5f5da182e4ce45a11427e37dd210844a9e2bca451fc9661fb3/griffecli-2.1.0-py3-none-any.whl", hash = "sha256:6e22b1423d562ddc510997b4be1fe89de59e19dcff78831c0f4bfc3b8134a718", size = 9500, upload-time = "2026-06-19T12:05:37.517Z" },
 ]
 
 [[package]]
@@ -2426,7 +2440,7 @@ openai = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.34" },
-    { name = "griffe", marker = "extra == 'docs'", specifier = ">=0.48.0" },
+    { name = "griffe", marker = "extra == 'docs'", specifier = "==2.1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonpath-ng", specifier = ">=1.6" },
     { name = "langchain", specifier = ">=0.3" },
@@ -2435,8 +2449,8 @@ requires-dist = [
     { name = "langchain-openai", marker = "extra == 'openai'", specifier = ">=0.2" },
     { name = "langgraph", specifier = ">=0.2" },
     { name = "lxml", specifier = ">=5.2" },
-    { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5.30" },
-    { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.27.0" },
+    { name = "mkdocs-material", marker = "extra == 'docs'", specifier = "==9.5.30" },
+    { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = "==1.0.6" },
     { name = "motor", marker = "extra == 'mongodb'", specifier = ">=3.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "neo4j", specifier = ">=5.0" },
@@ -2454,7 +2468,7 @@ requires-dist = [
     { name = "python-pptx", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "ruff", marker = "extra == 'docs'", specifier = ">=0.4.0" },
+    { name = "ruff", marker = "extra == 'docs'", specifier = "==0.15.20" },
 ]
 provides-extras = ["bedrock", "openai", "ollama", "mongodb", "docs", "dev"]
 
