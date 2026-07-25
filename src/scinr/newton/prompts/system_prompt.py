@@ -1,11 +1,11 @@
 """
 Extraction system prompt dispatcher for scinr-ingest.
 
-Selects between Claude-optimized and generic prompt variants based on
-the configured PromptFamily. The shared _EXTRACTION_PROMPT_PREFIX is
-defined here and imported by both family-specific modules. The prefix
-uses plain prose and Markdown — no XML instruction wrappers — making
-it compatible with all LLM families.
+Selects between Claude-optimized, generic, and OpenAI reasoning model prompt variants
+based on the configured PromptFamily. The shared _EXTRACTION_PROMPT_PREFIX is
+defined here and imported by all family-specific modules. The prefix uses plain
+prose and Markdown — no XML instruction wrappers — making it compatible with
+all LLM families.
 
 To add a new prompt family:
   1. Create system_prompt_<family>.py with build_extraction_prompt()
@@ -62,6 +62,8 @@ def build_extraction_prompt(theme_section: str) -> str:
     family = get_prompt_family()
     if family == PromptFamily.CLAUDE:
         from scinr.newton.prompts import system_prompt_claude as m
+    elif family == PromptFamily.GPT_REASONING:
+        from scinr.newton.prompts import system_prompt_gpt_reasoning as m
     else:
         from scinr.newton.prompts import system_prompt_generic as m
     return m.build_extraction_prompt(theme_section)

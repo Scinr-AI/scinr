@@ -79,6 +79,17 @@ A complete description includes all numeric values, conditions and qualifiers, r
 and prohibitions, and named entities from the source passage. It is synthesised (not a
 verbatim sentence-by-sentence copy) and grounded exclusively in CURRENT_PAGE content.
 
+- Parent-context completeness: when a passage is a sub-entry whose meaning depends on
+  its parent section or grouping, incorporate the parent identifier and scope in the
+  description so it is independently interpretable. Downstream agents access no other
+  representation — not the parent node's title, not its body text.
+
+  BAD:  "Item 3: replace filter. Interval: 500 hours. Tools: wrench set."
+        (Uninterpretable without knowing which assembly or subsystem item 3 belongs to.)
+  GOOD: "Section 4.2 item 3 (hydraulic pump filter replacement): replace every
+         500 operating hours; required tools: wrench set (sizes 10–17 mm)."
+        (Self-contained: parent section and subject matter are incorporated.)
+
 **Step 6 — Assign node_ids and appearance_order.**
 Follow the node_id FORMAT A/B rules and appearance_order rules defined in the output schema
 field descriptions. Never mix FORMAT A (underscores) and FORMAT B (hyphens) separators within

@@ -59,7 +59,7 @@ class InfoUnit(StrictModel):
         description=(
             "Short label for the semantic concept expressed in this InfoUnit. "
             "3 to 8 words, written as a noun phrase or imperative phrase. "
-            "Example: 'Storage temperature requirement', 'Batch release criteria'."
+            "Examples: 'Maximum load capacity', 'File submission deadline'."
         ),
     )
     order: int = Field(
@@ -73,10 +73,13 @@ class InfoUnit(StrictModel):
     description: str = Field(
         description=(
             "Self-contained technical note preserving all quantitative values, named entities, "
-            "conditions, restrictions, and qualifiers from the source passage. Written as "
-            "synthesised prose — not a verbatim copy and not a one-line topic label. "
-            "Grounded exclusively in CURRENT_PAGE content. "
-            "Downstream agents access no other representation of this content."
+            "conditions, restrictions, and qualifiers from the source passage. "
+            "Written as synthesised prose — not a verbatim copy and not a one-line topic label. "
+            "When the concept is a sub-entry whose meaning depends on its parent section "
+            "or grouping, incorporate the parent identifier and scope so the description "
+            "is independently interpretable — downstream agents access no other "
+            "representation of this content, including parent node titles and body text. "
+            "Grounded exclusively in CURRENT_PAGE content; reflect source ambiguity as-is."
         ),
     )
 
@@ -146,12 +149,15 @@ class StructureNode(StrictModel):
         description=(
             "Ordered list of semantic information units extracted from this structural node. "
             "When the node's title carries semantic content — entity names, numeric values, "
-            "conditions, or qualifiers — represent it as the first InfoUnit (order=0): write a "
-            "description that synthesises what the title communicates. Body-text InfoUnits follow "
-            "at order=1 and above. Omit the heading InfoUnit only for pure structural labels "
-            "such as 'Introduction', 'Scope', or 'Overview' with no independently useful content. "
-            "InfoUnits are the sole content representation available to downstream extraction "
-            "agents — the original title and body text are not re-accessed after this stage."
+            "conditions, or qualifiers — represent it as the first InfoUnit (order=0). "
+            "When this node is a sub-entry whose meaning depends on its parent section "
+            "or grouping, the order=0 description incorporates the parent identifier and "
+            "scope (e.g. 'Section 4.2 item (b): ...') — downstream agents have no "
+            "access to parent node titles or any surrounding context. "
+            "Body-text InfoUnits follow at order=1 and above. "
+            "Omit the heading InfoUnit only for pure structural labels with no independently "
+            "useful content (e.g. 'Introduction', 'Scope', 'Overview'). "
+            "InfoUnits are the sole content representation available to downstream agents."
         ),
     )
     children: list[StructureNode] = Field(

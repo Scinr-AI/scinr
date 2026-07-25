@@ -72,9 +72,13 @@ Step 5 — Write InfoUnit descriptions:
       identifier pattern, personnel role)?
     ✓ Is it synthesised — not a sentence-by-sentence verbatim copy?
     ✓ Is it grounded — does it contain ONLY information from CURRENT_PAGE?
+    ✓ Is it context-complete — if the passage is a sub-entry whose meaning
+      depends on its parent section or grouping, does the description
+      incorporate the parent identifier and scope so a downstream agent can
+      interpret it without access to the parent node?
 
   If any checklist item fails, revise the description before proceeding.
-  A description that passes all six checks is ready.
+  A description that passes all seven checks is ready.
 
 Step 6 — Assign node_ids and appearance_order:
   Follow node_id FORMAT A/B rules and appearance_order rules defined in the
@@ -192,6 +196,10 @@ DESCRIPTION QUALITY RULES:
     ✓ Preserves ALL format specifications and identifier patterns.
     ✓ Is synthesised — not a sentence-by-sentence verbatim copy.
     ✓ Is grounded — contains ONLY information present in CURRENT_PAGE.
+    ✓ Is context-complete: if the concept is a sub-entry whose meaning depends
+      on its parent section or grouping, the description incorporates the parent
+      identifier and scope so downstream agents can interpret it without access
+      to the parent node's title or body text.
 
   A BAD description:
     ✗ Is a one-line topic label: "Storage requirements for the product."
@@ -204,6 +212,10 @@ DESCRIPTION QUALITY RULES:
     ✗ Drops prohibitions: "The product should be stored at low temperature."
       (correct: "The product must be stored at 2–8°C; freezing is prohibited.")
     ✗ Invents or infers content not present in CURRENT_PAGE.
+    ✗ Drops parent context for a sub-entry:
+      "Item 3: replace filter. Interval: 500 hours. Tools: wrench set."
+      (correct: "Section 4.2 item 3 (hydraulic pump filter replacement): replace
+       every 500 operating hours; required tools: wrench set (sizes 10–17 mm).")
 
   FOOTNOTE BODY TEXT:
     If a footnote body appears on CURRENT_PAGE and directly clarifies a concept

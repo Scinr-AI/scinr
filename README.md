@@ -1,18 +1,20 @@
-# scinr-ingest
+# scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr-ingest.svg)](https://pypi.org/project/scinr-ingest/)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.2.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**scinr-ingest** is the core AI-powered document ingestion engine of [Scinr AI Newton](https://www.scinr.com/) — the first AI-native supply chain autonomous orchestration platform purpose-built for the life sciences industry. It converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML) into structured Neo4j knowledge graphs using a 5-stage LLM pipeline.
+**scinr** is an AI-powered document knowledge library for the life sciences industry, built by [Scinr AI](https://www.scinr.com/).
+
+Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a complete 5-stage LLM pipeline that converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML) into structured Neo4j knowledge graphs.
 
 ---
 
-## About Scinr AI Newton
+## About Scinr
 
 SCINR is the first AI-native supply chain autonomous orchestration platform purpose-built for the life sciences industry. It embeds AI at every step of the supply chain — enabling master data orchestration, continuous planning, and self-healing resiliency — to help pharmaceutical and biotech companies prevent medicine shortages, accelerate time-to-market, and maintain full regulatory compliance. Learn more at [scinr.com](https://www.scinr.com/).
 
-`scinr-ingest` is the data ingestion foundation of the Newton platform, enabling AI-driven extraction of structured knowledge from complex biomedical and supply chain documents.
+`scinr` is the open library layer of the Newton platform, providing AI-driven extraction of structured knowledge from complex biomedical and supply chain documents. Its `newton` module is the document ingestion foundation.
 
 ---
 
@@ -43,6 +45,7 @@ SCINR is the first AI-native supply chain autonomous orchestration platform purp
 - **Auto-discovery of extraction domains** — `ThemeRegistry` scans `models/*/catalog.py` at startup; no registration code needed when a new domain is added
 - **Dynamic schema composition** — per-node composite Pydantic schemas built at runtime from the annotation decision (primary + complementary models + supplementary fields)
 - **Global entity deduplication** — `LabeledEntity` singletons keyed by `(label, normalized_value)` enable cross-document dedup in the graph
+- **Cross-document model linking** — `instance_relationships` create typed edges between `ModelInstance` nodes across different document sections; forward-reference shell nodes are merged when the target model is later extracted
 - **Versioning & folder hierarchy** — full document version chain in Neo4j; folder structure mirrored as `IS_COMPOSED_OF` relationships
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `--parallel-docs N` for concurrent document handling at every stage
@@ -107,16 +110,16 @@ SCINR is the first AI-native supply chain autonomous orchestration platform purp
 **Requirements:** Python 3.11+, a running Neo4j instance (5.x+)
 
 ```bash
-pip install scinr-ingest
+pip install scinr
 ```
 
 Install with your preferred LLM provider:
 
 ```bash
-pip install 'scinr-ingest[openai]'    # OpenAI / Azure OpenAI
-pip install 'scinr-ingest[bedrock]'   # AWS Bedrock (Claude)
-pip install 'scinr-ingest[ollama]'    # Ollama (local models)
-pip install 'scinr-ingest[mongodb]'   # Optional MongoDB storage layer
+pip install 'scinr[openai]'    # OpenAI / Azure OpenAI
+pip install 'scinr[bedrock]'   # AWS Bedrock (Claude)
+pip install 'scinr[ollama]'    # Ollama (local models)
+pip install 'scinr[mongodb]'   # Optional MongoDB storage layer
 ```
 
 For development:
@@ -198,13 +201,13 @@ MONGODB_DATABASE=scinr
 Run the full pipeline:
 
 ```bash
-scinr-ingest --stage all --input-raw files/
+newton --stage all --input-raw files/
 ```
 
 Run with parallel processing:
 
 ```bash
-scinr-ingest --stage all --input-raw files/ --parallel-docs 4
+newton --stage all --input-raw files/ --parallel-docs 4
 ```
 
 ---
@@ -257,7 +260,7 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 
 ## LLM Providers
 
-`scinr-ingest` accepts any [LangChain `BaseChatModel`](https://python.langchain.com/docs/concepts/chat_models/) via `configure(llm=...)`.
+`scinr` accepts any [LangChain `BaseChatModel`](https://python.langchain.com/docs/concepts/chat_models/) via `configure(llm=...)`.
 
 | Provider | Extra | Example |
 |---|---|---|
@@ -330,14 +333,14 @@ Extraction models are Pydantic classes that define the typed entities the pipeli
 3. Write Pydantic model classes that inherit from `ExtractionModel`.
 4. No other changes required — `ThemeRegistry` picks up the new domain automatically on next startup.
 
-See [`src/scinr/newton/model-creation/README.md`](src/scinr/newton/model-creation/README.md) for the full guide, including worked examples, entity label conventions, nested model patterns, and `field_relationships` syntax.
+See [`src/scinr/newton/model-creation/README.md`](src/scinr/newton/model-creation/README.md) for the full guide, including worked examples, entity label conventions, nested model patterns, `field_relationships` syntax (entity-level edges within a model instance), and `instance_relationships` syntax (cross-document model linking via `ModelInstance` nodes).
 
 ---
 
 ## Project Structure
 
 ```
-scinr-ingest-library/
+scinr/
 ├── README.md
 ├── LICENSE
 ├── pyproject.toml
@@ -349,7 +352,7 @@ scinr-ingest-library/
     └── scinr/
         └── newton/                 ← scinr.newton package
             ├── __init__.py         ← Public API
-            ├── cli.py              ← CLI entry point (scinr-ingest)
+            ├── cli.py              ← CLI entry point (newton)
             ├── config.py           ← ScinrConfig + configure()
             ├── pipeline.py         ← run_pipeline()
             ├── results.py          ← Result dataclasses

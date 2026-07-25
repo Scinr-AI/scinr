@@ -1,8 +1,8 @@
 """
 Annotation agent prompts dispatcher for scinr-ingest.
 
-Selects between Claude-optimized and generic prompt variants based on
-the configured PromptFamily. Callers import from this module as before —
+Selects between Claude-optimized, generic, and OpenAI reasoning model prompt variants
+based on the configured PromptFamily. Callers import from this module as before —
 no changes needed in nodes.py or other call sites.
 
 To add a new prompt family:
@@ -25,6 +25,8 @@ def _m():
     family = get_prompt_family()
     if family == PromptFamily.CLAUDE:
         from scinr.newton.annotation import prompts_claude as m
+    elif family == PromptFamily.GPT_REASONING:
+        from scinr.newton.annotation import prompts_gpt_reasoning as m
     else:
         from scinr.newton.annotation import prompts_generic as m
     return m

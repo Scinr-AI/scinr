@@ -63,6 +63,7 @@ def fetch_extraction_targets(
     WITH n, md, complementary, supplementary,
          apoc.coll.sortMaps(info_units_unsorted, '^order') AS info_units_sorted
     RETURN n.id          AS node_full_id,
+           n.node_id     AS node_id,
            n.title       AS node_title,
            md.matched_model_class AS model_class,
            complementary,
@@ -94,6 +95,7 @@ def fetch_extraction_targets(
          [s IN supplementary_raw WHERE s IS NOT NULL] AS supplementary,
          collect(iu {{.uid, .title, .description, .order}}) AS info_units
     RETURN n.id          AS node_full_id,
+           n.node_id     AS node_id,
            n.title       AS node_title,
            md.matched_model_class AS model_class,
            complementary,
@@ -121,6 +123,7 @@ def fetch_extraction_targets(
             ius.sort(key=lambda x: (x.get("order") or 0))
             targets.append(ExtractionTarget(
                 node_full_id=row["node_full_id"],
+                node_id=row.get("node_id"),
                 node_title=row.get("node_title"),
                 model_class=row["model_class"],
                 complementary_models=list(row.get("complementary") or []),

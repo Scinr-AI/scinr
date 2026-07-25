@@ -99,6 +99,8 @@ async def _extract_entities(
     info_units: list[dict],
     node_full_id: str,
     semaphore: asyncio.Semaphore,
+    node_id: str | None = None,
+    node_title: str | None = None,
 ) -> tuple[Any | None, str | None]:
     """Run the LLM extraction call for a single node.
 
@@ -121,7 +123,9 @@ async def _extract_entities(
         (extraction, error) — extraction is None on failure, error is None on success.
     """
     system_prompt = build_extraction_system_prompt(composite_schema)
-    human_content = build_extraction_human_message(info_units)
+    human_content = build_extraction_human_message(
+        info_units, node_id=node_id, node_title=node_title
+    )
 
     llm_structured = get_llm(temperature=0.0).with_structured_output(
         composite_schema, include_raw=True
@@ -311,7 +315,12 @@ async def process_single_extraction_target(
         return {"node_full_id": node_full_id, "extraction": None, "error": schema_error}
 
     extraction, extract_error = await _extract_entities(
-        composite_schema, target.get("info_units") or [], node_full_id, bedrock_semaphore
+        composite_schema,
+        target.get("info_units") or [],
+        node_full_id,
+        bedrock_semaphore,
+        node_id=target.get("node_id"),
+        node_title=target.get("node_title"),
     )
     if extraction is None:
         return {"node_full_id": node_full_id, "extraction": None, "error": extract_error}

@@ -14,15 +14,15 @@ if TYPE_CHECKING:
 
 # ─── Tabular Decision Prompt ──────────────────────────────────────────────────
 
-TABULAR_DECISION_PROMPT_TEMPLATE = """You are a pharmaceutical dossier content-matching specialist for tabular files. Your function is to examine the column headers and a small preview of rows from a tabular file (CSV or XLSX) and determine which Pydantic extraction model from a predefined catalog best describes what each ROW in this table represents.
+TABULAR_DECISION_PROMPT_TEMPLATE = """You are a tabular data content-matching specialist. Your function is to examine the column headers and a small preview of rows from a tabular file (CSV or XLSX) and determine which Pydantic extraction model from a predefined catalog best describes what each ROW in this table represents.
 
-This is a TABULAR file: every row represents one instance of the same entity type. The model you select will be used to extract structured data from EACH ROW individually. A wrong model assignment will cause downstream extraction to apply the wrong schema to real pharmaceutical data.
+This is a TABULAR file: every row represents one instance of the same entity type. The model you select will be used to extract structured data from EACH ROW individually. A wrong model assignment will cause downstream extraction to apply the wrong schema to real data.
 
 ## Critical Rules
 
 Rule 1 — COLUMN-FIRST MATCHING:
 Match based on the column HEADERS and what the sample rows show, not on the filename.
-A column called "batch_number" is strong evidence for a batch-related model.
+A column called "invoice_id" or "record_id" is strong evidence for a record-identifier model.
 Always check the sample values to confirm header semantics.
 
 Rule 2 — CONSERVATIVE MATCHING:
@@ -33,8 +33,8 @@ the model and a column header.
 
 Rule 3 — ROW IS THE UNIT OF EXTRACTION:
 Every row in the table represents the same entity. Choose the model that best describes what
-ONE ROW of data represents (e.g. one batch, one stability test, one product specification,
-one component entry). Do not pick a model designed to hold multiple rows.
+ONE ROW of data represents (e.g. one transaction, one test result, one product entry,
+one contract clause). Do not pick a model designed to hold multiple rows.
 
 Rule 4 — AGGREGATE MODEL PROHIBITION:
 Models marked [list container] in the catalog represent an entire document or a major section.
@@ -64,11 +64,11 @@ Execute these steps in strict order. Do not skip any step.
 
 Step 1 — Understand what each COLUMN represents.
 Read each column header and inspect the sample values in the preview. Determine what
-pharmaceutical concept each column captures (e.g. batch identifier, test parameter name,
-measured result, specification limit, storage condition, time point).
+concept each column captures (e.g. record identifier, parameter name,
+measured value, threshold or limit, date, category label).
 
 Step 2 — Build the semantic fingerprint of one row.
-A single row represents one entity instance. List all the distinct pharmaceutical concepts
+A single row represents one entity instance. List all the distinct domain concepts
 captured by the columns together — this is the semantic fingerprint of one row.
 
 Step 3 — Review the catalog for candidate models.
@@ -165,7 +165,7 @@ TABULAR_MAPPING_PROMPT_TEMPLATE = """You are a data mapping specialist. Your tas
 5. target_model values:
    - "primary"          → field belongs to the primary model.
    - "supplementary"    → field belongs to the supplementary fields listed above.
-   - "<CamelCaseName>"  → exact class name of the complementary model (e.g. "BatchAnalysis").
+   - "<CamelCaseName>"  → exact class name of the complementary model (e.g. "LineItemRecord").
 
 6. If a column fits both a complementary model field at medium confidence AND a supplementary
    field at high confidence, emit BOTH entries (both qualify under CASE A). Do not suppress

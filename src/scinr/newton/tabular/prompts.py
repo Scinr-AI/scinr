@@ -2,7 +2,7 @@
 tabular/prompts.py — Tabular pipeline prompt dispatcher and shared utilities.
 
 Shared utility functions (build_full_fields_block, _build_model_fields_block,
-_is_scalar_field) live here and are imported by both family-specific modules.
+_is_scalar_field) live here and are imported by all family-specific modules.
 
 build_tabular_decision_prompt(), build_tabular_mapping_prompt(), and
 build_tabular_theme_prompt() dispatch to the correct family variant.
@@ -28,6 +28,8 @@ def _m():
     family = get_prompt_family()
     if family == PromptFamily.CLAUDE:
         from scinr.newton.tabular import prompts_claude as m
+    elif family == PromptFamily.GPT_REASONING:
+        from scinr.newton.tabular import prompts_gpt_reasoning as m
     else:
         from scinr.newton.tabular import prompts_generic as m
     return m

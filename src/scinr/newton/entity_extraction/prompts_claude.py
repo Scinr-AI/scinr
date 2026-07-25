@@ -19,7 +19,7 @@ def build_extraction_system_prompt(composite_schema: type) -> str:
 3. Preserve exact values from the text — do not paraphrase or normalise units, names, or measurements.
 4. For list fields, extract all instances mentioned in the text, not just the first one.
 5. The text may be fragmented (multiple information units) — read all of it before extracting.
-6. For discriminated union fields (substance_type: 'nce' | 'biotech'), choose based on explicit cues in the text."""
+6. For discriminated union fields (e.g. record_type: 'primary' | 'supplementary'), choose based on explicit cues in the text."""
 
     complementary_rule = ""
     if _has_complementary_fields(composite_schema):
@@ -29,7 +29,7 @@ def build_extraction_system_prompt(composite_schema: type) -> str:
    for in the text. Only return null for a complementary sub-model if NONE of its
    fields appear anywhere in the provided text."""
 
-    return f"""You are a precise information extraction system for pharmaceutical regulatory dossiers.
+    return f"""You are a precise information extraction system for structured documents.
 
 Your task is to extract structured data from the provided document content according to the schema below.
 
