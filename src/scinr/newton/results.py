@@ -14,18 +14,13 @@ from dataclasses import dataclass, field
 class DocumentResult:
     """Result of processing a single document through a pipeline stage.
 
-    Attributes
-    ----------
-    document_name:
-        The Neo4j document_name (or filename stem) of the processed document.
-    nodes_processed:
-        Number of nodes (or files) successfully processed within this document.
-        For stages 0-2, this is 1 for success, 0 for failure.
-        For stages 3-4, this is the number of StructureNodes processed.
-    nodes_failed:
-        Number of nodes (or files) that failed processing within this document.
-    errors:
-        List of error messages for this document. Empty on full success.
+    Attributes:
+        document_name: The Neo4j document_name (or filename stem) of the processed document.
+        nodes_processed: Number of nodes (or files) successfully processed within this document.
+            For stages 0-2, this is 1 for success, 0 for failure.
+            For stages 3-4, this is the number of StructureNodes processed.
+        nodes_failed: Number of nodes (or files) that failed processing within this document.
+        errors: List of error messages for this document. Empty on full success.
     """
 
     document_name: str
@@ -38,23 +33,15 @@ class DocumentResult:
 class StageResult:
     """Aggregated result of running a single pipeline stage.
 
-    Attributes
-    ----------
-    stage:
-        Stage identifier. One of: 'preprocess', 'extraction', 'ingestion',
-        'annotation', 'entity_extraction', 'tabular'.
-    success:
-        True if total_failed == 0 and no global errors occurred.
-    documents:
-        Per-document results. One DocumentResult per file or document processed.
-    total_processed:
-        Sum of nodes_processed across all DocumentResult entries.
-    total_failed:
-        Sum of nodes_failed across all DocumentResult entries.
-    duration_seconds:
-        Wall-clock time in seconds for the entire stage.
-    errors:
-        Global stage-level errors not attributable to a specific document.
+    Attributes:
+        stage: Stage identifier. One of: 'preprocess', 'extraction', 'ingestion',
+            'annotation', 'entity_extraction', 'tabular'.
+        success: True if total_failed == 0 and no global errors occurred.
+        documents: Per-document results. One DocumentResult per file or document processed.
+        total_processed: Sum of nodes_processed across all DocumentResult entries.
+        total_failed: Sum of nodes_failed across all DocumentResult entries.
+        duration_seconds: Wall-clock time in seconds for the entire stage.
+        errors: Global stage-level errors not attributable to a specific document.
     """
 
     stage: str
@@ -70,27 +57,17 @@ class StageResult:
 class PipelineResult:
     """Aggregated result of a full run_pipeline() invocation.
 
-    Attributes
-    ----------
-    success:
-        True only if every executed stage succeeded (no failures or errors).
-    total_duration_seconds:
-        Total wall-clock time for the entire pipeline run.
-    stages_executed:
-        Ordered list of stage names that were actually run (skipped stages
-        are not included).
-    preprocess:
-        StageResult for Stage 0, or None if the stage was not executed.
-    extraction:
-        StageResult for Stage 1, or None if the stage was not executed.
-    ingestion:
-        StageResult for Stage 2, or None if the stage was not executed.
-    annotation:
-        StageResult for Stage 3, or None if the stage was not executed.
-    entity_extraction:
-        StageResult for Stage 4, or None if the stage was not executed.
-    tabular:
-        StageResult for the tabular pipeline, or None if not executed.
+    Attributes:
+        success: True only if every executed stage succeeded (no failures or errors).
+        total_duration_seconds: Total wall-clock time for the entire pipeline run.
+        stages_executed: Ordered list of stage names that were actually run (skipped stages
+            are not included).
+        preprocess: StageResult for Stage 0, or None if the stage was not executed.
+        extraction: StageResult for Stage 1, or None if the stage was not executed.
+        ingestion: StageResult for Stage 2, or None if the stage was not executed.
+        annotation: StageResult for Stage 3, or None if the stage was not executed.
+        entity_extraction: StageResult for Stage 4, or None if the stage was not executed.
+        tabular: StageResult for the tabular pipeline, or None if not executed.
     """
 
     success: bool

@@ -115,89 +115,39 @@ async def run_pipeline(
     Use ``parallel_docs`` to control how many documents are processed
     concurrently across all stages.
 
-    Parameters
-    ----------
-    input_raw:
-        Folder containing raw source files (PDF, DOCX, CSV, XLSX, …) for
-        Stage 0. Required when ``stages`` includes ``"preprocess"`` and
-        ``extraction_input_dir`` is not given. CSV/XLSX files found here are
-        automatically processed via the tabular pipeline.
-    converter_output_dir:
-        Where Stage 0 **writes** its intermediate JSON files to disk. When
-        ``None``, Stage 0 only returns ``IntermediateDocument`` objects in
-        memory without persisting anything.
-    extraction_input_dir:
-        Where Stage 1 **reads** its JSON input from disk, skipping Stage 0
-        entirely. Mutually exclusive with ``input_raw``.
-    extraction_output_dir:
-        Where Stage 1 **writes** its ``extract-*.json`` output to disk. When
-        ``None``, Stage 1 only returns ``Document`` objects in memory.
-    ingestion_input_dir:
-        Where Stage 2 **reads** ``extract-*.json`` files from disk, skipping
-        Stages 0 and 1. Mutually exclusive with ``input_raw`` and
-        ``extraction_input_dir``.
-    stages:
-        Ordered list of stages to execute. Valid values: ``"preprocess"``,
-        ``"extraction"``, ``"ingestion"``, ``"annotation"``,
-        ``"entity_extraction"``, ``"tabular"``. ``None`` runs the full
-        pipeline (all five non-tabular stages). ``"tabular"`` cannot be
-        combined with other stages; it is handled automatically when tabular
-        files are detected in ``input_raw``.
-    document_names:
-        Explicit list of Neo4j ``document_name`` values for Stage 3/4 when
-        running annotation or entity extraction without running Stage 2.
-        Cannot be combined with ``document_names_dir``.
-    document_names_dir:
-        Folder containing ``extract-*.json`` files whose ``document_name``
-        fields are read to build the document list for Stage 3/4. Used when
-        Stage 2 ran in a prior invocation. Ignored (raises ``ValueError``)
-        when ``document_names`` is also provided.
-    manual:
-        If ``True``, annotation (Stage 3) assigns ``model_class`` to all
-        qualifying nodes without calling the LLM. Requires ``model_class``.
-    model_class:
-        CamelCase model class name for manual annotation. Required when
-        ``manual=True``. Must not be provided without ``manual=True``.
-    only_unannotated:
-        Stage 3 only: skip nodes that already have a ``:HAS_MODEL_DECISION``
-        relationship. Useful for resuming an interrupted annotation run.
-    only_unextracted:
-        Stage 4 only: skip nodes that already have a ``:HAS_EXTRACTION``
-        relationship. Useful for resuming an interrupted extraction run.
-    context_instructions:
-        Free-text context about the documents, injected into Stage 0
-        (converter) and Stage 3 (annotation agent).
-    update_mode:
-        If ``True``, Stage 2 replaces the latest document version in Neo4j
-        without creating a new version. Only one source file is allowed when
-        ``update_mode=True``. Cannot be combined with ``replaces``.
-    replaces:
-        ``document_name`` of an existing Neo4j document being superseded by
-        the newly ingested content. Verified in Neo4j before any stage runs.
-        Cannot be combined with ``update_mode``.
-    parallel_docs:
-        Maximum number of documents processed concurrently across all stages,
-        including tabular. Must be >= 1.
-    on_partial_failure:
-        Controls behaviour when a stage returns ``success=False``:
+    Args:
+        input_raw: Folder containing raw source files (PDF, DOCX, CSV, XLSX, …) for
+            Stage 0. Required when `stages` includes `"preprocess"` and `extraction_input_dir`
+            is not given.
+        converter_output_dir: Folder where Stage 0 writes intermediate JSON files to disk.
+            When `None`, intermediate files are kept in memory only.
+        extraction_input_dir: Folder where Stage 1 reads JSON input from disk, skipping Stage 0.
+        extraction_output_dir: Folder where Stage 1 writes `extract-*.json` output files.
+        ingestion_input_dir: Folder where Stage 2 reads `extract-*.json` files from disk, skipping Stages 0 and 1.
+        stages: Ordered list of stage names to execute (`"preprocess"`, `"extraction"`, `"ingestion"`,
+            `"annotation"`, `"entity_extraction"`, `"tabular"`). Default runs full pipeline.
+        document_names: Explicit list of Neo4j `document_name` values for Stage 3/4 runs.
+        document_names_dir: Directory of `extract-*.json` files to extract document names from.
+        manual: If `True`, Stage 3 manual annotation assigns `model_class` without LLM calls.
+        model_class: CamelCase Pydantic model class name for manual annotation.
+        only_unannotated: Skip nodes that already have an annotation decision.
+        only_unextracted: Skip nodes that already have extracted entities.
+        context_instructions: Custom instructions injected into converter and annotation prompts.
+        update_mode: If `True`, Stage 2 replaces latest document version in Neo4j without incrementing version.
+        replaces: `document_name` of existing document superseded by newly ingested document.
+        parallel_docs: Maximum number of documents processed concurrently (default: `1`).
+        on_partial_failure: Control behavior when a stage fails (`"abort"`, `"continue"`, or `"warn"`).
+        tabular_extensions: File extensions to process via tabular pipeline (default: `.csv`, `.xlsx`, `.xls`).
+        tabular_delimiter: Delimiter character for CSV tabular files.
 
-        - ``"abort"`` (default): stop and return with the stages executed so
-          far (``PipelineResult.success=False``).
-        - ``"continue"``: proceed to the next stage regardless.
-        - ``"warn"``: log a warning and proceed.
-    tabular_extensions:
-        File extensions treated as tabular. Defaults to
-        ``{'.csv', '.xlsx', '.xls'}`` when ``None``.
-    tabular_delimiter:
-        Field delimiter for CSV files forwarded to the tabular agent. Uses
-        the agent's default when ``None``.
+    Returns:
+        PipelineResult containing stage metrics, execution flags, and duration.
 
-    Returns
-    -------
-    PipelineResult
-        Aggregated result containing a :class:`~results.StageResult` for
-        every stage that was executed, plus overall ``success`` and
-        ``total_duration_seconds``.
+    Raises:
+        ConfigurationError: If Neo4j or LLM configuration is missing.
+        PreconditionError: If invalid parameters or mutually exclusive options are supplied.
+        ExtractionError: If entity extraction fails.
+        IngestionError: If Neo4j graph write fails.
 
     Raises
     ------

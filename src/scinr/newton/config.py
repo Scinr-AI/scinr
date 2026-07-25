@@ -213,87 +213,39 @@ def configure(
 
     Parameter resolution order: explicit argument > environment variable > default.
 
-    Parameters
-    ----------
-    llm:
-        LangChain BaseChatModel instance to use for all LLM calls.
-        If None, falls back to building a ChatBedrockConverse from MODEL_ID env var.
-    repair_llm:
-        LangChain BaseChatModel for the JSON repair loop.
-        Falls back to llm if None.
-    neo4j_uri:
-        Neo4j connection URI. Env: NEO4J_URI. Default: bolt://localhost:7687.
-    neo4j_user:
-        Neo4j username. Env: NEO4J_USER (or parsed from NEO4J_AUTH).
-    neo4j_password:
-        Neo4j password. Env: NEO4J_PASSWORD (or parsed from NEO4J_AUTH).
-    enabled_base_themes:
-        Whitelist of built-in theme paths to activate. ``None`` activates all built-in themes.
-        Use :data:`ThemePath` values for IDE autocompletion.
-    enabled_user_themes:
-        Whitelist of user theme paths to activate (themes from ``extra_models_paths``).
-        ``None`` activates all user-defined themes.
-    extra_models_paths:
-        List of filesystem paths to scan for additional user-defined themes.
-        Each path should be a directory containing theme subfolders (each with a catalog.py).
-        User themes override built-in themes with the same name (a warning is emitted).
-        Env: SCINR_EXTRA_MODELS_PATHS (colon-separated list of paths).
-    storage_backend:
-        'none' (default), 'mongodb', or 'custom'. Env: STORAGE_BACKEND.
-    mongodb_uri:
-        MongoDB connection URI. Env: MONGODB_URI.
-    mongodb_database:
-        MongoDB database name. Env: MONGODB_DATABASE.
-    mongodb_raw_files_collection:
-        Collection for raw file metadata. Env: MONGODB_RAW_FILES_COLLECTION.
-    mongodb_pages_collection:
-        Collection for converted pages. Env: MONGODB_PAGES_COLLECTION.
-    mongodb_gridfs_bucket:
-        GridFS bucket name. Env: MONGODB_GRIDFS_BUCKET.
-    custom_storage:
-        Tuple (RawFileRepository, PageRepository) when storage_backend='custom'.
-    extra_converters:
-        Dict mapping file extensions to BaseConverter subclasses.
-    mistral_api_key:
-        Mistral API key for PDF conversion. Env: MISTRAL_API_KEY.
-    prompt_caching_enabled:
-        Enable Bedrock Converse prompt caching. Env: PROMPT_CACHING_ENABLED. Default: True.
-    extraction_batch_size:
-        Pages per extraction chunk. Env: EXTRACTION_BATCH_SIZE. Default: 1.
-    llm_concurrency:
-        Max concurrent LLM calls (semaphore size). Env: LLM_CONCURRENCY. Default: 4.
-    neo4j_concurrency:
-        Max concurrent Neo4j session writes (semaphore size) during annotation
-        and entity extraction. Env: NEO4J_CONCURRENCY. Default: 10.
-    log_level:
-        Logging level string. Default: 'INFO'.
-    prompt_family:
-        Which prompt variant family to use. Accepts a PromptFamily enum member or
-        a plain string: "generic" (default), "claude", or "gpt_reasoning".
-        PromptFamily.GENERIC / "generic": simplified, model-agnostic prompts that work
-            across all LLM families (OpenAI, Kimi, GLM, Claude, Ollama, etc.).
-        PromptFamily.CLAUDE / "claude": prompts optimized for Claude/Sonnet with XML
-            instruction structure and extended reasoning protocols.
-        PromptFamily.GPT_REASONING / "gpt_reasoning": prompts for OpenAI reasoning
-            models (GPT-5.5, o3, o4-mini) with Markdown section headers and
-            goal-based language. Use GENERIC for non-reasoning GPT models.
-        Env: PROMPT_FAMILY (values: "generic", "claude", "gpt_reasoning"). Default: "generic".
-    normalization_enabled:
-        Enable post-extraction normalization for tabular pipeline.
-        When enabled, fields marked with ``normalization_model: True`` in their
-        ``json_schema_extra`` are normalized via LLM structured output before
-        writing to Neo4j. Env: NORMALIZATION_ENABLED. Default: False.
-    normalization_batch_size:
-        Maximum number of normalization entries per LLM call batch.
-        Env: NORMALIZATION_BATCH_SIZE. Default: 5.
-    normalization_llm:
-        Dedicated LangChain BaseChatModel for normalization calls.
-        Falls back to the main ``llm`` if None.
+    Args:
+        llm: LangChain BaseChatModel instance to use for all LLM calls.
+        repair_llm: LangChain BaseChatModel for the JSON repair loop. Falls back to `llm` if None.
+        neo4j_uri: Neo4j connection URI. Env: `NEO4J_URI`. Default: `bolt://localhost:7687`.
+        neo4j_user: Neo4j username. Env: `NEO4J_USER`.
+        neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`.
+        enabled_base_themes: Whitelist of built-in theme paths to activate (`ThemePath` values).
+        enabled_user_themes: Whitelist of user theme paths to activate.
+        extra_models_paths: Filesystem paths to scan for additional user-defined theme models.
+        storage_backend: Storage type: `'none'` (default), `'mongodb'`, or `'custom'`.
+        mongodb_uri: MongoDB connection URI. Env: `MONGODB_URI`.
+        mongodb_database: MongoDB database name. Env: `MONGODB_DATABASE`.
+        mongodb_raw_files_collection: Collection for raw file metadata.
+        mongodb_pages_collection: Collection for converted pages.
+        mongodb_gridfs_bucket: GridFS bucket name for binary files.
+        custom_storage: Tuple `(RawFileRepository, PageRepository)` when `storage_backend='custom'`.
+        extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
+        mistral_api_key: Mistral API key for PDF OCR conversion.
+        prompt_caching_enabled: Enable prompt caching for supported LLM providers.
+        extraction_batch_size: Pages per extraction chunk (default: `1`).
+        llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
+        neo4j_concurrency: Max concurrent Neo4j write sessions (default: `10`).
+        log_level: Logging level string (`"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`).
+        prompt_family: Prompt family to use (`"generic"`, `"claude"`, or `"gpt_reasoning"`).
+        normalization_enabled: Enable post-extraction normalization for tabular data.
+        normalization_batch_size: Max normalization entries per LLM batch (default: `5`).
+        normalization_llm: Dedicated LLM model instance for tabular normalization.
 
-    Returns
-    -------
-    ScinrConfig
-        The populated configuration object (also stored as module-level singleton).
+    Returns:
+        ScinrConfig singleton containing active library settings.
+
+    Raises:
+        ConfigurationError: If conflicting settings or invalid URIs are supplied.
     """
     global _config
 
