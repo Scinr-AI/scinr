@@ -58,6 +58,7 @@ class NormalizationEngine:
         self.llm = llm
         self.batch_size = batch_size
         self.concurrency = concurrency
+        self.result_cache: dict[str, BaseModel] = {}
 
     async def normalize_instances(
         self,
@@ -99,7 +100,7 @@ class NormalizationEngine:
 
         if not entries:
             return instances
-
+        
         # Phase 2: Build key → targets map
         key_to_targets: dict[str, list[tuple[int, str]]] = {}
         for entry in entries:
@@ -139,6 +140,125 @@ class NormalizationEngine:
 
         await asyncio.gather(*tasks)
         return instances
+
+    async def process_key_batch(
+        self,
+        entries: list[NormalizationEntry],
+        retry_count: int = 0,
+    ) -> dict[str, BaseModel]:
+        """Process a batch of unique normalization keys via LLM.
+
+        Returns {unique_key: normalized_result} for successfully processed keys.
+        Results are cached in self.result_cache for reuse across batches.
+        """
+        if not entries:
+            return {}
+
+        target_type = entries[0].target_type
+
+        # Validate all entries share the same target_type
+        if len(entries) > 1:
+            assert all(
+                e.target_type is target_type for e in entries
+            ), (
+                f"process_key_batch received heterogeneous target_types: "
+                f"{ {e.target_type.__name__ for e in entries} }"
+            )
+
+        batch_results: dict[str, BaseModel] = {}
+
+        # Build dynamic output schemas (same as _call_llm_batch)
+        BatchOutput = type(
+            f"BatchOutput_{target_type.__name__}",
+            (BaseModel,),
+            {
+                "__annotations__": {"key": str, "result": target_type},
+                "model_config": ConfigDict(extra="forbid"),
+            },
+        )
+        BatchOutput.__doc__ = (
+            f"Normalization result. 'key' must match the input key exactly. "
+            f"'result' is the normalized {target_type.__name__}."
+        )
+
+        BatchResponse = type(
+            f"BatchResponse_{target_type.__name__}",
+            (BaseModel,),
+            {
+                "__annotations__": {"results": list[BatchOutput]},
+                "model_config": ConfigDict(extra="forbid"),
+            },
+        )
+        BatchResponse.__doc__ = (
+            f"Container for normalization batch results. "
+            f"'results' is a list of {target_type.__name__} normalizations."
+        )
+
+        structured_llm = self.llm.with_structured_output(BatchResponse)
+        messages = self._build_batch_messages(entries)
+
+        try:
+            result = await structured_llm.ainvoke(messages)
+
+            if not isinstance(result, BatchResponse):
+                try:
+                    adapter = TypeAdapter(BatchResponse)
+                    result = adapter.validate_python(result)
+                except Exception:
+                    logger.warning(
+                        "Normalization result coercion failed for %s: expected %s, got %s",
+                        target_type.__name__, BatchResponse.__name__, type(result).__name__,
+                    )
+                    return batch_results
+
+            processed_keys: set[str] = set()
+            for item in result.results:
+                key = item.key
+                processed_keys.add(key)
+                batch_results[key] = item.result
+                self.result_cache[key] = item.result
+
+            # Retry missing keys once
+            all_keys = {e.unique_key for e in entries}
+            missing_keys = all_keys - processed_keys
+            if missing_keys and retry_count < 1:
+                retry_entries = [e for e in entries if e.unique_key in missing_keys]
+                logger.warning(
+                    "Normalization: %d/%d results missing, retrying: %s",
+                    len(missing_keys), len(entries), missing_keys,
+                )
+                retry_results = await self.process_key_batch(
+                    retry_entries, retry_count=retry_count + 1
+                )
+                batch_results.update(retry_results)
+
+        except Exception as e:
+            logger.warning(
+                "Normalization batch failed for %s (%d entries): %s",
+                target_type.__name__, len(entries), e,
+            )
+
+        return batch_results
+
+    def apply_cached_to_instance(
+        self,
+        instance: BaseModel,
+        field_name: str,
+        unique_key: str,
+    ) -> bool:
+        """Apply cached normalization result to a specific instance field.
+
+        Returns True if the key was found in cache and applied, False otherwise.
+        """
+        if unique_key not in self.result_cache:
+            return False
+
+        normalized = self.result_cache[unique_key]
+        try:
+            setattr(instance, field_name, normalized)
+        except Exception:
+            object.__setattr__(instance, field_name, normalized)
+        return True
 
     async def _call_llm_batch(
         self,

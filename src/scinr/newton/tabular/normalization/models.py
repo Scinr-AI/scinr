@@ -4,7 +4,7 @@ Modelos de datos para el módulo de normalización post-extracción.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,3 +30,4 @@ class NormalizationEntry:
     target_type: type[BaseModel]
     source_values: dict[str, object]
     unique_key: str  # "{target_type_name}:{md5_hash}"
+    row_indices: list[int] = field(default_factory=list)  # row indices from pre-scan (pre-escaneo)

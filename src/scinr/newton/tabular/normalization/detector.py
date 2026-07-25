@@ -103,6 +103,39 @@ def extract_source_values(
     return values
 
 
+def extract_source_values_from_dict(
+    spec: NormalizationSpec,
+    source_dict: dict[str, str],
+    model_class: type[BaseModel],
+) -> dict[str, Any]:
+    """Extract source values for normalization from a raw dict (pre-scan).
+
+    Mirrors extract_source_values() but reads from a dict instead of a
+    Pydantic instance. Used during pre-scan to build the dedup map without
+    instantiating composites.
+    """
+    values: dict[str, Any] = {}
+
+    if spec.source_fields:
+        for src_field in spec.source_fields:
+            val = source_dict.get(src_field)
+            if val is not None and val != "":
+                values[src_field] = val
+    else:
+        # All fields of the model (implicit source)
+        for field_name, field_info in model_class.model_fields.items():
+            if field_name == spec.field_name:
+                continue
+            ann_type = _extract_target_type(field_info.annotation)
+            if ann_type is not None:
+                continue
+            val = source_dict.get(field_name)
+            if val is not None and val != "":
+                values[field_name] = val
+
+    return values
+
+
 # ─── Helpers internos ────────────────────────────────────────────────────────
 
 
