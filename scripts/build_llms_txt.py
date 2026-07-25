@@ -60,8 +60,14 @@ scinr is a Python library and CLI tool (`newton`) designed to process complex li
         content = md_file.read_text(encoding="utf-8")
         full_docs_chunks.append(f"## File: {rel_path}\n\n{content}\n\n---\n")
 
+        # Copy raw .md file to site/ directory so direct .md URL requests succeed
+        target_md_path = SITE_DIR / rel_path
+        target_md_path.parent.mkdir(parents=True, exist_ok=True)
+        target_md_path.write_text(content, encoding="utf-8")
+
     (SITE_DIR / "llms-full.txt").write_text("".join(full_docs_chunks), encoding="utf-8")
     print(f"Generated {SITE_DIR / 'llms-full.txt'}")
+    print("Copied raw markdown files to site/ output.")
 
 
 if __name__ == "__main__":
