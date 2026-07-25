@@ -85,6 +85,9 @@ logs/
 *~
 .project
 .pydevproject
+superpowers
+docs/superpowers/
+site/
 
 # =============================================================================
 # OPERATING SYSTEM FILES

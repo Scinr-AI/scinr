@@ -1,0 +1,80 @@
+site_name: scinr documentation
+site_description: AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine
+site_url: https://scinr-ai.github.io/scinr/docs/
+
+exclude_docs: |
+  superpowers/*
+
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            docstring_section_style: table
+            show_source: true
+            show_root_heading: true
+            show_symbol_type_heading: true
+            separate_signature: true
+            signature_crossrefs: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+
+nav:
+  - Overview: index.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+  - Configuration: configuration.md
+  - CLI Reference: cli.md
+  - User Guides:
+      - Custom Models: user-guides/custom-models.md
+      - Tabular Pipeline: user-guides/tabular-pipeline.md
+      - Neo4j Graph Storage: user-guides/neo4j-graph.md
+  - API Reference:
+      - Overview: api/index.md
+      - Pipeline (run_pipeline): api/pipeline.md
+      - Configuration (configure): api/config.md
+      - Stages: api/stages.md
+      - Exceptions: api/exceptions.md
+      - Results: api/results.md
