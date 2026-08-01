@@ -18,7 +18,7 @@ Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a com
 
 SCINR is the first agentic memory platform purpose-built for life sciences domains. Learn more at [scinr.com](https://www.scinr.com/).
 
-`scinr` is the open library layer of the Newton platform, providing AI-driven extraction of structured knowledge from complex datasets and regulatory documents. It's `newton` module is the strcutred and unstructured ingestion foundation.
+`scinr` is the open library layer of the Newton platform, providing AI-driven extraction of knowledge from complex datasets and regulatory documents. It's `newton` module is the structured and unstructured ingestion foundation.
 
 ---
 
