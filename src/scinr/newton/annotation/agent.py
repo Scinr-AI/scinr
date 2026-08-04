@@ -100,8 +100,8 @@ async def _run_annotation_parallel(
         Compatible with AnnotationState: keys document_name, nodes_to_annotate, errors.
     """
     from scinr.newton.annotation.neo4j_ops import (
-        ensure_catalog_models,
-        ensure_theme_structure,
+        ensure_catalog_models_once,
+        ensure_theme_structure_once,
         fetch_document_context_instructions,
         fetch_nodes_to_annotate,
     )
@@ -111,8 +111,8 @@ async def _run_annotation_parallel(
     theme_registry = get_theme_registry()
 
     driver = get_async_driver()
-    await ensure_catalog_models(driver)
-    await ensure_theme_structure(driver, theme_registry)
+    await ensure_catalog_models_once(driver)
+    await ensure_theme_structure_once(driver, theme_registry)
     nodes = await fetch_nodes_to_annotate(driver, document_name, only_unannotated=only_unannotated)
     if context_instructions_override is not None:
         doc_context = context_instructions_override
@@ -205,29 +205,23 @@ async def run_annotation_agent(
         raise ValueError("document_name must be a non-empty string.")
 
     from scinr.newton.exceptions import PreconditionError
-    from scinr.newton.ingest.config import get_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names
+    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
 
-    _pre_driver = get_driver()
-    try:
-        with _pre_driver.session() as _session:
-            _pre_row = _session.run(
-                "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
-                name=document_name,
-            ).single()
-        if _pre_row["n"] == 0:
-            raise PreconditionError(
-                f"Document '{document_name}' not found in Neo4j (latest=true). "
-                f"Run run_ingestion() before run_annotation_agent()."
-            )
-    finally:
-        _pre_driver.close()
+    driver = get_async_driver()
+    async with driver.session() as _session:
+        _result = await _session.run(
+            "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
+            name=document_name,
+        )
+        _pre_row = await _result.single()
+    if _pre_row["n"] == 0:
+        raise PreconditionError(
+            f"Document '{document_name}' not found in Neo4j (latest=true). "
+            f"Run run_ingestion() before run_annotation_agent()."
+        )
 
-    driver = get_driver()
-    try:
-        leaf_names = resolve_leaf_document_names(driver, document_name)
-    finally:
-        driver.close()
+    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
 
     # Single document (no IS_COMPOSED_OF children): original behaviour
     if len(leaf_names) == 1 and leaf_names[0] == document_name:
@@ -338,29 +332,26 @@ async def run_manual_annotation(document_name: str, model_class: str) -> int:
     resolve_model_class(model_class)
 
     from scinr.newton.annotation.neo4j_ops import write_manual_annotation
-    from scinr.newton.ingest.config import get_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names
+    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
 
-    driver = get_driver()
-    try:
-        leaf_names = resolve_leaf_document_names(driver, document_name)
-        total_count = 0
-        for leaf_name in leaf_names:
-            try:
-                count = write_manual_annotation(driver, leaf_name, model_class)
-                total_count += count
-                logger.info(
-                    "Manual annotation: assigned %r to %d nodes in %r",
-                    model_class,
-                    count,
-                    leaf_name,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Manual annotation failed for leaf document %r: %s", leaf_name, exc
-                )
-    finally:
-        driver.close()
+    driver = get_async_driver()
+    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
+    total_count = 0
+    for leaf_name in leaf_names:
+        try:
+            count = await write_manual_annotation(driver, leaf_name, model_class)
+            total_count += count
+            logger.info(
+                "Manual annotation: assigned %r to %d nodes in %r",
+                model_class,
+                count,
+                leaf_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Manual annotation failed for leaf document %r: %s", leaf_name, exc
+            )
 
     return total_count
 

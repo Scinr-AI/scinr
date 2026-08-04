@@ -196,3 +196,59 @@ class TestConfigureDefaults:
                 neo4j_user=_DUMMY_USER,
                 # neo4j_password intentionally omitted
             )
+
+
+class TestNeo4jSyncSemaphore:
+    """Tests for get_neo4j_sync_semaphore() / reset_neo4j_sync_semaphore()."""
+
+    def test_get_neo4j_sync_semaphore_default_size(self, monkeypatch):
+        """get_neo4j_sync_semaphore() returns an asyncio.Semaphore sized from cfg.neo4j_sync_concurrency."""
+        import asyncio
+
+        from scinr.newton.config import get_neo4j_sync_semaphore, reset_neo4j_sync_semaphore
+
+        monkeypatch.delenv("NEO4J_SYNC_CONCURRENCY", raising=False)
+        llm = _make_mock_llm()
+        configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        reset_neo4j_sync_semaphore()
+
+        cfg = get_config()
+        sem = get_neo4j_sync_semaphore()
+        assert isinstance(sem, asyncio.Semaphore)
+        assert sem._value == cfg.neo4j_sync_concurrency == 8
+
+    def test_configure_and_reset_neo4j_sync_semaphore_reflects_new_value(self, monkeypatch):
+        """configure(neo4j_sync_concurrency=3) + reset_neo4j_sync_semaphore() picks up the new value."""
+        from scinr.newton.config import get_neo4j_sync_semaphore, reset_neo4j_sync_semaphore
+
+        monkeypatch.delenv("NEO4J_SYNC_CONCURRENCY", raising=False)
+        llm = _make_mock_llm()
+        configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+            neo4j_sync_concurrency=3,
+        )
+        reset_neo4j_sync_semaphore()
+
+        sem = get_neo4j_sync_semaphore()
+        assert sem._value == 3
+
+    def test_configure_respects_neo4j_sync_concurrency_env_var(self, monkeypatch):
+        """NEO4J_SYNC_CONCURRENCY env var is respected when no explicit argument is passed."""
+        monkeypatch.setenv("NEO4J_SYNC_CONCURRENCY", "5")
+
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.neo4j_sync_concurrency == 5

@@ -27,14 +27,17 @@ async def load_sheets(state: TabularState) -> dict:
     Also ensures catalog models and theme structure exist in Neo4j (idempotent),
     mirroring the annotation pipeline's load_nodes() behaviour.
     """
-    from scinr.newton.annotation.neo4j_ops import ensure_catalog_models, ensure_theme_structure
+    from scinr.newton.annotation.neo4j_ops import (
+        ensure_catalog_models_once,
+        ensure_theme_structure_once,
+    )
     from scinr.newton.ingest.config import get_async_driver
     from scinr.newton.utils.theme_registry import get_theme_registry
     theme_registry = get_theme_registry()
 
     driver = get_async_driver()           # singleton — NO cerrar
-    await ensure_catalog_models(driver)
-    await ensure_theme_structure(driver, theme_registry)
+    await ensure_catalog_models_once(driver)
+    await ensure_theme_structure_once(driver, theme_registry)
 
     file_path = Path(state["file_path"])
     logger.info("load_sheets: reading %s", file_path)

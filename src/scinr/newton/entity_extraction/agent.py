@@ -83,13 +83,10 @@ async def _run_entity_extraction_parallel(
     from scinr.newton.config import get_llm_semaphore
     from scinr.newton.entity_extraction.neo4j_ops import fetch_extraction_targets
     from scinr.newton.entity_extraction.nodes import process_single_extraction_target
-    from scinr.newton.ingest.config import get_driver
+    from scinr.newton.ingest.config import get_async_driver
 
-    driver = get_driver()
-    try:
-        targets = fetch_extraction_targets(driver, document_name, only_unextracted=only_unextracted)
-    finally:
-        driver.close()
+    driver = get_async_driver()
+    targets = await fetch_extraction_targets(driver, document_name, only_unextracted=only_unextracted)
 
     logger.info(
         "_run_entity_extraction_parallel: %d targets for document %r",
@@ -172,42 +169,37 @@ async def run_entity_extraction_agent(
         raise ValueError("document_name must be a non-empty string.")
 
     from scinr.newton.exceptions import PreconditionError
-    from scinr.newton.ingest.config import get_driver as _get_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names
+    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
 
-    _pre_driver = _get_driver()
-    try:
-        with _pre_driver.session() as _session:
-            # Check 1: document exists
-            _doc_count = _session.run(
-                "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
-                name=document_name,
-            ).single()["n"]
-            if _doc_count == 0:
-                raise PreconditionError(
-                    f"Document '{document_name}' not found in Neo4j (latest=true). "
-                    f"Run run_ingestion() before run_entity_extraction_agent()."
-                )
-            # Check 2: at least one annotated node exists
-            _annotated_count = _session.run(
-                "MATCH (d:Document {name: $n, latest: true})"
-                "-[:HAS_STRUCTURE|HAS_CHILD*1..]->(sn:StructureNode)"
-                "-[:HAS_MODEL_DECISION]->() RETURN count(sn) AS n",
-                n=document_name,
-            ).single()["n"]
-            if _annotated_count == 0:
-                raise PreconditionError(
-                    f"Document '{document_name}' has no annotated StructureNodes. "
-                    f"Run run_annotation_agent() before run_entity_extraction_agent()."
-                )
-    finally:
-        _pre_driver.close()
+    driver = get_async_driver()
+    async with driver.session() as _session:
+        # Check 1: document exists
+        _result1 = await _session.run(
+            "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
+            name=document_name,
+        )
+        _doc_count = (await _result1.single())["n"]
+        if _doc_count == 0:
+            raise PreconditionError(
+                f"Document '{document_name}' not found in Neo4j (latest=true). "
+                f"Run run_ingestion() before run_entity_extraction_agent()."
+            )
+        # Check 2: at least one annotated node exists
+        _result2 = await _session.run(
+            "MATCH (d:Document {name: $n, latest: true})"
+            "-[:HAS_STRUCTURE|HAS_CHILD*1..]->(sn:StructureNode)"
+            "-[:HAS_MODEL_DECISION]->() RETURN count(sn) AS n",
+            n=document_name,
+        )
+        _annotated_count = (await _result2.single())["n"]
+        if _annotated_count == 0:
+            raise PreconditionError(
+                f"Document '{document_name}' has no annotated StructureNodes. "
+                f"Run run_annotation_agent() before run_entity_extraction_agent()."
+            )
 
-    driver = _get_driver()
-    try:
-        leaf_names = resolve_leaf_document_names(driver, document_name)
-    finally:
-        driver.close()
+    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
 
     # Single document (no IS_COMPOSED_OF children): original behaviour
     if len(leaf_names) == 1 and leaf_names[0] == document_name:

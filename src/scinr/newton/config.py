@@ -125,13 +125,14 @@ class ScinrConfig:
     extraction_batch_size: int = 3
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
+    neo4j_sync_concurrency: int = 8
     # Logging
     log_level: str = "INFO"
     # Prompt family
     prompt_family: PromptFamily = PromptFamily.GENERIC
     # Normalization
-    normalization_enabled: bool = False
-    normalization_batch_size: int = 5
+    normalization_enabled: bool = True
+    normalization_batch_size: int = 3
     normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
 
 
@@ -199,6 +200,7 @@ def configure(
     extraction_batch_size: int | None = None,
     llm_concurrency: int | None = None,
     neo4j_concurrency: int | None = None,
+    neo4j_sync_concurrency: int | None = None,
     # Logging
     log_level: str = "INFO",
     # Prompt family
@@ -235,6 +237,8 @@ def configure(
         extraction_batch_size: Pages per extraction chunk (default: `1`).
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
         neo4j_concurrency: Max concurrent Neo4j write sessions (default: `10`).
+        neo4j_sync_concurrency: Max concurrent Stage 2 (sync ingestion) dispatches
+            to asyncio.to_thread() (default: `8`).
         log_level: Logging level string (`"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`).
         prompt_family: Prompt family to use (`"generic"`, `"claude"`, or `"gpt_reasoning"`).
         normalization_enabled: Enable post-extraction normalization for tabular data.
@@ -346,6 +350,13 @@ def configure(
     _neo4j_concurrency_env = os.getenv("NEO4J_CONCURRENCY", "10")
     resolved_neo4j_concurrency = neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
 
+    _neo4j_sync_concurrency_env = os.getenv("NEO4J_SYNC_CONCURRENCY", "8")
+    resolved_neo4j_sync_concurrency = (
+        neo4j_sync_concurrency
+        if neo4j_sync_concurrency is not None
+        else int(_neo4j_sync_concurrency_env)
+    )
+
     # ── Prompt family ─────────────────────────────────────────────────────────
     _env_prompt_family = os.getenv("PROMPT_FAMILY", "generic").lower()
     if prompt_family is not None:
@@ -420,6 +431,7 @@ def configure(
         extraction_batch_size=resolved_batch_size,
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,
+        neo4j_sync_concurrency=resolved_neo4j_sync_concurrency,
         log_level=log_level,
         prompt_family=resolved_prompt_family,
         normalization_enabled=resolved_normalization_enabled,
@@ -452,6 +464,12 @@ def configure(
         reset_client()
     except Exception:
         pass  # storage mongodb module may not be initialized yet
+
+    try:
+        from scinr.newton.annotation.neo4j_ops import reset_catalog_memoization
+        reset_catalog_memoization()
+    except Exception:
+        pass  # annotation module may not be initialized yet
 
     log.debug(
         "scinr-ingest configured: storage=%s, llm_concurrency=%d, neo4j_concurrency=%d",
@@ -639,3 +657,30 @@ def reset_neo4j_semaphore() -> None:
     """
     global _neo4j_semaphore
     _neo4j_semaphore = None
+
+
+_neo4j_sync_semaphore = None
+
+
+def get_neo4j_sync_semaphore():
+    """Semáforo global que acota cuántos despachos concurrentes a
+    asyncio.to_thread() para Stage 2 (ingestión síncrona) están en vuelo.
+    Debe adquirirse/liberarse SIEMPRE en el event loop (por el llamador de
+    asyncio.to_thread), nunca dentro del worker thread — asyncio.Semaphore
+    no es utilizable fuera de una corrutina con loop activo.
+    """
+    import asyncio
+
+    global _neo4j_sync_semaphore
+    if _neo4j_sync_semaphore is None:
+        cfg = get_config()
+        _neo4j_sync_semaphore = asyncio.Semaphore(cfg.neo4j_sync_concurrency)
+    return _neo4j_sync_semaphore
+
+
+def reset_neo4j_sync_semaphore() -> None:
+    """Reset manual tras configure(neo4j_sync_concurrency=N) — NO se
+    auto-invoca desde configure(), mismo contrato manual que
+    reset_neo4j_semaphore()/reset_llm_semaphore()."""
+    global _neo4j_sync_semaphore
+    _neo4j_sync_semaphore = None

@@ -10,16 +10,254 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from scinr.newton.config import get_llm
+from scinr.newton.config import get_config, get_llm, get_llm_semaphore
 from scinr.newton.extraction.compact_extraction import compact_extraction, get_active_hierarchy
 from scinr.newton.extraction.extraction import ExtractionMaxRetriesError, extract_chunk
 from scinr.newton.models.document_structure import Document
 from scinr.newton.results import DocumentResult, StageResult
 
+if TYPE_CHECKING:
+    from scinr.newton.converters.base import IntermediateDocument
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BATCH_SIZE = 1
+
+async def extract_one_intermediate(
+    doc: IntermediateDocument, output_path: Path | None
+) -> Document | None:
+    """Process a single IntermediateDocument already in memory.
+
+    No document-level concurrency semaphore of its own — the caller
+    (``run_extraction()`` today, a future per-document orchestration engine
+    tomorrow) is responsible for bounding how many of these run concurrently.
+
+    Each real LLM call (via ``extract_chunk()``) is bounded internally by the
+    global ``get_llm_semaphore()`` so that Stage 1 extraction calls never run
+    unbounded relative to the LLM provider's rate limits, regardless of how
+    many documents the caller lets run concurrently.
+
+    Parameters
+    ----------
+    doc:
+        IntermediateDocument produced by run_preprocess() (in-memory mode).
+    output_path:
+        Base output directory for this stage, or None to keep the result
+        in-memory only.
+
+    Returns
+    -------
+    Document | None
+        The extracted Document, or None if the document had no pages.
+    """
+    doc_name = doc.document_name or "unnamed"
+    pages: list[str] = [p.markdown for p in doc.pages]
+    page_ids_by_index: dict[int, str] = {
+        p.index: p.page_id
+        for p in doc.pages
+        if p.page_id
+    }
+    folder_path = doc.folder_path
+    context_instructions = doc.context_instructions
+    total_pages = len(pages)
+
+    logger.info("Processing in-memory document: %s (%d page(s))", doc_name, total_pages)
+
+    if total_pages == 0:
+        logger.warning("Document has no pages — skipping: %s", doc_name)
+        return None
+
+    batch_size = max(1, get_config().extraction_batch_size)
+    chunks: list[tuple[str, list[str]]] = [("", pages[:batch_size])]
+    for i in range(batch_size, total_pages, batch_size):
+        chunks.append((pages[i - 1], pages[i : i + batch_size]))
+
+    doc_path = f"{folder_path}/{doc_name}" if folder_path else doc_name
+    ext = ""  # No file extension for in-memory docs
+
+    document = Document(
+        document_name=doc_name,
+        document_type=ext,
+        document_structure=[],
+        doc_path=doc_path,
+        raw_file_id=doc.raw_file_id or "",
+        context_instructions=context_instructions,
+    )
+    llm = get_llm()
+
+    # Set up output file if output_folder provided
+    if output_path:
+        if folder_path:
+            out_subdir = output_path / Path(folder_path)
+        else:
+            out_subdir = output_path
+        out_subdir.mkdir(parents=True, exist_ok=True)
+        output_file = out_subdir / f"extract-{doc_name}.json"
+    else:
+        output_file = None
+
+    for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
+        active_hierarchy = get_active_hierarchy(document)
+        curr_start_idx = chunk_idx * batch_size
+        curr_page_ids = [
+            page_ids_by_index[curr_start_idx + i]
+            for i in range(len(curr_pages))
+            if (curr_start_idx + i) in page_ids_by_index
+        ] or None
+
+        try:
+            async with get_llm_semaphore():
+                nodes = await extract_chunk(
+                    prev_page=prev_page,
+                    curr_pages=curr_pages,
+                    active_hierarchy=active_hierarchy,
+                    llm=llm,
+                    curr_page_ids=curr_page_ids,
+                    user_context=document.context_instructions or "",
+                )
+        except ExtractionMaxRetriesError:
+            logger.warning(
+                "Chunk %d/%d: all extraction attempts failed — skipping chunk.",
+                chunk_idx + 1, len(chunks),
+            )
+            continue
+
+        document = compact_extraction(document, nodes)
+
+        # Intermediate crash-safe write if output requested
+        if output_file:
+            output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+
+    # Final write if output requested
+    if output_file:
+        output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("Written: %s", output_file)
+
+    return document
+
+
+async def extract_one_file(
+    json_file: Path,
+    output_path: Path | None,
+    input_folder: Path | None,
+) -> Document | None:
+    """Process a single Stage 0 JSON intermediate file from disk.
+
+    No document-level concurrency semaphore of its own — the caller
+    (``run_extraction()`` today, a future per-document orchestration engine
+    tomorrow) is responsible for bounding how many of these run concurrently.
+
+    Each real LLM call (via ``extract_chunk()``) is bounded internally by the
+    global ``get_llm_semaphore()`` so that Stage 1 extraction calls never run
+    unbounded relative to the LLM provider's rate limits, regardless of how
+    many documents the caller lets run concurrently.
+
+    Parameters
+    ----------
+    json_file:
+        Path to the Stage 0 intermediate JSON file to process.
+    output_path:
+        Base output directory for this stage, or None to keep the result
+        in-memory only.
+    input_folder:
+        The root input folder, used to compute the relative subdirectory
+        structure to mirror under output_path. May be None.
+
+    Returns
+    -------
+    Document | None
+        The extracted Document, or None if the file had no pages.
+    """
+    logger.info("Processing file: %s", json_file)
+
+    raw = json.loads(json_file.read_text(encoding="utf-8"))
+    pages: list[str] = [page["markdown"] for page in raw["pages"]]
+    page_ids_by_index: dict[int, str] = {
+        page["index"]: page["page_id"]
+        for page in raw["pages"]
+        if page.get("page_id")
+    }
+    folder_path: str | None = raw.get("folder_path")
+    context_instructions: str | None = raw.get("context_instructions")
+    total_pages = len(pages)
+    logger.info("  Total pages: %d", total_pages)
+
+    if total_pages == 0:
+        logger.warning("  File has no pages — skipping: %s", json_file)
+        return None
+
+    batch_size = max(1, get_config().extraction_batch_size)
+    chunks: list[tuple[str, list[str]]] = [("", pages[:batch_size])]
+    for i in range(batch_size, total_pages, batch_size):
+        chunks.append((pages[i - 1], pages[i : i + batch_size]))
+
+    name, ext = os.path.splitext(json_file)
+    nombre = Path(name).name
+    doc_path = f"{folder_path}/{nombre}" if folder_path else nombre
+
+    document = Document(
+        document_name=nombre,
+        document_type=ext,
+        document_structure=[],
+        doc_path=doc_path,
+        raw_file_id=raw.get("raw_file_id") or "",
+        context_instructions=context_instructions,
+    )
+    llm = get_llm()
+
+    # Determine relative structure to preserve subdir layout
+    if input_folder:
+        try:
+            rel_dir = json_file.relative_to(Path(input_folder)).parent
+        except ValueError:
+            rel_dir = Path(".")
+    else:
+        rel_dir = Path(".")
+
+    if output_path:
+        output_subdir = output_path / rel_dir
+        output_subdir.mkdir(parents=True, exist_ok=True)
+        output_file = output_subdir / f"extract-{json_file.stem}.json"
+    else:
+        output_file = None
+
+    for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
+        active_hierarchy = get_active_hierarchy(document)
+        curr_start_idx = chunk_idx * batch_size
+        curr_page_ids = [
+            page_ids_by_index[curr_start_idx + i]
+            for i in range(len(curr_pages))
+            if (curr_start_idx + i) in page_ids_by_index
+        ] or None
+
+        try:
+            async with get_llm_semaphore():
+                nodes = await extract_chunk(
+                    prev_page=prev_page,
+                    curr_pages=curr_pages,
+                    active_hierarchy=active_hierarchy,
+                    llm=llm,
+                    curr_page_ids=curr_page_ids,
+                    user_context=document.context_instructions or "",
+                )
+        except ExtractionMaxRetriesError:
+            logger.warning(
+                "  Chunk %d/%d: all extraction attempts failed — skipping chunk.",
+                chunk_idx + 1, len(chunks),
+            )
+            continue
+
+        document = compact_extraction(document, nodes)
+
+        if output_file:
+            output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+
+    if output_file:
+        output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("  Written: %s", output_file)
+
+    return document
 
 
 async def run_extraction(
@@ -56,8 +294,6 @@ async def run_extraction(
         A StageResult with counts and errors, and a list of Document objects
         (one per successfully extracted document).
     """
-    from scinr.newton.converters.base import IntermediateDocument  # deferred
-
     t0 = time.monotonic()
 
     # ── Validate inputs ────────────────────────────────────────────────────────
@@ -78,181 +314,16 @@ async def run_extraction(
     async def _process_intermediate(doc: IntermediateDocument) -> Document | None:
         """Process an IntermediateDocument in-memory (no disk read)."""
         async with semaphore:
-            doc_name = doc.document_name or "unnamed"
-            pages: list[str] = [p.markdown for p in doc.pages]
-            page_ids_by_index: dict[int, str] = {
-                p.index: p.page_id
-                for p in doc.pages
-                if p.page_id
-            }
-            folder_path = doc.folder_path
-            context_instructions = doc.context_instructions
-            total_pages = len(pages)
-
-            logger.info("Processing in-memory document: %s (%d page(s))", doc_name, total_pages)
-
-            if total_pages == 0:
-                logger.warning("Document has no pages — skipping: %s", doc_name)
-                return None
-
-            batch_size = max(1, int(os.getenv("EXTRACTION_BATCH_SIZE", str(_DEFAULT_BATCH_SIZE))))
-            chunks: list[tuple[str, list[str]]] = [("", pages[:batch_size])]
-            for i in range(batch_size, total_pages, batch_size):
-                chunks.append((pages[i - 1], pages[i : i + batch_size]))
-
-            doc_path = f"{folder_path}/{doc_name}" if folder_path else doc_name
-            ext = ""  # No file extension for in-memory docs
-
-            document = Document(
-                document_name=doc_name,
-                document_type=ext,
-                document_structure=[],
-                doc_path=doc_path,
-                raw_file_id=doc.raw_file_id or "",
-                context_instructions=context_instructions,
-            )
-            llm = get_llm()
-
-            # Set up output file if output_folder provided
-            if output_path:
-                if folder_path:
-                    out_subdir = output_path / Path(folder_path)
-                else:
-                    out_subdir = output_path
-                out_subdir.mkdir(parents=True, exist_ok=True)
-                output_file = out_subdir / f"extract-{doc_name}.json"
-            else:
-                output_file = None
-
-            for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
-                active_hierarchy = get_active_hierarchy(document)
-                curr_start_idx = chunk_idx * batch_size
-                curr_page_ids = [
-                    page_ids_by_index[curr_start_idx + i]
-                    for i in range(len(curr_pages))
-                    if (curr_start_idx + i) in page_ids_by_index
-                ] or None
-
-                try:
-                    nodes = await extract_chunk(
-                        prev_page=prev_page,
-                        curr_pages=curr_pages,
-                        active_hierarchy=active_hierarchy,
-                        llm=llm,
-                        curr_page_ids=curr_page_ids,
-                        user_context=document.context_instructions or "",
-                    )
-                except ExtractionMaxRetriesError:
-                    logger.warning(
-                        "Chunk %d/%d: all extraction attempts failed — skipping chunk.",
-                        chunk_idx + 1, len(chunks),
-                    )
-                    continue
-
-                document = compact_extraction(document, nodes)
-
-                # Intermediate crash-safe write if output requested
-                if output_file:
-                    output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-
-            # Final write if output requested
-            if output_file:
-                output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-                logger.info("Written: %s", output_file)
-
-            return document
+            return await extract_one_intermediate(doc, output_path)
 
     async def _process_file(json_file: Path) -> Document | None:
         """Process a JSON file from disk."""
         async with semaphore:
-            logger.info("Processing file: %s", json_file)
-
-            raw = json.loads(json_file.read_text(encoding="utf-8"))
-            pages: list[str] = [page["markdown"] for page in raw["pages"]]
-            page_ids_by_index: dict[int, str] = {
-                page["index"]: page["page_id"]
-                for page in raw["pages"]
-                if page.get("page_id")
-            }
-            folder_path: str | None = raw.get("folder_path")
-            context_instructions: str | None = raw.get("context_instructions")
-            total_pages = len(pages)
-            logger.info("  Total pages: %d", total_pages)
-
-            if total_pages == 0:
-                logger.warning("  File has no pages — skipping: %s", json_file)
-                return None
-
-            batch_size = max(1, int(os.getenv("EXTRACTION_BATCH_SIZE", str(_DEFAULT_BATCH_SIZE))))
-            chunks: list[tuple[str, list[str]]] = [("", pages[:batch_size])]
-            for i in range(batch_size, total_pages, batch_size):
-                chunks.append((pages[i - 1], pages[i : i + batch_size]))
-
-            name, ext = os.path.splitext(json_file)
-            nombre = Path(name).name
-            doc_path = f"{folder_path}/{nombre}" if folder_path else nombre
-
-            document = Document(
-                document_name=nombre,
-                document_type=ext,
-                document_structure=[],
-                doc_path=doc_path,
-                raw_file_id=raw.get("raw_file_id") or "",
-                context_instructions=context_instructions,
+            return await extract_one_file(
+                json_file,
+                output_path,
+                Path(input_folder) if input_folder else None,
             )
-            llm = get_llm()
-
-            # Determine relative structure to preserve subdir layout
-            if input_folder:
-                try:
-                    rel_dir = json_file.relative_to(Path(input_folder)).parent
-                except ValueError:
-                    rel_dir = Path(".")
-            else:
-                rel_dir = Path(".")
-
-            if output_path:
-                output_subdir = output_path / rel_dir
-                output_subdir.mkdir(parents=True, exist_ok=True)
-                output_file = output_subdir / f"extract-{json_file.stem}.json"
-            else:
-                output_file = None
-
-            for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
-                active_hierarchy = get_active_hierarchy(document)
-                curr_start_idx = chunk_idx * batch_size
-                curr_page_ids = [
-                    page_ids_by_index[curr_start_idx + i]
-                    for i in range(len(curr_pages))
-                    if (curr_start_idx + i) in page_ids_by_index
-                ] or None
-
-                try:
-                    nodes = await extract_chunk(
-                        prev_page=prev_page,
-                        curr_pages=curr_pages,
-                        active_hierarchy=active_hierarchy,
-                        llm=llm,
-                        curr_page_ids=curr_page_ids,
-                        user_context=document.context_instructions or "",
-                    )
-                except ExtractionMaxRetriesError:
-                    logger.warning(
-                        "  Chunk %d/%d: all extraction attempts failed — skipping chunk.",
-                        chunk_idx + 1, len(chunks),
-                    )
-                    continue
-
-                document = compact_extraction(document, nodes)
-
-                if output_file:
-                    output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-
-            if output_file:
-                output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-                logger.info("  Written: %s", output_file)
-
-            return document
 
     # ── Dispatch: in-memory or from-disk ──────────────────────────────────────
     extracted_docs: list[Document] = []

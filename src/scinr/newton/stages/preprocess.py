@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from scinr.newton.results import DocumentResult, StageResult
-from scinr.newton.storage.factory import get_storage  # noqa: F401 — imported inside function
+from scinr.newton.storage.factory import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ async def run_preprocess(
     input_raw: str,
     output_dir: str | None = None,
     context_instructions: str | None = None,
+    parallel_docs: int = 1,
 ) -> tuple[StageResult, list]:
     """Convert raw source files to intermediate JSON using the converters module.
 
@@ -34,6 +35,9 @@ async def run_preprocess(
         written to disk.
     context_instructions:
         Optional free-text context about the documents being processed.
+    parallel_docs:
+        Maximum number of documents converted concurrently (default: ``1``,
+        i.e. sequential — matches pre-existing behaviour).
 
     Returns
     -------
@@ -58,12 +62,20 @@ async def run_preprocess(
         effective_output_dir = output_dir
 
     try:
-        results = await convert_folder(
+        # NOTE: convert_folder() validates `parallel_docs >= 1` as its very
+        # first statement (before any async work / semaphore creation) and
+        # raises ValueError immediately otherwise — see converters/main.py.
+        # That ValueError is intentionally allowed to propagate up into this
+        # try/except so it is turned into a clean StageResult(success=False)
+        # below, exactly like every other error in this stage, instead of
+        # crashing run_pipeline() with a raw exception.
+        results, failures = await convert_folder(
             Path(input_raw),
             Path(effective_output_dir),
             raw_file_repo=raw_file_repo,
             page_repo=page_repo,
             context_instructions=context_instructions,
+            parallel_docs=parallel_docs,
         )
     except Exception as exc:
         duration = time.monotonic() - t0
@@ -94,6 +106,16 @@ async def run_preprocess(
             )
         )
 
+    for entry_path, error_msg in failures:
+        doc_results.append(
+            DocumentResult(
+                document_name=entry_path.stem,
+                nodes_processed=0,
+                nodes_failed=1,
+                errors=[error_msg],
+            )
+        )
+
     # Clean up temp dir if we used one (docs already captured in memory)
     if _temp_dir:
         shutil.rmtree(_temp_dir, ignore_errors=True)
@@ -101,10 +123,10 @@ async def run_preprocess(
     duration = time.monotonic() - t0
     stage_result = StageResult(
         stage="preprocess",
-        success=True,
+        success=len(failures) == 0,
         documents=doc_results,
-        total_processed=len(doc_results),
-        total_failed=0,
+        total_processed=len(results),
+        total_failed=len(failures),
         duration_seconds=duration,
     )
     return stage_result, intermediate_docs
