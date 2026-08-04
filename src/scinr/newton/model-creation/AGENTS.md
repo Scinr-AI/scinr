@@ -503,6 +503,208 @@ def normalize_variation_code(v: str) -> str:
 
 Apply this in a `NormalizedBaseModel` validator, not inline in the field description, so it applies consistently without relying on the LLM.
 
+### 6.4 The `normalization_model` mechanism
+
+Some nested submodel fields need to be filled in by an LLM **after** a row of structured
+data (CSV/XLSX/XLS) has already been mapped and instantiated — for example, turning a
+free-text `"raw_address"` column into a structured `NormalizedAddress` submodel. This is
+handled by a dedicated `NormalizationEngine` hook that lives in the tabular ingestion
+pipeline. Whether these keys are required or merely useful depends on which pipeline the
+model targets — see §6.5.
+
+Trigger it by adding two keys to `json_schema_extra` on the nested field:
+
+```python
+class NormalizedAddress(ExtractionModel):
+    """Structured, normalized postal address derived from a raw address string."""
+
+    street: str | None = Field(default=None, description="...")
+    city: str | None = Field(default=None, description="...")
+    postal_code: str | None = Field(default=None, description="...")
+    country_code: str | None = Field(default=None, description="...")
+
+
+class ContactRecord(ExtractionModel):
+    """A single contact record imported from a CSV/XLSX file."""
+
+    raw_name: str = Field(..., description="...")
+    raw_address: str = Field(..., description="Free-text address exactly as it appears in the source column.")
+    raw_phone: str | None = Field(default=None, description="...")
+
+    normalized_address: NormalizedAddress | None = Field(
+        default=None,
+        description="Structured address derived from raw_address via LLM normalization.",
+        json_schema_extra={
+            "normalization_model": True,
+            "normalization_source_fields": ["raw_address"],
+        },
+    )
+```
+
+**What actually happens, mechanically (in the tabular pipeline):**
+1. The tabular pipeline maps CSV/XLSX columns onto `ContactRecord` fields and instantiates
+   the model **without any LLM call** for the flat fields (column mapping was already
+   decided by an earlier LLM step).
+2. AFTER instantiation and BEFORE the row is written to Neo4j, the `NormalizationEngine`
+   hook scans every field marked `normalization_model: True`.
+3. It collects the values of the fields listed in `normalization_source_fields` (here:
+   `raw_address`) from each row.
+4. It computes a dedup hash across ALL rows so identical source-value combinations are
+   normalized only once, then batches the unique combinations into `with_structured_output()`
+   LLM calls, grouped by target submodel type (`batch_size` per call — see
+   `configure(normalization_batch_size=...)`).
+5. The resulting `NormalizedAddress` instance is written back onto `normalized_address`
+   via `setattr` (falling back to `object.__setattr__` if standard assignment fails
+   Pydantic validation).
+
+This mechanism is:
+- **Opt-in and off by default.** It only runs if the pipeline caller has explicitly called
+  `configure(normalization_enabled=True, normalization_llm=..., normalization_batch_size=...)`.
+  If `normalization_enabled` is `False` (the default), `normalization_model` is completely
+  inert — everywhere, including in the tabular pipeline.
+- **Tabular-only hook, but the keys stay visible everywhere.** The `NormalizationEngine`
+  hook itself is wired into the tabular ingestion pipeline and nowhere else — it never
+  runs during Stage 3–4 (PDF/DOCX) extraction. During Stage 3–4, the nested field is
+  populated by the extraction LLM call (`with_structured_output`) directly, guided by the
+  field's `description=`. However, `json_schema_extra` content is not stripped before the
+  schema reaches the LLM (the same is true for `entity_label`, `instance_key`, etc.), so if
+  `normalization_model` / `normalization_source_fields` are present they remain visible in
+  the schema and can act as an extra soft hint about which sibling fields the value should
+  be derived from — on top of whatever `description=` already says. See §6.5 for when to
+  add these keys in each pipeline.
+- **Additive, not exclusive.** A field marked `normalization_model: True` is otherwise an
+  ordinary nested-model field for every other purpose in this guide. Its own nested fields
+  (inside the target submodel — e.g. `NormalizedAddress.country_code`) may still carry
+  `entity_label`, `instance_key: True`, `field_relationships`, or `instance_relationships`
+  exactly as described in §4–§5. `normalization_model` only governs *how the field gets
+  filled in* when the source is tabular; it does not change anything about how the graph
+  is built from it afterward.
+
+### 6.5 Mandatory clarification: structured, unstructured, or both
+
+Whether `normalization_model` / `normalization_source_fields` are **required** or merely
+**useful** depends entirely on which pipeline(s) the model will be used with. The rule is: add it *mandatorily* for tabular, and *optionally* everywhere else.
+
+**Before adding (or omitting) `normalization_model` / `normalization_source_fields` on any
+field, you must determine — by asking the user/developer if the task does not already
+state it — which pipeline(s) the model will be used with:**
+- (a) structured data only (CSV / XLSX / XLS via the tabular pipeline)
+- (b) unstructured data only (PDF / DOCX via Stage 3–4 extraction)
+- (c) both
+
+Do not guess. Getting this wrong for case (a) is a silent, hard failure — not a style issue.
+
+| Model will be used with... | Add `normalization_model` + `normalization_source_fields`? |
+|---|---|
+| (a) Structured data only (tabular) | ✅ **Mandatory** — without these keys the tabular `NormalizationEngine` hook never fires for that field, and the nested submodel is never populated (tabular row instantiation only fills explicitly column-mapped fields; it does not run any LLM call against nested submodel fields on its own) |
+| (b) Unstructured data only (Stage 3–4) | ⚪ **Optional** — the extraction LLM fills the nested field directly from `description=` with or without these keys; adding them is harmless and can serve as an extra schema-level hint (see §6.4), but is not required |
+| (c) Both | ✅ **Recommended** — mandatory for the tabular half; optional-but-useful for the unstructured half; using the same declaration on both keeps the model consistent across pipelines instead of maintaining two near-duplicate model definitions |
+
+```python
+# ✅ Minimal viable — model used ONLY for PDF/DOCX extraction (Stage 3–4).
+# The keys are not required here: the extraction LLM fills normalized_address
+# directly from description=.
+class SiteRecord(ExtractionModel):
+    """A manufacturing site as described in a regulatory dossier section."""
+
+    raw_address: str = Field(..., description="Free-text address exactly as written in the document.")
+    normalized_address: NormalizedAddress | None = Field(
+        default=None,
+        description=(
+            "Structured address for this site: street, city, postal code, and country code, "
+            "parsed from the surrounding text. None if the section does not state an address."
+        ),
+    )
+
+# ✅ Also fine, slightly more explicit — same Stage 3–4-only model, but with the
+# normalization keys added anyway as a soft schema-level hint (harmless; useful if this
+# model class is later reused in the tabular pipeline without further edits).
+class SiteRecordWithHint(ExtractionModel):
+    """A manufacturing site as described in a regulatory dossier section."""
+
+    raw_address: str = Field(..., description="Free-text address exactly as written in the document.")
+    normalized_address: NormalizedAddress | None = Field(
+        default=None,
+        description=(
+            "Structured address for this site: street, city, postal code, and country code, "
+            "parsed from the surrounding text. None if the section does not state an address."
+        ),
+        json_schema_extra={
+            "normalization_model": True,
+            "normalization_source_fields": ["raw_address"],
+        },
+    )
+
+# ❌ BAD — model IS used with the tabular pipeline, keys are missing:
+# the field will simply never be populated on tabular ingestion, with no error raised.
+class ContactRecord(ExtractionModel):
+    raw_address: str = Field(..., description="...")
+    normalized_address: NormalizedAddress | None = Field(
+        default=None,
+        description="...",
+        # Missing normalization_model + normalization_source_fields.
+        # Tabular row instantiation fills raw_address from the mapped column,
+        # but normalized_address stays None forever — the NormalizationEngine
+        # hook has nothing to trigger on for this field.
+    )
+```
+
+**Rule:** Clarify structured vs. unstructured vs. both before writing any normalization
+key. If the model is used with the tabular pipeline (case a or c), `normalization_model` +
+explicit `normalization_source_fields` are **mandatory** on every field that needs
+tabular-time normalization — omitting them silently disables normalization for that field.
+If the model is used with Stage 3–4 extraction only (case b), the keys are **optional** and
+never harmful; add them when it helps as a schema-level hint or for consistency, skip them
+when the field is simple enough that `description=` alone is sufficient.
+
+### 6.6 `normalization_source_fields`: never rely on the implicit fallback
+
+`normalization_source_fields` is a `list[str]` of sibling scalar field names on the SAME
+parent model whose values are sent to the LLM to populate the normalized submodel.
+**If you omit it, or leave it empty, the engine silently falls back to using ALL other
+scalar fields of the parent model as source data** (excluding nested-model fields and the
+normalized field itself).
+
+This implicit fallback is a footgun in any model with more than a couple of fields: it
+silently vacuums up unrelated columns as "source data" for the normalization LLM call,
+wasting tokens, leaking irrelevant context into the prompt, and producing normalization
+results that depend on columns the maintainer never intended to feed in.
+
+```python
+# ✅ GOOD — explicit, minimal, intentional source fields
+normalized_address: NormalizedAddress | None = Field(
+    default=None,
+    description="...",
+    json_schema_extra={
+        "normalization_model": True,
+        "normalization_source_fields": ["raw_address"],   # exactly what feeds the LLM — nothing else
+    },
+)
+
+# ❌ BAD — omitted normalization_source_fields
+class ContactRecord(ExtractionModel):
+    raw_name: str = Field(..., description="...")
+    raw_address: str = Field(..., description="...")
+    raw_phone: str | None = Field(default=None, description="...")
+    internal_notes: str | None = Field(default=None, description="...")
+
+    normalized_address: NormalizedAddress | None = Field(
+        default=None,
+        description="...",
+        json_schema_extra={
+            "normalization_model": True,
+            # No normalization_source_fields declared.
+            # Implicit fallback silently sends raw_name, raw_address, raw_phone,
+            # AND internal_notes to the LLM — even though only raw_address is relevant.
+        },
+    )
+```
+
+**Rule:** Always set `normalization_source_fields` explicitly to the exact list of sibling
+fields the normalization actually needs. Never rely on the implicit "all other scalar
+fields" fallback — it silently widens the LLM's input on every wide model and is invisible
+in code review.
+
 ---
 
 ## 7. Docstrings for the Annotation LLM
@@ -740,6 +942,8 @@ class XxxModelList(ExtractionModel):
 | Inheriting from `BaseModel` instead of `ExtractionModel` | `extra="forbid"` is missing; LLM hallucinations not caught | Inherit from `ExtractionModel` (except `Triple` fallback — historical exception) |
 | Class docstring longer than 15 words on the first line | Annotation agent truncates; key info may not be read | First line ≤ 15 words; put details on subsequent lines |
 | Validator without `check_fields=False` on inherited base | Pydantic raises `PydanticUserError` when a subclass doesn't declare the validated field | Always use `check_fields=False` on validators in shared base classes |
+| Omitting `normalization_model` on a field of a model used with the TABULAR pipeline | The tabular `NormalizationEngine` hook has nothing to trigger on; the nested submodel field silently stays `None`/unpopulated on every row, with no error raised | Add `normalization_model: True` + explicit `normalization_source_fields` on every field that needs tabular-time normalization (mandatory for structured/tabular usage — see §6.5) |
+| Omitting `normalization_source_fields` (relying on the implicit fallback) on a wide model | Engine silently sends ALL other scalar fields of the parent model as source data to the normalization LLM — wastes tokens and leaks irrelevant context | Always set `normalization_source_fields` explicitly to the exact sibling fields needed |
 
 ---
 
@@ -765,6 +969,11 @@ class XxxModelList(ExtractionModel):
 - [ ] Every `target_model` in `instance_relationships` has `instance_key: True` on its key fields
 - [ ] Fan-out `join_via` field names exactly match Python field names
 
+### Normalization (`normalization_model`)
+- [ ] Structured-vs-unstructured-vs-both usage was clarified with the user/developer before deciding whether to add `normalization_model` keys
+- [ ] Every field intended to be normalized when the model is used with the tabular pipeline has `normalization_model: True` set — check this explicitly for models shared across both pipelines, since omitting it silently disables normalization only in the tabular path
+- [ ] Every field with `normalization_model: True` has an explicit `normalization_source_fields` list — the implicit "all other scalar fields" fallback is never relied upon
+
 ### Theme registration
 - [ ] `THEME_DESCRIPTION` is specific, technical, and distinguishable
 - [ ] `SELECTABLE_MODELS` lists all top-level models (including list wrappers)
@@ -781,11 +990,5 @@ class XxxModelList(ExtractionModel):
 
 | File | What to learn |
 |---|---|
-| `own_models/pharma_regulatory/variation_guidelines/models.py` | `field_relationships` + `instance_relationships` + `instance_key` on same field; fan-out with fixed anchor |
-| `own_models/pharma_regulatory/bpg/models.py` | Dual `entity_label` + `instance_relationships`; multiple relationships on one list field |
-| `own_models/pharma_regulatory/fees/models.py` | Composite `instance_key` (3 fields); scalar `instance_relationships` |
-| `own_models/pharma_regulatory/qa/models.py` | Cross-document linking from Q&A to variation guidelines models |
-| `own_models/pharma_regulatory/baseModels.py` | `NormalizedBaseModel` with `check_fields=False`; OCR-fix validators |
-| `own_models/pharma_regulatory/structuralSignalModel.py` | 6 enum fields all marked `instance_key: True`; cross-cutting classification model |
 | `src/scinr/newton/model-creation/templates/models.py` | Copy-paste template with all patterns annotated in Spanish |
 | `src/scinr/newton/model-creation/templates/catalog.py` | Copy-paste template for `catalog.py` |
