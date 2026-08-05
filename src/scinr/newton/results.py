@@ -79,3 +79,49 @@ class PipelineResult:
     annotation: StageResult | None = None
     entity_extraction: StageResult | None = None
     tabular: StageResult | None = None
+
+
+@dataclass
+class DeletionResult:
+    """Result of a delete_document() call — full Document + cascade + GC deletion.
+
+    Attributes:
+        path: The Document ``path`` that was targeted for deletion.
+        version: The specific version requested, or None if all versions were targeted.
+        found: True if at least one matching Document existed before deletion. When False,
+            all counters below are 0 and no delete or GC queries were executed.
+        versions_deleted: Sorted list of integer versions that matched and were deleted.
+            Empty when found is False.
+        documents_deleted: Number of :Document nodes deleted (the matched Document(s) plus
+            any reached via IS_COMPOSED_OF*).
+        structure_nodes_deleted: Number of :StructureNode nodes deleted.
+        info_units_deleted: Number of :InfoUnit nodes deleted.
+        model_decisions_deleted: Number of :ModelDecision nodes deleted.
+        proposed_models_deleted: Number of :ProposedModel nodes deleted.
+        proposed_fields_deleted: Number of :ProposedField nodes deleted.
+        extraction_results_deleted: Number of :ExtractionResult nodes deleted.
+        gc_entity_model_instance_deleted: Total :Entity/:ModelInstance nodes deleted across
+            all garbage-collection iterations.
+        gc_entity_model_instance_passes: Number of GC iterations actually run for the
+            Entity/ModelInstance pass (capped at GC_MAX_PASSES).
+        gc_labeled_entity_deleted: Total :LabeledEntity nodes deleted across all
+            garbage-collection iterations.
+        gc_labeled_entity_passes: Number of GC iterations actually run for the
+            LabeledEntity pass (capped at GC_MAX_PASSES).
+    """
+
+    path: str
+    version: int | None
+    found: bool
+    versions_deleted: list[int]
+    documents_deleted: int
+    structure_nodes_deleted: int
+    info_units_deleted: int
+    model_decisions_deleted: int
+    proposed_models_deleted: int
+    proposed_fields_deleted: int
+    extraction_results_deleted: int
+    gc_entity_model_instance_deleted: int
+    gc_entity_model_instance_passes: int
+    gc_labeled_entity_deleted: int
+    gc_labeled_entity_passes: int
