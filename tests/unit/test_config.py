@@ -252,3 +252,128 @@ class TestNeo4jSyncSemaphore:
             neo4j_password=_DUMMY_PASS,
         )
         assert cfg.neo4j_sync_concurrency == 5
+
+
+class TestMistralOcrConfig:
+    """Tests for the mistral_ocr_* chunking/retry/error-strategy parameters."""
+
+    _MISTRAL_OCR_ENV_VARS = (
+        "MISTRAL_OCR_SAFE_MAX_PAGES",
+        "MISTRAL_OCR_SAFE_MAX_BYTES",
+        "MISTRAL_OCR_MAX_RETRIES",
+        "MISTRAL_OCR_RETRY_BACKOFF_SECONDS",
+        "MISTRAL_OCR_CHUNK_CONCURRENCY",
+        "MISTRAL_OCR_ERROR_STRATEGY",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _clear_mistral_ocr_env(self, monkeypatch):
+        """Ensure no stray env vars leak between tests in this class."""
+        for var in self._MISTRAL_OCR_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+    def test_defaults_without_explicit_args(self):
+        """configure() without any mistral_ocr_* kwargs applies the documented defaults."""
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.mistral_ocr_safe_max_pages == 900
+        assert cfg.mistral_ocr_safe_max_bytes == 45 * 1024 * 1024
+        assert cfg.mistral_ocr_max_retries == 3
+        assert cfg.mistral_ocr_retry_backoff_seconds == 2.0
+        assert cfg.mistral_ocr_chunk_concurrency == 1
+        assert cfg.mistral_ocr_error_strategy == "fail_fast"
+
+    def test_explicit_overrides_are_respected(self):
+        """Each mistral_ocr_* kwarg can be overridden explicitly."""
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+            mistral_ocr_safe_max_pages=500,
+            mistral_ocr_safe_max_bytes=10 * 1024 * 1024,
+            mistral_ocr_max_retries=5,
+            mistral_ocr_retry_backoff_seconds=1.5,
+            mistral_ocr_chunk_concurrency=2,
+            mistral_ocr_error_strategy="best_effort",
+        )
+        assert cfg.mistral_ocr_safe_max_pages == 500
+        assert cfg.mistral_ocr_safe_max_bytes == 10 * 1024 * 1024
+        assert cfg.mistral_ocr_max_retries == 5
+        assert cfg.mistral_ocr_retry_backoff_seconds == 1.5
+        assert cfg.mistral_ocr_chunk_concurrency == 2
+        assert cfg.mistral_ocr_error_strategy == "best_effort"
+
+    def test_env_vars_are_respected_when_no_explicit_arg(self, monkeypatch):
+        """MISTRAL_OCR_* env vars are used when no explicit kwarg is passed."""
+        monkeypatch.setenv("MISTRAL_OCR_SAFE_MAX_PAGES", "700")
+        monkeypatch.setenv("MISTRAL_OCR_SAFE_MAX_BYTES", "1000000")
+        monkeypatch.setenv("MISTRAL_OCR_MAX_RETRIES", "7")
+        monkeypatch.setenv("MISTRAL_OCR_RETRY_BACKOFF_SECONDS", "3.5")
+        monkeypatch.setenv("MISTRAL_OCR_CHUNK_CONCURRENCY", "4")
+        monkeypatch.setenv("MISTRAL_OCR_ERROR_STRATEGY", "best_effort")
+
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.mistral_ocr_safe_max_pages == 700
+        assert cfg.mistral_ocr_safe_max_bytes == 1_000_000
+        assert cfg.mistral_ocr_max_retries == 7
+        assert cfg.mistral_ocr_retry_backoff_seconds == 3.5
+        assert cfg.mistral_ocr_chunk_concurrency == 4
+        assert cfg.mistral_ocr_error_strategy == "best_effort"
+
+    def test_invalid_error_strategy_raises_configuration_error(self):
+        """An invalid mistral_ocr_error_strategy value raises ConfigurationError."""
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="mistral_ocr_error_strategy"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                mistral_ocr_error_strategy="invalid_value",
+            )
+
+    def test_safe_max_pages_below_one_raises_configuration_error(self):
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="mistral_ocr_safe_max_pages"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                mistral_ocr_safe_max_pages=0,
+            )
+
+    def test_safe_max_bytes_below_one_raises_configuration_error(self):
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="mistral_ocr_safe_max_bytes"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                mistral_ocr_safe_max_bytes=0,
+            )
+
+    def test_max_retries_below_one_raises_configuration_error(self):
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="mistral_ocr_max_retries"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                mistral_ocr_max_retries=0,
+            )

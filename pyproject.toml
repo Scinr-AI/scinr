@@ -24,6 +24,7 @@ dependencies = [
     "httpx>=0.27",
     "Pillow>=10.3",
     "pdfplumber>=0.11",
+    "pypdf>=5.0",  # PDF splitting
 ]
 
 [project.optional-dependencies]

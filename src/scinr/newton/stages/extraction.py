@@ -53,6 +53,12 @@ async def extract_one_intermediate(
     """
     doc_name = doc.document_name or "unnamed"
     pages: list[str] = [p.markdown for p in doc.pages]
+    # position -> original absolute page index. In best_effort mode, chunks
+    # that were skipped leave gaps in `doc.pages[i].index` (e.g. [0, 1, 4, 5]
+    # instead of [0, 1, 2, 3]), so list position no longer equals absolute
+    # index. This mapping is used to translate position -> absolute index
+    # before looking up page_ids_by_index below.
+    page_indices: list[int] = [p.index for p in doc.pages]
     page_ids_by_index: dict[int, str] = {
         p.index: p.page_id
         for p in doc.pages
@@ -99,11 +105,11 @@ async def extract_one_intermediate(
 
     for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
         active_hierarchy = get_active_hierarchy(document)
-        curr_start_idx = chunk_idx * batch_size
+        curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
         curr_page_ids = [
-            page_ids_by_index[curr_start_idx + i]
+            page_ids_by_index[page_indices[curr_start_idx + i]]
             for i in range(len(curr_pages))
-            if (curr_start_idx + i) in page_ids_by_index
+            if page_indices[curr_start_idx + i] in page_ids_by_index
         ] or None
 
         try:
@@ -173,6 +179,10 @@ async def extract_one_file(
 
     raw = json.loads(json_file.read_text(encoding="utf-8"))
     pages: list[str] = [page["markdown"] for page in raw["pages"]]
+    # position -> original absolute page index. See comment in
+    # extract_one_intermediate() for why this is needed when best_effort
+    # chunking left gaps in the original page indices.
+    page_indices: list[int] = [page["index"] for page in raw["pages"]]
     page_ids_by_index: dict[int, str] = {
         page["index"]: page["page_id"]
         for page in raw["pages"]
@@ -224,11 +234,11 @@ async def extract_one_file(
 
     for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
         active_hierarchy = get_active_hierarchy(document)
-        curr_start_idx = chunk_idx * batch_size
+        curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
         curr_page_ids = [
-            page_ids_by_index[curr_start_idx + i]
+            page_ids_by_index[page_indices[curr_start_idx + i]]
             for i in range(len(curr_pages))
-            if (curr_start_idx + i) in page_ids_by_index
+            if page_indices[curr_start_idx + i] in page_ids_by_index
         ] or None
 
         try:

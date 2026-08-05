@@ -120,6 +120,12 @@ class ScinrConfig:
     extra_converters: dict[str, type] = field(default_factory=dict)
     # PDF
     mistral_api_key: str | None = None
+    mistral_ocr_safe_max_pages: int = 900
+    mistral_ocr_safe_max_bytes: int = 45 * 1024 * 1024  # 45 MiB
+    mistral_ocr_max_retries: int = 3
+    mistral_ocr_retry_backoff_seconds: float = 2.0
+    mistral_ocr_chunk_concurrency: int = 1  # reservado para paralelismo futuro, no usado aún
+    mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] = "fail_fast"
     # Pipeline behaviour
     prompt_caching_enabled: bool = True
     extraction_batch_size: int = 3
@@ -195,6 +201,12 @@ def configure(
     extra_converters: dict[str, type] | None = None,
     # PDF
     mistral_api_key: str | None = None,
+    mistral_ocr_safe_max_pages: int | None = None,
+    mistral_ocr_safe_max_bytes: int | None = None,
+    mistral_ocr_max_retries: int | None = None,
+    mistral_ocr_retry_backoff_seconds: float | None = None,
+    mistral_ocr_chunk_concurrency: int | None = None,
+    mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
     # Pipeline behaviour
     prompt_caching_enabled: bool | None = None,
     extraction_batch_size: int | None = None,
@@ -233,6 +245,31 @@ def configure(
         custom_storage: Tuple `(RawFileRepository, PageRepository)` when `storage_backend='custom'`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
+        mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
+            API de Mistral OCR antes de dividirlo. Env: `MISTRAL_OCR_SAFE_MAX_PAGES`.
+            Default: `900`.
+        mistral_ocr_safe_max_bytes: Máximo de bytes por chunk de PDF (tamaño ya
+            serializado) enviado a la API de Mistral OCR antes de dividirlo.
+            Env: `MISTRAL_OCR_SAFE_MAX_BYTES`. Default: `45 * 1024 * 1024` (45 MiB).
+        mistral_ocr_max_retries: Número máximo de intentos por chunk ante errores
+            de red o HTTP reintentables. Env: `MISTRAL_OCR_MAX_RETRIES`. Default: `3`.
+        mistral_ocr_retry_backoff_seconds: Base (en segundos) del backoff exponencial
+            entre reintentos. Env: `MISTRAL_OCR_RETRY_BACKOFF_SECONDS`. Default: `2.0`.
+        mistral_ocr_chunk_concurrency: Reservado para paralelismo futuro entre chunks
+            de PDF; actualmente no se usa (procesamiento siempre secuencial).
+            Env: `MISTRAL_OCR_CHUNK_CONCURRENCY`. Default: `1`.
+        mistral_ocr_error_strategy: Estrategia de manejo de errores al convertir
+            PDFs divididos en chunks: `'fail_fast'` (default, aborta el documento
+            completo si algún chunk falla) o `'best_effort'` (omite los chunks que
+            fallen y continúa con el resto). Env: `MISTRAL_OCR_ERROR_STRATEGY`.
+            Default: `'fail_fast'`.
+            Nota: esta estrategia solo aplica a fallos de red/API por chunk
+            (reintentos agotados, errores HTTP no reintentables) una vez que
+            el PDF ya fue dividido en chunks. NO cubre el caso en que la
+            propia partición inicial falla estructuralmente (`PdfSplitError`,
+            una página individual excede `mistral_ocr_safe_max_bytes` incluso
+            aislada) — en ese caso el documento aborta siempre,
+            independientemente del valor de `mistral_ocr_error_strategy`.
         prompt_caching_enabled: Enable prompt caching for supported LLM providers.
         extraction_batch_size: Pages per extraction chunk (default: `1`).
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
@@ -256,12 +293,19 @@ def configure(
     # Setup logging first
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
 
+    # Resolved early (moved up from its original position below) because the
+    # Bedrock client construction just below needs it to size its connection
+    # pool (max_pool_connections) relative to the configured LLM concurrency.
+    _concurrency_env = os.getenv("LLM_CONCURRENCY", "4")
+    resolved_concurrency = llm_concurrency if llm_concurrency is not None else int(_concurrency_env)
+
     # ── LLM ──────────────────────────────────────────────────────────────────
     resolved_llm = llm
     if resolved_llm is None:
         model_id = os.getenv("MODEL_ID")
         if model_id:
             try:
+                from botocore.config import Config as BotocoreConfig
                 from langchain_aws import ChatBedrockConverse
             except ImportError as exc:
                 raise ConfigurationError(
@@ -273,6 +317,9 @@ def configure(
                 region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
                 max_tokens=int(os.getenv("MAX_TOKENS", "65536")),
                 temperature=0,
+                config=BotocoreConfig(
+                    max_pool_connections=max(resolved_concurrency * 2, 20)
+                ),
             )
         else:
             raise ConfigurationError(
@@ -333,6 +380,56 @@ def configure(
             f"Valid values: 'none', 'mongodb', 'custom'."
         )
 
+    # ── PDF / Mistral OCR chunking ───────────────────────────────────────────
+    resolved_mistral_ocr_safe_max_pages = (
+        mistral_ocr_safe_max_pages
+        if mistral_ocr_safe_max_pages is not None
+        else int(os.getenv("MISTRAL_OCR_SAFE_MAX_PAGES", "900"))
+    )
+    if resolved_mistral_ocr_safe_max_pages < 1:
+        raise ConfigurationError(
+            f"mistral_ocr_safe_max_pages must be >= 1. "
+            f"Received: {resolved_mistral_ocr_safe_max_pages!r}."
+        )
+    resolved_mistral_ocr_safe_max_bytes = (
+        mistral_ocr_safe_max_bytes
+        if mistral_ocr_safe_max_bytes is not None
+        else int(os.getenv("MISTRAL_OCR_SAFE_MAX_BYTES", str(45 * 1024 * 1024)))
+    )
+    if resolved_mistral_ocr_safe_max_bytes < 1:
+        raise ConfigurationError(
+            f"mistral_ocr_safe_max_bytes must be >= 1. "
+            f"Received: {resolved_mistral_ocr_safe_max_bytes!r}."
+        )
+    resolved_mistral_ocr_max_retries = (
+        mistral_ocr_max_retries
+        if mistral_ocr_max_retries is not None
+        else int(os.getenv("MISTRAL_OCR_MAX_RETRIES", "3"))
+    )
+    if resolved_mistral_ocr_max_retries < 1:
+        raise ConfigurationError(
+            f"mistral_ocr_max_retries must be >= 1. "
+            f"Received: {resolved_mistral_ocr_max_retries!r}."
+        )
+    resolved_mistral_ocr_retry_backoff_seconds = (
+        mistral_ocr_retry_backoff_seconds
+        if mistral_ocr_retry_backoff_seconds is not None
+        else float(os.getenv("MISTRAL_OCR_RETRY_BACKOFF_SECONDS", "2.0"))
+    )
+    resolved_mistral_ocr_chunk_concurrency = (
+        mistral_ocr_chunk_concurrency
+        if mistral_ocr_chunk_concurrency is not None
+        else int(os.getenv("MISTRAL_OCR_CHUNK_CONCURRENCY", "1"))
+    )
+    resolved_mistral_ocr_error_strategy = mistral_ocr_error_strategy or os.getenv(
+        "MISTRAL_OCR_ERROR_STRATEGY", "fail_fast"
+    )
+    if resolved_mistral_ocr_error_strategy not in ("fail_fast", "best_effort"):
+        raise ConfigurationError(
+            f"Unknown mistral_ocr_error_strategy: {resolved_mistral_ocr_error_strategy!r}. "
+            f"Valid values: 'fail_fast', 'best_effort'."
+        )
+
     # ── Pipeline behaviour ────────────────────────────────────────────────────
     resolved_caching = (
         prompt_caching_enabled
@@ -344,8 +441,9 @@ def configure(
         if extraction_batch_size is not None
         else int(os.getenv("EXTRACTION_BATCH_SIZE", "1"))
     )
-    _concurrency_env = os.getenv("LLM_CONCURRENCY", "4")
-    resolved_concurrency = llm_concurrency if llm_concurrency is not None else int(_concurrency_env)
+    # resolved_concurrency is computed earlier (see "── LLM" section above),
+    # before the Bedrock client is constructed, so it's available for the
+    # botocore connection pool sizing there too.
 
     _neo4j_concurrency_env = os.getenv("NEO4J_CONCURRENCY", "10")
     resolved_neo4j_concurrency = neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
@@ -427,6 +525,12 @@ def configure(
         custom_storage=custom_storage,
         extra_converters=extra_converters or {},
         mistral_api_key=mistral_api_key or os.getenv("MISTRAL_API_KEY"),
+        mistral_ocr_safe_max_pages=resolved_mistral_ocr_safe_max_pages,
+        mistral_ocr_safe_max_bytes=resolved_mistral_ocr_safe_max_bytes,
+        mistral_ocr_max_retries=resolved_mistral_ocr_max_retries,
+        mistral_ocr_retry_backoff_seconds=resolved_mistral_ocr_retry_backoff_seconds,
+        mistral_ocr_chunk_concurrency=resolved_mistral_ocr_chunk_concurrency,
+        mistral_ocr_error_strategy=resolved_mistral_ocr_error_strategy,
         prompt_caching_enabled=resolved_caching,
         extraction_batch_size=resolved_batch_size,
         llm_concurrency=resolved_concurrency,

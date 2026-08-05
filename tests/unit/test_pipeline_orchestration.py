@@ -224,27 +224,24 @@ def _write_extraction_jsons(tmp_path, names: list[str]) -> None:
 
 
 class TestOnPartialFailureAbort:
-    @pytest.mark.parametrize("on_partial_failure", ["abort", "continue", "warn"])
     async def test_abort_stops_pipeline_before_later_stages(
         self,
         mock_stages,
         mock_infra,
         mock_unit_stage_fns,
         tmp_path,
-        on_partial_failure,
     ):
         """A failed intermediate stage (annotation) for one document must
-        stop THAT document's own remaining stages ("soft-abort", per-unit):
-        entity_extraction is never invoked for the failing document, while
-        its sibling — whose annotation succeeds — DOES reach
-        entity_extraction normally.
+        stop THAT document's own remaining stages ("soft-abort", per-unit)
+        when `on_partial_failure="abort"` (the default): entity_extraction is
+        never invoked for the failing document, while its sibling — whose
+        annotation succeeds — DOES reach entity_extraction normally.
 
-        Per the per-document-unit engine (Bloque B), this invariant holds
-        identically regardless of `on_partial_failure`'s value — that flag
-        only gates the (unrelated) tabular short-circuit and the 'warn'
-        logging; it no longer controls whether later stages run for
-        surviving units. Parametrized over all three values to demonstrate
-        this explicitly in one test.
+        This per-unit soft-abort is gated by `on_partial_failure` for the
+        `annotation`/`entity_extraction` stages specifically (see
+        `TestOnPartialFailureContinue` / `TestOnPartialFailureWarn` below for
+        the "continue"/"warn" counterparts, where the failing document's
+        chain keeps advancing instead of stopping here).
         """
         _write_extraction_jsons(tmp_path, ["doc-good", "doc-bad"])
 
@@ -278,7 +275,7 @@ class TestOnPartialFailureAbort:
         result = await run_pipeline(
             stages=["extraction", "ingestion", "annotation", "entity_extraction"],
             extraction_input_dir=str(tmp_path),
-            on_partial_failure=on_partial_failure,
+            on_partial_failure="abort",
         )
 
         # entity_extraction is invoked exactly once — for the surviving
@@ -312,10 +309,11 @@ class TestOnPartialFailureContinue:
         self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path
     ):
         """Same failing-annotation scenario as the abort test, but explicitly
-        pinned for on_partial_failure='continue': the surviving sibling
-        document advances normally all the way to entity_extraction and is
-        reported as fully successful there, even though its sibling failed
-        annotation.
+        pinned for on_partial_failure='continue': BOTH documents advance all
+        the way to entity_extraction — the surviving sibling because its own
+        annotation succeeded, and doc-bad because 'continue' means a partial
+        node-level failure in one stage (`nodes_failed > 0`) no longer stops
+        that document from reaching its next requested stage.
         """
         _write_extraction_jsons(tmp_path, ["doc-good", "doc-bad"])
 
@@ -337,14 +335,17 @@ class TestOnPartialFailureContinue:
                 failed=0,
             )
 
+        async def _entity_extraction_side_effect(document_name, **kwargs):
+            return _sr(
+                "entity_extraction",
+                success=True,
+                documents=[DocumentResult(document_name, 5, 0)],
+                processed=5,
+                failed=0,
+            )
+
         mock_stages["run_annotation"].side_effect = _annotation_side_effect
-        mock_stages["run_entity_extraction"].return_value = _sr(
-            "entity_extraction",
-            success=True,
-            documents=[DocumentResult("doc-good", 5, 0)],
-            processed=5,
-            failed=0,
-        )
+        mock_stages["run_entity_extraction"].side_effect = _entity_extraction_side_effect
 
         result = await run_pipeline(
             stages=["extraction", "ingestion", "annotation", "entity_extraction"],
@@ -352,16 +353,22 @@ class TestOnPartialFailureContinue:
             on_partial_failure="continue",
         )
 
-        mock_stages["run_entity_extraction"].assert_called_once()
-        assert mock_stages["run_entity_extraction"].call_args[0][0] == "doc-good"
+        assert mock_stages["run_entity_extraction"].call_count == 2
+        ee_call_names = {
+            call.args[0] for call in mock_stages["run_entity_extraction"].call_args_list
+        }
+        assert ee_call_names == {"doc-good", "doc-bad"}
 
         # Overall pipeline is still reported as failed (annotation failed for
-        # doc-bad), but the surviving sibling's chain ran to completion.
+        # doc-bad), but BOTH documents' chains ran to completion.
         assert result.success is False
         assert result.annotation.success is False
         assert result.entity_extraction is not None
         assert result.entity_extraction.success is True
-        assert [d.document_name for d in result.entity_extraction.documents] == ["doc-good"]
+        assert {d.document_name for d in result.entity_extraction.documents} == {
+            "doc-good",
+            "doc-bad",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +381,16 @@ class TestOnPartialFailureWarn:
         self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path, caplog
     ):
         """on_partial_failure='warn' logs a warning for the failed stage but
-        behaves like 'continue': later stages still run for surviving units.
+        behaves like 'continue' at the per-unit level: entity_extraction
+        still runs for BOTH documents (the surviving sibling, and doc-bad
+        whose earlier annotation only partially failed).
+
+        Two distinct warnings must coexist in 'warn' mode: the immediate
+        per-document warning emitted by `_process_document_unit()` itself
+        the moment doc-bad decides to keep advancing despite its partial
+        annotation failure, AND the pre-existing aggregated per-stage
+        warning emitted at the end of the batch by `run_pipeline()`'s own
+        aggregation loop. Neither replaces the other.
         """
         _write_extraction_jsons(tmp_path, ["doc-good", "doc-bad"])
 
@@ -396,14 +412,17 @@ class TestOnPartialFailureWarn:
                 failed=0,
             )
 
+        async def _entity_extraction_side_effect(document_name, **kwargs):
+            return _sr(
+                "entity_extraction",
+                success=True,
+                documents=[DocumentResult(document_name, 5, 0)],
+                processed=5,
+                failed=0,
+            )
+
         mock_stages["run_annotation"].side_effect = _annotation_side_effect
-        mock_stages["run_entity_extraction"].return_value = _sr(
-            "entity_extraction",
-            success=True,
-            documents=[DocumentResult("doc-good", 5, 0)],
-            processed=5,
-            failed=0,
-        )
+        mock_stages["run_entity_extraction"].side_effect = _entity_extraction_side_effect
 
         with caplog.at_level(logging.WARNING, logger="scinr.newton.pipeline"):
             result = await run_pipeline(
@@ -412,13 +431,30 @@ class TestOnPartialFailureWarn:
                 on_partial_failure="warn",
             )
 
-        mock_stages["run_entity_extraction"].assert_called_once()
+        assert mock_stages["run_entity_extraction"].call_count == 2
+        ee_call_names = {
+            call.args[0] for call in mock_stages["run_entity_extraction"].call_args_list
+        }
+        assert ee_call_names == {"doc-good", "doc-bad"}
         assert result.entity_extraction is not None
         assert result.entity_extraction.success is True
 
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        # Aggregated per-stage warning (pre-existing, emitted by run_pipeline()
+        # at the end of the batch) — must remain intact.
         assert any("completed with failures" in m for m in warning_messages)
         assert any("annotation" in m for m in warning_messages)
+        # New immediate per-document warning (emitted by
+        # _process_document_unit() itself at the moment doc-bad decides to
+        # keep advancing) — must coexist alongside the aggregated one, not
+        # replace it.
+        assert any(
+            "doc-bad" in m and "boom" in m and "continuing" in m.lower()
+            for m in warning_messages
+        )
+        # Exactly two warnings total: one per-document + one aggregated —
+        # neither drowns out nor duplicates the other.
+        assert len(warning_messages) == 2
 
 
 # ---------------------------------------------------------------------------
