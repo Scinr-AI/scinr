@@ -103,7 +103,7 @@ async def run_pipeline(
     # ── Parallelism ───────────────────────────────────────────────────────────
     parallel_docs: int = 5,
     # ── Behaviour on partial failure ─────────────────────────────────────────
-    on_partial_failure: Literal["abort", "continue", "warn"] = "abort",
+    on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
@@ -157,22 +157,48 @@ async def run_pipeline(
         on_partial_failure: Control behavior when a stage fails
             (`"abort"`, `"continue"`, or `"warn"`).
 
-            **Behavior change vs. earlier versions:** outside the tabular
-            short-circuit (`stages=["tabular"]`, or tabular files
-            auto-detected inside `input_raw`) — which still fails fast, exactly
-            as before, if the tabular stage itself reports failures — `"abort"`
-            and `"continue"` are now functionally IDENTICAL. Once documents are
-            dispatched to the per-document-unit engine, the pipeline never
-            stops processing OTHER documents, regardless of this flag's value:
-            each document independently stops advancing through its own
-            remaining stages the moment one of its stages fails (a per-unit
-            "soft-abort"), while every sibling document keeps running
-            normally through all of its own requested stages. In older
-            versions, `"abort"` stopped the entire pipeline (no further
-            documents processed at all) on the first stage-level failure;
-            that global-abort behavior no longer exists. `"warn"` behaves
-            like `"continue"` but additionally logs a warning whenever an
-            aggregated stage reports one or more failed documents.
+            The pipeline never stops processing OTHER documents because of
+            this flag: every document in the batch is always dispatched to
+            the per-document-unit engine and runs independently of its
+            siblings, regardless of `on_partial_failure`'s value (outside
+            the tabular short-circuit below, which still fails fast exactly
+            as before).
+
+            Within a single document's own remaining stages, the effect of
+            `on_partial_failure` depends on which stage failed:
+
+            - `"preprocess"` / `"extraction"` / `"ingestion"`: a failure in
+              any of these three is a *total* failure for that document —
+              no valid artifact was produced for the next stage to operate
+              on. These always stop that document from advancing through
+              its remaining stages, regardless of `on_partial_failure`
+              (there is nothing valid to continue with).
+            - `"annotation"` / `"entity_extraction"`: these operate
+              per-node, so a stage reporting `nodes_failed > 0` for a
+              document is only a *partial* failure — the document itself
+              is still valid and can proceed to its next requested stage.
+              This only stops that document's advancement when
+              `on_partial_failure` is `"abort"` (the default, preserving
+              the historical per-unit "soft-abort" behavior). With
+              `"continue"` or `"warn"`, the document keeps advancing to its
+              next requested stage even though some nodes failed in the
+              previous one.
+
+            `"warn"` behaves like `"continue"` (the document keeps
+            advancing) but additionally logs at two levels:
+
+            - Immediately, a per-document warning is emitted the moment
+              *that specific document* decides to keep advancing despite a
+              partial failure in `annotation` or `entity_extraction` —
+              naming the document, the stage, the failed-node count, and
+              the concrete error(s) reported for it.
+            - At the end of the batch, the pre-existing aggregated
+              per-stage warning still fires whenever a stage reports one or
+              more failed documents overall (only the total failed-document
+              count for that stage, not per-document detail).
+
+            Both warnings coexist in `"warn"` mode; `"continue"` mode stays
+            completely silent.
 
         tabular_extensions: File extensions to process via tabular pipeline (default: `.csv`, `.xlsx`, `.xls`).
         tabular_delimiter: Delimiter character for CSV tabular files.
@@ -514,6 +540,7 @@ async def run_pipeline(
                         model_class=model_class,
                         only_unannotated=only_unannotated,
                         only_unextracted=only_unextracted,
+                        on_partial_failure=on_partial_failure,
                     )
                     for u in units
                 ],
@@ -525,12 +552,16 @@ async def run_pipeline(
             sync_driver.close()
 
     # ── Per-stage aggregation (Fase 7a) ───────────────────────────────────────
-    # Never returns early on failure here: on_partial_failure's "abort" /
-    # "continue" only gate the preserved tabular short-circuit above (via
-    # _should_abort()); once units are dispatched, every requested stage is
-    # always aggregated. Per-unit soft-abort (stopping only that unit's
-    # remaining stages on failure) already happened inside
-    # _process_document_unit() itself.
+    # Never returns early on failure here: once units are dispatched, every
+    # requested stage is always aggregated regardless of on_partial_failure.
+    # on_partial_failure additionally gates the preserved tabular
+    # short-circuit above (via _should_abort()) and, inside
+    # _process_document_unit() itself, whether a unit's per-unit soft-abort
+    # triggers after a partial (`nodes_failed > 0`) annotation/
+    # entity_extraction failure ("abort" stops that unit's remaining stages;
+    # "continue"/"warn" let it keep advancing) — see that function's
+    # docstring for the full breakdown, including the stages
+    # (preprocess/extraction/ingestion) whose soft-abort is unconditional.
     for stage_name in ("preprocess", "extraction", "ingestion", "annotation", "entity_extraction"):
         if stage_name not in effective_stages:
             continue
@@ -656,6 +687,7 @@ async def _process_document_unit(
     model_class: str | None,
     only_unannotated: bool,
     only_unextracted: bool,
+    on_partial_failure: Literal["abort", "continue", "warn"] = "abort",
 ) -> UnitResult:
     """Process a single ``DocumentUnit`` end-to-end through whichever of
     *effective_stages* apply to it.
@@ -669,12 +701,31 @@ async def _process_document_unit(
     ``get_neo4j_sync_semaphore()``) — this function does not add another
     semaphore around those calls.
 
-    Soft-abort semantics: as soon as one stage fails for this unit, the
-    remaining stages for *this unit only* are skipped (``stopped_at`` is set
-    to the failing stage's name), but no exception propagates — the caller
-    (the per-unit ``asyncio.gather()`` in ``run_pipeline()`` above) can
-    safely run many units concurrently without one unit's failure
-    cancelling the others.
+    Soft-abort semantics: as soon as one stage fails for this unit, no
+    exception propagates — the caller (the per-unit ``asyncio.gather()`` in
+    ``run_pipeline()`` above) can safely run many units concurrently without
+    one unit's failure cancelling the others. Whether the *remaining* stages
+    for *this unit only* are skipped (``stopped_at`` set to the failing
+    stage's name) depends on which stage failed and, for two of them, on
+    *on_partial_failure*:
+
+    - ``"preprocess"`` / ``"extraction"`` / ``"ingestion"``: a failure in
+      any of these three means there is no valid artifact
+      (``intermediate_doc`` / ``doc_obj`` / a consistent ``current_name``)
+      for the next stage to operate on. These **always** stop this unit's
+      remaining stages, regardless of *on_partial_failure* — there is
+      nothing valid to continue with.
+    - ``"annotation"`` / ``"entity_extraction"``: these operate per-node, so
+      ``nodes_failed > 0`` is a *partial* failure — ``current_name`` is
+      still valid and the next stage can still run against it. This only
+      stops the unit's remaining stages when *on_partial_failure* is
+      ``"abort"`` (the default). With ``"continue"`` or ``"warn"`` the unit
+      keeps advancing to its next requested stage even if some nodes failed
+      in the previous one. When *on_partial_failure* is ``"warn"``, this
+      unit additionally logs a warning right at the point it decides to
+      keep advancing, naming this document, the failing stage, the
+      failed-node count, and the concrete error(s) reported for it;
+      ``"continue"`` performs the exact same advancement but logs nothing.
 
     Parameters
     ----------
@@ -723,6 +774,17 @@ async def _process_document_unit(
         Forwarded to ``run_annotation()``.
     only_unextracted:
         Forwarded to ``run_entity_extraction()``.
+    on_partial_failure:
+        Controls whether this unit keeps advancing to its next requested
+        stage after ``annotation`` or ``entity_extraction`` reports
+        ``nodes_failed > 0`` for it. ``"abort"`` (default) stops the unit
+        at that stage (``stopped_at`` set); ``"continue"`` and ``"warn"``
+        let it keep advancing. Has no effect on the unconditional
+        ``preprocess``/``extraction``/``ingestion`` stops described above.
+        ``"warn"`` additionally logs a per-document warning at the exact
+        moment this unit decides to keep advancing despite the partial
+        failure (document name, failing stage, failed-node count, and
+        concrete error detail); ``"continue"`` stays silent.
 
     Returns
     -------
@@ -855,7 +917,17 @@ async def _process_document_unit(
                 combined = _combine_stage_documents(current_name, sr.documents)
                 stage_results["annotation"] = combined
                 if combined.nodes_failed > 0:
-                    return UnitResult(current_name, stage_results, "annotation", None)
+                    if on_partial_failure == "abort":
+                        return UnitResult(current_name, stage_results, "annotation", None)
+                    if on_partial_failure == "warn":
+                        logger.warning(
+                            "Document '%s': stage 'annotation' had %d failed node(s) "
+                            "(%s) — continuing to remaining stages despite the failure "
+                            "(on_partial_failure='warn').",
+                            current_name,
+                            combined.nodes_failed,
+                            "; ".join(combined.errors) if combined.errors else "no error details",
+                        )
 
             # ── Stage: entity_extraction ───────────────────────────────
             if "entity_extraction" in effective_stages:
@@ -867,7 +939,17 @@ async def _process_document_unit(
                 combined = _combine_stage_documents(current_name, sr.documents)
                 stage_results["entity_extraction"] = combined
                 if combined.nodes_failed > 0:
-                    return UnitResult(current_name, stage_results, "entity_extraction", None)
+                    if on_partial_failure == "abort":
+                        return UnitResult(current_name, stage_results, "entity_extraction", None)
+                    if on_partial_failure == "warn":
+                        logger.warning(
+                            "Document '%s': stage 'entity_extraction' had %d failed node(s) "
+                            "(%s) — continuing to remaining stages despite the failure "
+                            "(on_partial_failure='warn').",
+                            current_name,
+                            combined.nodes_failed,
+                            "; ".join(combined.errors) if combined.errors else "no error details",
+                        )
 
             return UnitResult(current_name, stage_results, None, None)
         except Exception as exc:  # noqa: BLE001 — defense-in-depth, see docstring
