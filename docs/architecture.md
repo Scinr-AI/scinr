@@ -1,41 +1,71 @@
 # Architecture
 
-`scinr.newton` processes life sciences documents through a modular 5-stage pipeline, storing raw structure and extracted entities in Neo4j and MongoDB.
+`scinr.newton` turns source documents into connected, queryable knowledge in Neo4j. It preserves the connection between extracted data and the document content it came from.
 
----
-
-## 5-Stage Ingestion Pipeline
-
-```
-Raw Documents (.pdf, .docx, .pptx, .xlsx, .csv)
-                    │
-                    ▼
-       ┌─────────────────────────┐
-       │ Stage 0: Preprocess     │  Format Converters -> JSON / Markdown
-       └────────────┬────────────┘
-                    ▼
-       ┌─────────────────────────┐
-       │ Stage 1: Extraction     │  Section Chunking & Hierarchy Parsing
-       └────────────┬────────────┘
-                    ▼
-       ┌─────────────────────────┐
-       │ Stage 2: Ingestion      │  Document & Structure Nodes written to Neo4j
-       └────────────┬────────────┘
-                    ▼
-       ┌─────────────────────────┐
-       │ Stage 3: Annotation     │  LLM Relevance Filtering & Target Schema Prep
-       └────────────┬────────────┘
-                    ▼
-       ┌─────────────────────────┐
-       │ Stage 4: Entity Extract │  Structured Pydantic Extraction & Graph Subgraph
-       └─────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Source files                                                 │
+│ PDF, Office documents, web content, and spreadsheets         │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Structured document data                                     │
+│ Content is organized for reliable processing                 │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Domain knowledge                                             │
+│ Configured models identify relevant information              │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Neo4j graph                                                  │
+│ Documents, context, and extracted entities stay connected    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### Stage Details
+## Inputs and outputs
 
-* **Stage 0: Preprocess** — Uses custom document converters (`python-docx`, `pdfplumber`, `python-pptx`, `openpyxl`, `pandas`) to convert heterogeneous raw formats into standardized internal representations.
-* **Stage 1: Extraction** — Chunks documents into structural blocks (paragraphs, tables, headers, figures) while retaining parent-child document hierarchy.
-* **Stage 2: Ingestion** — Writes document metadata and structural nodes into Neo4j (`:Document`, `:StructureNode`).
-* **Stage 3: Annotation** — Uses LLMs to evaluate structure nodes against target extraction models and attach domain annotations.
-* **Stage 4: Entity Extraction** — Invokes target Pydantic schemas on annotated nodes to extract typed domain entities and write subgraph nodes and triples into Neo4j.
+The library accepts PDF, DOCX, PPTX, XLSX, XLS, CSV, JSON, HTML, XML, and text files.
 
+* **Documents** produce a graph representation that retains document context alongside extracted domain data.
+* **Spreadsheets and CSV files** are treated as structured input and are detected automatically during a complete run.
+* **Neo4j** is the primary query surface for the resulting connected knowledge.
+
+## Using the library
+
+Configure the library once at application startup, then choose the entry point that fits your application:
+
+| Need | Public entry point |
+|---|---|
+| Process a directory end to end | `run_pipeline(input_raw="...")` |
+| Run a targeted operation | Exported functions such as `run_preprocess()` or `run_ingestion()` |
+| Run from automation or a terminal | `newton` CLI |
+| Tailor extracted data to a domain | Custom extraction models |
+
+Every pipeline call returns result objects that report overall success and document-level outcomes, so applications can surface failures or retry affected inputs.
+
+## Data lifecycle
+
+An ingestion creates graph data for the source document and its extracted knowledge. Subsequent runs support three common maintenance workflows:
+
+| Workflow | Use when |
+|---|---|
+| New ingestion | Adding a new document or revision. |
+| Update | Correcting the latest ingested document in place. |
+| Replacement | Recording that a new document supersedes an existing one. |
+
+Use `update_mode=True` or `replaces="ExistingDocument"` in Python, or `--update` and `--replaces` with the CLI.
+
+## Extension points
+
+Developers can extend the library without changing the ingestion workflow:
+
+* Add custom extraction models for new domain data.
+* Add custom converters for additional file types.
+* Select optional storage for raw source material when required by the deployment.
+
+See [Configuration](configuration.md), [Custom Extraction Models](user-guides/custom-models.md), and [Neo4j Graph Storage](user-guides/neo4j-graph.md) for the corresponding public interfaces.

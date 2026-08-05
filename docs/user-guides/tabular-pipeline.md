@@ -1,11 +1,36 @@
 # Tabular Pipeline
 
-The tabular pipeline automatically routes `.csv`, `.xlsx`, and `.xls` files to specialized normalization and table-understanding algorithms.
+The tabular pipeline ingests CSV, XLSX, and XLS files into Neo4j as structured data.
 
----
+## Usage
 
-## Capabilities
+Run tabular ingestion from the CLI:
 
-* **Header Normalization**: Detects multi-line headers, merged cells, and empty metadata rows.
-* **Delimiter Detection**: Auto-detects `,`, `;`, `\t`, `|` delimiters in CSV files.
-* **Schema Inference**: Converts spreadsheet columns into normalized tabular structures prior to entity extraction.
+```bash
+newton --stage tabular --input-raw files/
+```
+
+Or use the Python API:
+
+```python
+import asyncio
+from scinr.newton import configure, run_pipeline
+
+configure(
+    llm=my_llm,
+    neo4j_user="neo4j",
+    neo4j_password="...",
+)
+
+result = asyncio.run(run_pipeline(input_raw="files/", stages=["tabular"]))
+```
+
+When you run the complete pipeline with `input_raw`, supported tabular files are detected automatically.
+
+## Supported formats
+
+| Extension | Support |
+|---|---|
+| `.csv` | Delimiter detection and header handling. |
+| `.xlsx` | Multi-sheet workbooks. |
+| `.xls` | Legacy Excel workbooks. |

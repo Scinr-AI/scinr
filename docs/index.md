@@ -1,48 +1,34 @@
 # scinr
 
-> **AI-Powered Document Knowledge Library for Life Sciences**
+> **Document knowledge library for life sciences**
 
-`scinr` (`scinr.newton`) is a Python library and command-line interface (`newton`) designed to transform unstructured and structured life sciences documents into queryable, connected knowledge graphs in **Neo4j** and document stores in **MongoDB**.
+`scinr.newton` turns life-sciences documents into connected, queryable knowledge in Neo4j. Use it as a Python library or through the `newton` command-line tool.
 
----
+## What it provides
 
-## Key Features
+* Ingestion for common document and spreadsheet formats.
+* Configurable extraction models for domain-specific data.
+* Neo4j storage for documents and extracted knowledge.
+* A Python API and CLI for complete runs or targeted operations.
 
-* 🚀 **5-Stage Pipeline**: Seamlessly convert, extract, ingest, annotate, and extract entities from raw files.
-* 📄 **Multi-Format Ingestion**: Supports `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`, `.json`, `.html`, and `.txt`.
-* 📊 **Tabular Pipeline**: Auto-detection, structural normalization, and LLM entity extraction for scientific spreadsheets.
-* 🏷️ **Pydantic Extraction Models**: Define structured schemas for scientific target entities (e.g. compound synthesis, clinical trials, assays).
-* 🕸️ **Neo4j Graph Integration**: Automatically map extracted entities and triples into Neo4j subgraphs.
-* 🤖 **Agent Ready**: Native support for <a href="llms.txt">llms.txt</a> and <a href="llms-full.txt">llms-full.txt</a> context windows for AI agents.
-
----
-
-## Quick Example
+## Quick example
 
 ```python
 import asyncio
 from scinr.newton import configure, run_pipeline
 
 async def main():
-    # 1. Configure backend connections and model defaults
     configure(
+        llm=my_llm,
         neo4j_uri="bolt://localhost:7687",
-        neo4j_auth=("neo4j", "password"),
-        llm_provider="openai",
-        llm_model="gpt-4o",
+        neo4j_user="neo4j",
+        neo4j_password="your-password",
     )
 
-    # 2. Run the end-to-end ingestion pipeline on a directory of documents
-    result = await run_pipeline(
-        input_raw="./raw_documents",
-        model_class="CompoundAssayModel",
-        parallel_docs=4,
-    )
+    result = await run_pipeline(input_raw="./raw_documents")
+    print(result.success)
 
-    print(f"Pipeline Succeeded: {result.success}")
-    print(f"Total Duration: {result.total_duration_seconds:.2f}s")
-    print(f"Executed Stages: {result.stages_executed}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
+
+See [Getting Started](getting-started.md) for setup and [Configuration](configuration.md) for the supported options.

@@ -1,34 +1,54 @@
 # Configuration
 
-Configure `scinr` programmatic execution using the `configure()` function or environment variables.
+Configure `scinr` with `configure()` in library mode or environment variables in CLI mode.
 
----
+## Library mode
 
-## Environment Variables
-
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `NEO4J_URI` | Bolt URI for Neo4j instance | `bolt://localhost:7687` |
-| `NEO4J_USERNAME` | Neo4j database user | `neo4j` |
-| `NEO4J_PASSWORD` | Neo4j user password | — |
-| `OPENAI_API_KEY` | OpenAI API key for LLM calls | — |
-| `MONGODB_URI` | Connection string for MongoDB storage | `mongodb://localhost:27017` |
-
----
-
-## Programmatic Configuration
+Call `configure()` once before using pipeline functions:
 
 ```python
-from scinr.newton import configure, get_config
+from scinr.newton import configure
 
 configure(
+    llm=my_llm,
     neo4j_uri="bolt://localhost:7687",
-    neo4j_auth=("neo4j", "secret_pass"),
-    llm_provider="openai",
-    llm_model="gpt-4o",
-    parallel_docs=4,
+    neo4j_user="neo4j",
+    neo4j_password="your-password",
 )
-
-config = get_config()
-print(f"Active Provider: {config.llm_provider}")
 ```
+
+Explicit arguments take precedence over environment variables, which take precedence over defaults.
+
+### Common options
+
+| Parameter | Purpose |
+|---|---|
+| `llm` | Processing model client used by the library. |
+| `neo4j_uri` | Neo4j connection URI. |
+| `neo4j_user` | Neo4j username. |
+| `neo4j_password` | Neo4j password. |
+| `storage_backend` | Optional raw-document storage backend. |
+| `extra_converters` | Custom converters for additional file extensions. |
+| `extra_models_paths` | Locations containing custom extraction models. |
+| `llm_concurrency` | Maximum concurrent document-processing requests. |
+| `neo4j_concurrency` | Maximum concurrent Neo4j write sessions. |
+
+Use `configure()` to set any additional library options required by your deployment.
+
+## CLI mode
+
+The `newton` command reads configuration from environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `MODEL_ID` | Required runtime model identifier. |
+| `NEO4J_URI` | Neo4j connection URI; defaults to `bolt://localhost:7687`. |
+| `NEO4J_USER` | Neo4j username. |
+| `NEO4J_PASSWORD` | Neo4j password. |
+| `NEO4J_AUTH` | Alternative combined username/password value. |
+| `STORAGE_BACKEND` | Optional raw-document storage backend. |
+| `MONGODB_URI` | Connection URI when using the MongoDB storage backend. |
+| `MONGODB_DATABASE` | Database name when using the MongoDB storage backend. |
+| `LLM_CONCURRENCY` | Maximum concurrent document-processing requests. |
+| `NEO4J_CONCURRENCY` | Maximum concurrent Neo4j write sessions. |
+| `SCINR_EXTRA_MODELS_PATHS` | Colon-separated locations containing custom extraction models. |

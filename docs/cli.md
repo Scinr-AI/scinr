@@ -1,37 +1,59 @@
 # CLI Reference
 
-The `newton` command line tool orchestrates `scinr` ingestion pipeline tasks from your terminal.
+The `newton` command runs document ingestion from a terminal. See [Configuration](configuration.md#cli-mode) for required environment settings.
 
----
-
-## Commands
-
-### `newton run`
-
-Orchestrates full or partial ingestion pipeline runs.
+## Usage
 
 ```bash
-newton run [OPTIONS]
+newton [OPTIONS]
 ```
 
-#### Key Options
+## Options
 
-* `--input-raw PATH`: Directory containing input document files.
-* `--stages LIST`: Comma-separated list of stages to run (e.g. `preprocess,extraction,ingestion`).
-* `--model-class NAME`: Registered Pydantic target extraction model class name.
-* `--parallel-docs INT`: Number of documents to process in parallel (default: `1`).
-* `--neo4j-uri URI`: Neo4j Bolt connection URI.
-* `--neo4j-user USER`: Neo4j database username.
-* `--neo4j-pass PASS`: Neo4j database password.
-* `--llm-provider NAME`: Provider name (`openai`, `bedrock`, `ollama`).
-* `--llm-model NAME`: Model identifier (e.g., `gpt-4o`, `claude-3-5-sonnet`).
+| Flag | Description |
+|---|---|
+| `--stage` | Select `preprocess`, `extract`, `ingest`, `annotate`, `entity_extract`, `tabular`, or `all` (default). |
+| `--input-raw` | Directory containing source files. |
+| `--input` | Directory containing converted input files; defaults to `data/json/`. |
+| `--output` | Directory for extracted output; defaults to `data/output/`. |
+| `--document` | Document name for targeted annotation or extraction. |
+| `--update` | Update the latest ingested version in place. |
+| `--replaces` | Record a newly ingested document as replacing an existing document. |
+| `--parallel-docs` | Number of documents to process concurrently. |
+| `--only-unannotated` | Skip content that has already been prepared for extraction. |
+| `--only-unextracted` | Skip content that has already been extracted. |
+| `--manual` | Apply a specified extraction model. Requires `--model`. |
+| `--model` | Extraction model class name used with `--manual`. |
+| `--context` | Additional context about the input documents. |
 
----
+## Examples
 
-## Usage Examples
-
-Run Stages 0 to 2 only:
+Run a complete ingestion:
 
 ```bash
-newton run --input-raw ./data --stages preprocess,extraction,ingestion
+newton --stage all --input-raw files/
+```
+
+Convert source files only:
+
+```bash
+newton --stage preprocess --input-raw files/
+```
+
+Run a targeted operation for an existing document:
+
+```bash
+newton --stage annotate --document "MyDocument"
+```
+
+Process tabular files:
+
+```bash
+newton --stage tabular --input-raw files/
+```
+
+Replace a document:
+
+```bash
+newton --stage all --input-raw files/new/ --replaces "OldDocumentName"
 ```

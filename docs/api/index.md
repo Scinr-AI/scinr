@@ -1,11 +1,9 @@
-# API Reference Overview
+# API Reference
 
-Welcome to the `scinr` API reference documentation.
+This reference lists the public Python API and signatures. Use the guides for supported workflows and configuration examples.
 
-## Core Modules
-
-- [Pipeline API](pipeline.md): Public orchestrator `run_pipeline()`.
-- [Configuration API](config.md): Connection setup `configure()` and `get_config()`.
-- [Stages API](stages.md): Individual runner functions for Stages 0-4.
-- [Exceptions API](exceptions.md): Typed error hierarchy (`ScinrError`).
-- [Results API](results.md): Dataclasses (`PipelineResult`, `StageResult`, `DocumentResult`).
+* [Pipeline API](pipeline.md): `run_pipeline()`
+* [Configuration API](config.md): `configure()`, `get_config()`, and model discovery
+* [Operations](stages.md): Individual public operations
+* [Exceptions](exceptions.md): Typed error hierarchy
+* [Results](results.md): Result types returned by library operations

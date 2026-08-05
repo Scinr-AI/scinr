@@ -39,6 +39,8 @@ import logging
 
 from neo4j import Driver
 
+from scinr.newton.exceptions import ConfigurationError
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -203,7 +205,6 @@ def setup_schema(driver: Driver) -> None:
                 parts = version_str.split(".")
                 major, minor = int(parts[0]), int(parts[1])
                 if (major, minor) < (4, 4):
-                    from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
                         f"scinr-ingest requires Neo4j >= 4.4. "

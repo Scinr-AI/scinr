@@ -44,11 +44,11 @@ plugins:
           options:
             docstring_style: google
             docstring_section_style: table
-            show_source: true
+            show_source: false
             show_root_heading: true
             show_symbol_type_heading: true
             separate_signature: true
-            signature_crossrefs: true
+            show_signature_annotations: true
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -75,6 +75,6 @@ nav:
       - Overview: api/index.md
       - Pipeline (run_pipeline): api/pipeline.md
       - Configuration (configure): api/config.md
-      - Stages: api/stages.md
+      - Operations: api/stages.md
       - Exceptions: api/exceptions.md
       - Results: api/results.md
