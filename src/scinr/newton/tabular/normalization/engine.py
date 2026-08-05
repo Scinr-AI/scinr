@@ -22,6 +22,7 @@ from scinr.newton.tabular.normalization.detector import (
     get_normalization_specs,
 )
 from scinr.newton.tabular.normalization.models import NormalizationEntry
+from scinr.newton.utils.llm_retry import with_llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,12 @@ class NormalizationEngine:
         """
         self.llm = llm
         self.batch_size = batch_size
+        # NOTE: kept for API compatibility, but no longer used to create a
+        # local semaphore in normalize_instances(). Real LLM concurrency is
+        # now governed globally by config.get_llm_semaphore(), shared across
+        # all pipeline stages (extraction, entity_extraction, annotation,
+        # normalization) to avoid exceeding the Bedrock botocore connection
+        # pool.
         self.concurrency = concurrency
         self.result_cache: dict[str, BaseModel] = {}
 
@@ -121,13 +128,17 @@ class NormalizationEngine:
                 unique_entries[type_key] = []
             unique_entries[type_key].append(entry)
 
-        # Phase 4: Process each target_type in batches
-        semaphore = asyncio.Semaphore(self.concurrency)
+        # Phase 4: Process each target_type in batches.
+        # NOTE: concurrency towards the LLM is now governed globally by
+        # get_llm_semaphore() (config.py), not by self.concurrency, so that
+        # all Bedrock calls across the whole pipeline share one bounded pool.
+        # Lazy import to avoid a circular import with config.py.
+        from scinr.newton.config import get_llm_semaphore
 
         async def _process_type_batch(
             batch_entries: list[NormalizationEntry],
         ) -> None:
-            async with semaphore:
+            async with get_llm_semaphore():
                 await self._call_llm_batch(
                     batch_entries, instances, key_to_targets,
                 )
@@ -198,7 +209,7 @@ class NormalizationEngine:
         messages = self._build_batch_messages(entries)
 
         try:
-            result = await structured_llm.ainvoke(messages)
+            result = await with_llm_retry(lambda: structured_llm.ainvoke(messages))
 
             if not isinstance(result, BatchResponse):
                 try:
@@ -312,7 +323,7 @@ class NormalizationEngine:
         messages = self._build_batch_messages(entries)
 
         try:
-            result = await structured_llm.ainvoke(messages)
+            result = await with_llm_retry(lambda: structured_llm.ainvoke(messages))
 
             # Coerce result to the expected container type.
             # with_structured_output() may return dict with some providers.
