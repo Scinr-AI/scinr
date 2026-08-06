@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `RawFileRepository.delete(raw_file_id)` and `PageRepository.delete_pages(raw_file_id)` abstract methods on the storage interfaces (`storage/base.py`), implemented for `NullRawFileRepository`/`NullPageRepository` (no-op) and `MongoDBRawFileRepository`/`MongoDBPageRepository` (GridFS + `raw_files`/`converted_pages` collection cleanup). Both are idempotent — safe to call for an already-deleted or never-existing `raw_file_id`.
+
+### Changed
+- `delete_document()` (`scinr.newton.ingest.deletion`) is now `async` (previously sync) and now also deletes the corresponding documental storage records (raw binary + converted Markdown pages, keyed by each affected `:Document`'s `raw_file_id`) *before* running the Neo4j cascade delete. Storage cleanup is fail-fast: an unexpected exception there aborts the whole deletion before any Neo4j write happens. `DeletionResult` gained two new fields: `raw_files_deleted` and `converted_pages_deleted`.
+- **Breaking change:** any `storage_backend="custom"` implementation must now also implement `delete()` on its `RawFileRepository` and `delete_pages()` on its `PageRepository`.
+
 ## [0.1.0] - 2024-01-01
 
 ### Added

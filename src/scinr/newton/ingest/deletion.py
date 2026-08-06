@@ -9,13 +9,20 @@ as their entire composed/structural subtree, and then runs a two-pass
 global garbage collector to remove any resulting orphaned :Entity,
 :ModelInstance, and :LabeledEntity nodes.
 
+Before touching Neo4j, it also deletes the corresponding documental storage
+records (raw binaries + converted Markdown pages) for every ``raw_file_id``
+referenced by the affected :Document node(s), via the configured storage
+backend (see ``storage/factory.py``). This storage cleanup is fail-fast: if
+it raises, the Neo4j cascade delete never runs.
+
 Public API
 ----------
-    result = delete_document(path, version=None)  # sync, opens its own driver
+    result = await delete_document(path, version=None)  # opens its own driver
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from scinr.newton.ingest.config import get_driver
@@ -36,6 +43,17 @@ _EXISTENCE_QUERY = """
 MATCH (d:Document {path: $path})
 WHERE $version IS NULL OR d.version = $version
 RETURN d.version AS version
+"""
+
+_RAW_FILE_IDS_QUERY = """
+MATCH (d:Document {path: $path})
+WHERE $version IS NULL OR d.version = $version
+OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd)
+WITH collect(DISTINCT d) + collect(DISTINCT cd) AS nodes
+UNWIND nodes AS n
+WITH DISTINCT n
+WHERE n IS NOT NULL AND n.raw_file_id IS NOT NULL AND n.raw_file_id <> ''
+RETURN DISTINCT n.raw_file_id AS raw_file_id
 """
 
 _CASCADE_DELETE_QUERY = """
@@ -208,12 +226,66 @@ def _fetch_existing_versions(driver, path: str, version: int | None) -> list[int
     return sorted(v for v in raw_versions if v is not None)
 
 
+def _fetch_raw_file_ids(driver, path: str, version: int | None) -> list[str]:
+    """Run the read-only raw_file_ids query and return the distinct list of
+    non-empty ``raw_file_id`` values for the target Document(s) and every
+    descendant reached via ``IS_COMPOSED_OF*`` — the same scope used by the
+    cascade delete query below.
+
+    Wrapped in with_neo4j_retry_sync for consistency with the other queries
+    in this module.
+    """
+
+    def _do_query() -> list[str]:
+        with driver.session() as session:
+            result = session.run(_RAW_FILE_IDS_QUERY, path=path, version=version)
+            return [record["raw_file_id"] for record in result]
+
+    return with_neo4j_retry_sync(_do_query)
+
+
+async def _delete_storage_for_raw_file_ids(raw_file_ids: list[str]) -> tuple[int, int]:
+    """Delete storage records (raw binaries + converted pages) for every
+    given raw_file_id, via the configured storage backend.
+
+    Fail-fast: no exception raised here is caught — any unexpected error
+    (e.g. StorageError, a dropped connection) propagates to the caller so
+    that the Neo4j cascade delete is never reached. Backend implementations
+    are expected to be idempotent for "already gone" cases (missing
+    metadata, missing GridFS binary, invalid ObjectId, no matching pages)
+    and to not raise for those.
+
+    Parameters
+    ----------
+    raw_file_ids:
+        Distinct, non-empty raw_file_id values to delete storage for.
+
+    Returns
+    -------
+    tuple[int, int]
+        (raw_files_deleted, converted_pages_deleted).
+    """
+    if not raw_file_ids:
+        return 0, 0
+
+    from scinr.newton.storage.factory import get_storage
+
+    raw_file_repo, page_repo = get_storage()
+    raw_files_deleted = 0
+    converted_pages_deleted = 0
+    for rid in raw_file_ids:
+        converted_pages_deleted += await page_repo.delete_pages(rid)
+        await raw_file_repo.delete(rid)
+        raw_files_deleted += 1
+    return raw_files_deleted, converted_pages_deleted
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def delete_document(path: str, version: int | None = None) -> DeletionResult:
+async def delete_document(path: str, version: int | None = None) -> DeletionResult:
     """Completely delete a Document node, its entire cascade, and orphans.
 
     Unlike ``delete_document_content()`` (which only wipes content for
@@ -227,13 +299,25 @@ def delete_document(path: str, version: int | None = None) -> DeletionResult:
       their :InfoUnit, :ModelDecision, :ProposedModel, :ProposedField, and
       :ExtractionResult children.
 
+    Before any Neo4j deletion happens, this also deletes the documental
+    storage records (raw binary + converted Markdown pages) for every
+    non-empty ``raw_file_id`` found on the target Document(s) and their
+    ``IS_COMPOSED_OF*`` descendants, via the configured storage backend
+    (``storage/factory.py::get_storage()``). This step is fail-fast: if
+    deleting storage for any raw_file_id raises an unexpected exception,
+    it propagates immediately and the Neo4j cascade delete is never run.
+
     After the cascade delete, runs two independent garbage-collection
     passes (up to :data:`GC_MAX_PASSES` iterations each) to remove any
     :Entity/:ModelInstance and :LabeledEntity nodes left orphaned by the
     deletion.
 
     Opens and closes its own Neo4j driver — does not require the caller to
-    manage one.
+    manage one. The Neo4j-specific work (existence check, raw_file_id
+    lookup, cascade delete, GC passes) uses the existing synchronous Neo4j
+    driver under the hood, dispatched via ``asyncio.to_thread()``; the
+    storage deletion calls are awaited directly since storage repositories
+    (Motor-backed) are natively async.
 
     Parameters
     ----------
@@ -248,11 +332,11 @@ def delete_document(path: str, version: int | None = None) -> DeletionResult:
     DeletionResult
         Structured counts of everything deleted. If no Document matches
         *path*/*version*, ``found`` is ``False`` and all counters are 0
-        (no delete or GC queries are executed in that case).
+        (no storage, delete, or GC queries are executed in that case).
     """
     driver = get_driver()
     try:
-        versions_found = _fetch_existing_versions(driver, path, version)
+        versions_found = await asyncio.to_thread(_fetch_existing_versions, driver, path, version)
 
         if not versions_found:
             logger.warning(
@@ -277,6 +361,8 @@ def delete_document(path: str, version: int | None = None) -> DeletionResult:
                 gc_entity_model_instance_passes=0,
                 gc_labeled_entity_deleted=0,
                 gc_labeled_entity_passes=0,
+                raw_files_deleted=0,
+                converted_pages_deleted=0,
             )
 
         logger.info(
@@ -286,13 +372,27 @@ def delete_document(path: str, version: int | None = None) -> DeletionResult:
             versions_found,
         )
 
-        cascade_counts = _run_cascade_delete(driver, path, version)
-
-        gc_emi_deleted, gc_emi_passes = _run_gc_pass(
-            driver, _GC_ENTITY_MODEL_INSTANCE_QUERY, "Entity|ModelInstance"
+        raw_file_ids = await asyncio.to_thread(_fetch_raw_file_ids, driver, path, version)
+        raw_files_deleted, converted_pages_deleted = await _delete_storage_for_raw_file_ids(
+            raw_file_ids
         )
-        gc_le_deleted, gc_le_passes = _run_gc_pass(
-            driver, _GC_LABELED_ENTITY_QUERY, "LabeledEntity"
+
+        logger.info(
+            "delete_document: storage cleanup complete for path=%r version=%r. "
+            "raw_files_deleted=%d converted_pages_deleted=%d",
+            path,
+            version,
+            raw_files_deleted,
+            converted_pages_deleted,
+        )
+
+        cascade_counts = await asyncio.to_thread(_run_cascade_delete, driver, path, version)
+
+        gc_emi_deleted, gc_emi_passes = await asyncio.to_thread(
+            _run_gc_pass, driver, _GC_ENTITY_MODEL_INSTANCE_QUERY, "Entity|ModelInstance"
+        )
+        gc_le_deleted, gc_le_passes = await asyncio.to_thread(
+            _run_gc_pass, driver, _GC_LABELED_ENTITY_QUERY, "LabeledEntity"
         )
 
         logger.info(
@@ -323,6 +423,8 @@ def delete_document(path: str, version: int | None = None) -> DeletionResult:
             gc_entity_model_instance_passes=gc_emi_passes,
             gc_labeled_entity_deleted=gc_le_deleted,
             gc_labeled_entity_passes=gc_le_passes,
+            raw_files_deleted=raw_files_deleted,
+            converted_pages_deleted=converted_pages_deleted,
         )
     finally:
         driver.close()

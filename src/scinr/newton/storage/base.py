@@ -44,6 +44,20 @@ class RawFileRepository(ABC):
             único asignado por el backend de almacenamiento.
         """
 
+    @abstractmethod
+    async def delete(self, raw_file_id: str) -> None:
+        """Borra el fichero binario (y su metadata) identificado por *raw_file_id*.
+
+        Debe ser idempotente: si *raw_file_id* no existe (ya borrado, ID
+        inválido, o llamada repetida), no debe lanzar excepción — solo
+        loggear y no hacer nada.
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID del :class:`~storage.models.RawFileRecord` a borrar.
+        """
+
 
 class PageRepository(ABC):
     """Almacena las páginas convertidas (markdown) de un documento."""
@@ -95,4 +109,23 @@ class PageRepository(ABC):
         list[ConvertedPageRecord]
             Lista ordenada por ``page_index`` ascendente.
             Puede estar vacía si aún no se han almacenado páginas.
+        """
+
+    @abstractmethod
+    async def delete_pages(self, raw_file_id: str) -> int:
+        """Borra todas las páginas asociadas a *raw_file_id*.
+
+        No es un error que no existan páginas para ese ``raw_file_id``
+        (devuelve ``0`` en ese caso, sin lanzar excepción).
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID del :class:`~storage.models.RawFileRecord` cuyas páginas se
+            quieren borrar.
+
+        Returns
+        -------
+        int
+            Número de páginas borradas (``0`` si no había ninguna).
         """

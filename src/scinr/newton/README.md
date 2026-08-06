@@ -165,24 +165,31 @@ All stage functions are async and importable from `scinr.newton`:
 
 #### `delete_document(path, version=None)`
 
-Sync function (no event loop required). Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `--update` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
+Async function. Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `--update` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
 
 ```python
+import asyncio
 from scinr.newton import delete_document
 
-result = delete_document("ModuloA/SubModulo/doc_a")        # deletes every version
-result = delete_document("ModuloA/SubModulo/doc_a", version=2)  # deletes only version 2
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a"))        # deletes every version
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", version=2))  # deletes only version 2
 print(result.found, result.documents_deleted, result.structure_nodes_deleted)
+
+# Inside an already-running event loop, use await instead:
+result = await delete_document("ModuloA/SubModulo/doc_a")
 ```
 
 Behavior:
 
 1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
-2. Read-only check: finds every `(:Document {path: $path})` matching `version` (or all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no delete or garbage-collection queries are executed.
-3. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
-4. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
+2. Read-only check: finds every `(:Document {path: $path})` matching `version` (or all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
+3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the Neo4j driver is still closed via the `finally` block).
+4. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
+5. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
    - **Pass 1:** deletes orphaned `:Entity`/`:ModelInstance` nodes (no `:ExtractionResult` reaches them within 7 hops).
    - **Pass 2** (runs only after Pass 1 fully finishes): deletes orphaned `:LabeledEntity` nodes (no incoming relationship at all).
+
+> **Breaking change note:** if you configure `storage_backend="custom"`, your custom `RawFileRepository`/`PageRepository` implementations must now also implement `delete(raw_file_id)` / `delete_pages(raw_file_id)` respectively (see [Storage Layer](#storage-layer)) — these are new abstract methods on the base interfaces.
 
 **Returns:** `DeletionResult`
 
@@ -254,6 +261,8 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 | `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at `GC_MAX_PASSES`). |
 | `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
 | `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at `GC_MAX_PASSES`). |
+| `raw_files_deleted` | `int` | Number of `RawFileRecord` (binaries) deleted from the storage layer for the `raw_file_id`s referenced by the deleted Document(s) and their descendants. |
+| `converted_pages_deleted` | `int` | Number of `ConvertedPageRecord` (converted Markdown pages) deleted from the storage layer for the same `raw_file_id`s. |
 
 ---
 
@@ -629,9 +638,11 @@ from scinr.newton import configure
 
 class MyRawFileRepo:
     def save(self, filename, content_type, folder_path, binary): ...
+    async def delete(self, raw_file_id): ...  # required — see delete_document()
 
 class MyPageRepo:
     def save(self, raw_file_id, pages): ...
+    async def delete_pages(self, raw_file_id): ...  # required — see delete_document()
 
 configure(
     llm=my_llm,
@@ -641,6 +652,8 @@ configure(
     custom_storage=(MyRawFileRepo(), MyPageRepo()),
 )
 ```
+
+> **Breaking change:** `RawFileRepository.delete(raw_file_id)` and `PageRepository.delete_pages(raw_file_id)` are new required abstract methods, added so that `delete_document()` (see [Document Deletion](#document-deletion)) can clean up documental storage before deleting the corresponding Neo4j nodes. Any pre-existing `storage_backend="custom"` implementation must add both methods. Both must be idempotent: `delete()` must not raise if the `raw_file_id` no longer exists, and `delete_pages()` must return `0` (not raise) if no pages match.
 
 The storage backend abstraction lives in `src/scinr/newton/storage/base.py` and `src/scinr/newton/storage/factory.py`. Additional backends (e.g. PostgreSQL, S3) can be added by implementing the base interface.
 
