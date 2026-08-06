@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 **scinr** is an AI-powered document knowledge library for the life sciences industry, built by [Scinr AI](https://www.scinr.com/).
 
