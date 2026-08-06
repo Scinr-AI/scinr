@@ -52,7 +52,10 @@ async def run_tabular_pipeline(
     StageResult
         Stage result with per-document ingestion counts and errors.
     """
-    from scinr.newton.annotation.neo4j_ops import ensure_catalog_models, ensure_theme_structure
+    from scinr.newton.annotation.neo4j_ops import (
+        ensure_catalog_models_once,
+        ensure_theme_structure_once,
+    )
     from scinr.newton.tabular.agent import run_tabular_agent
     from scinr.newton.utils.theme_registry import get_theme_registry
     theme_registry = get_theme_registry()
@@ -117,12 +120,12 @@ async def run_tabular_pipeline(
         
         logger.info("Ensuring catalog models are loaded")
         
-        await ensure_catalog_models(async_driver)
+        await ensure_catalog_models_once(async_driver)
         
         logger.info("Ensuring themes are loaded")
         
     
-        await ensure_theme_structure(async_driver, theme_registry)
+        await ensure_theme_structure_once(async_driver, theme_registry)
         logger.info("Setup of theme and catalog complete")
 
         with driver.session() as session:

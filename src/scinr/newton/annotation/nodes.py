@@ -29,12 +29,9 @@ def _build_node_context_xml(ctx: dict, depth: int = 0) -> str:
 
     Each <info_unit> block contains only <title> and <description>.
 
-    Parameters
-    ----------
-    ctx:
-        NodeContext-shaped dict as returned by fetch_node_context.
-    depth:
-        Current recursion depth (0 = root node passed to decide_model).
+    Args:
+        ctx: NodeContext-shaped dict as returned by fetch_node_context.
+        depth: Current recursion depth (0 = root node passed to decide_model).
     """
     node_id = ctx.get("node_id") or ""
     title = ctx.get("title") or ""
@@ -87,16 +84,11 @@ def _build_annotation_human_message(ctx: dict, user_context: str = "") -> str:
 async def _fetch_node_context(node_data: dict, driver) -> dict | None:
     """Fetch full context (InfoUnits + qualifying children) for a node.
 
-    Parameters
-    ----------
-    node_data:
-        Node dict with keys: full_id, node_id, title, role.
-    driver:
-        Async Neo4j driver instance.
+    Args:
+        node_data: Node dict with keys: full_id, node_id, title, role.
+        driver: Async Neo4j driver instance.
 
-    Returns
-    -------
-    dict | None
+    Returns:
         NodeContext-shaped dict on success, None on error.
     """
     node_id = node_data.get("node_id", "unknown")
@@ -149,22 +141,14 @@ async def _decide_model(
     and runs the repair loop on parse failure. The semaphore wraps the entire
     LLM + repair block.
 
-    Parameters
-    ----------
-    ctx:
-        NodeContext-shaped dict as returned by _fetch_node_context.
-    node_id:
-        Node identifier string (for logging).
-    theme:
-        Theme path string (e.g. "pharmaceutical").
-    user_context:
-        Optional freeform context string to prepend to the human message.
-    semaphore:
-        asyncio.Semaphore controlling Bedrock concurrency.
+    Args:
+        ctx: NodeContext-shaped dict as returned by _fetch_node_context.
+        node_id: Node identifier string (for logging).
+        theme: Theme path string (e.g. "pharmaceutical").
+        user_context: Optional freeform context string to prepend to the human message.
+        semaphore: asyncio.Semaphore controlling Bedrock concurrency.
 
-    Returns
-    -------
-    tuple[AnnotationDecision | None, str | None]
+    Returns:
         (decision, error) — exactly one of the two will be non-None on failure.
     """
     from scinr.newton.utils.theme_registry import get_theme_registry
@@ -227,22 +211,14 @@ async def _write_decision(
 ) -> str | None:
     """Write the AnnotationDecision to Neo4j.
 
-    Parameters
-    ----------
-    driver:
-        Async Neo4j driver instance.
-    full_id:
-        Full StructureNode.id as stored in Neo4j.
-    decision:
-        Parsed AnnotationDecision to persist.
-    document_name:
-        Neo4j Document.name.
-    node_id:
-        Node identifier string (for logging).
+    Args:
+        driver: Async Neo4j driver instance.
+        full_id: Full StructureNode.id as stored in Neo4j.
+        decision: Parsed AnnotationDecision to persist.
+        document_name: Neo4j Document.name.
+        node_id: Node identifier string (for logging).
 
-    Returns
-    -------
-    str | None
+    Returns:
         Error message on failure, None on success.
     """
     try:
@@ -279,21 +255,14 @@ async def process_single_annotation_node(
     Neo4j reads and writes are each wrapped in ``get_neo4j_semaphore()`` to
     prevent connection pool saturation under parallel load.
 
-    Parameters
-    ----------
-    node_data:
-        Node dict as returned by fetch_nodes_to_annotate.
-        Expected keys: full_id, node_id, title, role, theme.
-    document_name:
-        Neo4j Document.name — passed through to write_annotation.
-    bedrock_semaphore:
-        Process-wide asyncio.Semaphore controlling Bedrock concurrency.
-    user_context:
-        Optional freeform context string prepended to the LLM human message.
+    Args:
+        node_data: Node dict as returned by fetch_nodes_to_annotate.
+            Expected keys: full_id, node_id, title, role, theme.
+        document_name: Neo4j Document.name — passed through to write_annotation.
+        bedrock_semaphore: Process-wide asyncio.Semaphore controlling Bedrock concurrency.
+        user_context: Optional freeform context string prepended to the LLM human message.
 
-    Returns
-    -------
-    dict
+    Returns:
         ``{"node_id": str, "decision": AnnotationDecision | None, "error": str | None}``
     """
     node_id = node_data.get("node_id", "unknown")

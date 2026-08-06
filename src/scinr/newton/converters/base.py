@@ -101,6 +101,10 @@ class IntermediateDocument(BaseModel):
     raw_file_id: str | None = None  # MongoDB ObjectId of the RawFileRecord stored by Stage 0
     context_instructions: str | None = None  # Free-text user-provided ingestion context. Injected via CLI --context.
     document_name: str | None = None  # Stem of the original source file. Injected by convert_folder() / convert_single_file().
+    missing_page_ranges: list[tuple[int, int]] | None = None
+    # Rangos [start, end) de páginas del documento ORIGINAL que no pudieron
+    # convertirse y fueron omitidas en modo best-effort (mistral_ocr_error_strategy).
+    # None cuando la conversión fue completa o no aplica (converters no-PDF).
 
     def to_json(self, indent: int = 2) -> str:
         """Serialise to JSON string.

@@ -3,6 +3,7 @@ tests/unit/test_theme_registry.py — Unit tests for scinr.newton.utils.theme_re
 
 Imports directly from the submodule to avoid triggering the CLI import chain.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,6 +43,7 @@ class TestThemeRegistrySingleton:
         tr_module._registry_instance = registry1
 
         from scinr.newton.utils.theme_registry import get_theme_registry
+
         registry2 = get_theme_registry()
         assert registry1 is registry2
 
@@ -96,7 +98,7 @@ class TestEnabledThemesFilter:
         }
 
         # Apply filter
-        registry._apply_enabled_filter(["foo"])
+        registry._apply_enabled_filter(["foo"], scope="builtin")
         assert "foo" in registry._themes
         assert "bar" not in registry._themes
 
@@ -113,7 +115,7 @@ class TestEnabledThemesFilter:
         }
 
         with pytest.raises(ConfigurationError, match="Unknown theme"):
-            registry._apply_enabled_filter(["nonexistent"])
+            registry._apply_enabled_filter(["nonexistent"], scope="builtin")
 
     def test_enabled_themes_empty_list_raises(self, tmp_path):
         """_apply_enabled_filter raises ConfigurationError for empty list."""
@@ -126,7 +128,7 @@ class TestEnabledThemesFilter:
         registry._themes = {"foo": _make_fake_theme_node("foo")}
 
         with pytest.raises(ConfigurationError, match="cannot be empty"):
-            registry._apply_enabled_filter([])
+            registry._apply_enabled_filter([], scope="builtin")
 
 
 class TestThemeRegistryLookup:

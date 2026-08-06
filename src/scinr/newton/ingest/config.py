@@ -42,8 +42,8 @@ def get_async_driver() -> AsyncDriver:
 
     Connection pool settings
     ------------------------
-    max_connection_pool_size=64, liveness_check_timeout=30,
-    max_connection_lifetime=600, keep_alive=True.
+    max_connection_pool_size=64, connection_acquisition_timeout=120,
+    liveness_check_timeout=30, max_connection_lifetime=600, keep_alive=True.
 
     Raises
     ------
@@ -81,6 +81,11 @@ def get_driver() -> Driver:
 
     Credentials are read from ScinrConfig (set via configure()).
 
+    Connection pool settings
+    ------------------------
+    max_connection_pool_size=64, connection_acquisition_timeout=120,
+    liveness_check_timeout=30, max_connection_lifetime=600, keep_alive=True.
+
     Raises
     ------
     ValueError
@@ -95,4 +100,12 @@ def get_driver() -> Driver:
             "Call configure(neo4j_user=..., neo4j_password=...) first, "
             "or set NEO4J_USER + NEO4J_PASSWORD in your .env file."
         )
-    return GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_password))
+    return GraphDatabase.driver(
+        cfg.neo4j_uri,
+        auth=(cfg.neo4j_user, cfg.neo4j_password),
+        max_connection_pool_size=64,
+        connection_acquisition_timeout=120,
+        liveness_check_timeout=30,
+        max_connection_lifetime=600,
+        keep_alive=True,
+    )

@@ -48,23 +48,17 @@ class HtmlConverter(BaseConverter):
     def convert(self, source: Path) -> IntermediateDocument:
         """Convert an HTML file.
 
-        Parameters
-        ----------
-        source:
-            Path to the ``.html`` or ``.htm`` file.
+        Args:
+            source: Path to the ``.html`` or ``.htm`` file.
 
-        Returns
-        -------
-        IntermediateDocument
+        Returns:
             Multi-page document split at H1 headings (one page per H1
             section).  Produces a single page when no H1 headings are
             present.
 
-        Raises
-        ------
-        ConversionError
-            If BeautifulSoup4 or lxml is not installed, or the file
-            cannot be parsed.
+        Raises:
+            ConversionError: If BeautifulSoup4 or lxml is not installed, or the file
+                cannot be parsed.
         """
         try:
             from bs4 import BeautifulSoup  # type: ignore[import-untyped]
@@ -125,14 +119,10 @@ class HtmlConverter(BaseConverter):
 def _soup_to_markdown(soup) -> str:  # type: ignore[no-untyped-def]
     """Walk the BeautifulSoup tree and produce GFM Markdown.
 
-    Parameters
-    ----------
-    soup:
-        Parsed BeautifulSoup object.
+    Args:
+        soup: Parsed BeautifulSoup object.
 
-    Returns
-    -------
-    str
+    Returns:
         GFM Markdown string.
     """
     from bs4 import Tag  # type: ignore[import-untyped]
@@ -181,14 +171,10 @@ def _soup_to_markdown(soup) -> str:  # type: ignore[no-untyped-def]
 def _html_table_to_markdown(table_tag) -> str:  # type: ignore[no-untyped-def]
     """Convert an HTML ``<table>`` tag to a GFM Markdown table.
 
-    Parameters
-    ----------
-    table_tag:
-        BeautifulSoup Tag for the ``<table>`` element.
+    Args:
+        table_tag: BeautifulSoup Tag for the ``<table>`` element.
 
-    Returns
-    -------
-    str
+    Returns:
         GFM Markdown table, or empty string if the table has no rows.
     """
 
@@ -228,18 +214,12 @@ def _html_table_to_markdown(table_tag) -> str:  # type: ignore[no-untyped-def]
 def _html_list_to_markdown(list_tag, ordered: bool = False, depth: int = 0) -> str:  # type: ignore[no-untyped-def]
     """Convert an HTML list to Markdown.
 
-    Parameters
-    ----------
-    list_tag:
-        BeautifulSoup Tag for ``<ul>`` or ``<ol>``.
-    ordered:
-        Whether this is an ordered list.
-    depth:
-        Nesting depth (for indentation).
+    Args:
+        list_tag: BeautifulSoup Tag for ``<ul>`` or ``<ol>``.
+        ordered: Whether this is an ordered list.
+        depth: Nesting depth (for indentation).
 
-    Returns
-    -------
-    str
+    Returns:
         Markdown list string.
     """
     from bs4 import Tag  # type: ignore[import-untyped]

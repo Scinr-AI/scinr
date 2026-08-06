@@ -186,12 +186,9 @@ def _assign_page_ids_recursive(
     with the MongoDB page IDs of the batch that produced it.  Any value
     previously set by the LLM (the field defaults to []) is overwritten.
 
-    Parameters
-    ----------
-    nodes:
-        Top-level nodes returned by the LLM for this chunk.
-    page_ids:
-        MongoDB ObjectId strings of the pages in the current batch.
+    Args:
+        nodes: Top-level nodes returned by the LLM for this chunk.
+        page_ids: MongoDB ObjectId strings of the pages in the current batch.
     """
     for node in nodes:
         node.source_page_ids = list(page_ids)
@@ -209,39 +206,28 @@ async def extract_chunk(
     """
     Extract structured nodes from one sliding-window chunk.
 
-    Parameters
-    ----------
-    prev_page:
-        Markdown text of the previous page (may be empty string for the first chunk).
-    curr_pages:
-        Markdown text of one or more consecutive pages to extract from.
-    active_hierarchy:
-        Formatted string describing the rightmost open-node path from the growing
-        document tree. Produced by ``get_active_hierarchy()``.
-    llm:
-        Pre-configured LangChain BaseChatModel instance. If None, uses the
-        configured LLM from scinr_config. The function uses it for Phase 1;
-        Phase 2 reuses the same instance with adjusted temperature via bind().
-    curr_page_ids:
-        MongoDB ``page_id`` strings for the pages in ``curr_pages``.
-        When provided, all returned nodes (and their children recursively)
-        will have ``source_page_ids`` set to this list.
-        Defaults to ``None`` (backward-compatible — ``source_page_ids`` stays ``[]``).
-    user_context:
-        Optional free-text context supplied by the caller (e.g. document description,
-        domain hints). When non-empty, prepended as a ``<user_context>`` XML block at
-        the top of every HumanMessage sent to the LLM in both Phase 1 and Phase 2.
-        Defaults to ``""`` (no block added).
+    Args:
+        prev_page: Markdown text of the previous page (may be empty string for the first chunk).
+        curr_pages: Markdown text of one or more consecutive pages to extract from.
+        active_hierarchy: Formatted string describing the rightmost open-node path from the growing
+            document tree. Produced by ``get_active_hierarchy()``.
+        llm: Pre-configured LangChain BaseChatModel instance. If None, uses the
+            configured LLM from scinr_config. The function uses it for Phase 1;
+            Phase 2 reuses the same instance with adjusted temperature via bind().
+        curr_page_ids: MongoDB ``page_id`` strings for the pages in ``curr_pages``.
+            When provided, all returned nodes (and their children recursively)
+            will have ``source_page_ids`` set to this list.
+            Defaults to ``None`` (backward-compatible — ``source_page_ids`` stays ``[]``).
+        user_context: Optional free-text context supplied by the caller (e.g. document description,
+            domain hints). When non-empty, prepended as a ``<user_context>`` XML block at
+            the top of every HumanMessage sent to the LLM in both Phase 1 and Phase 2.
+            Defaults to ``""`` (no block added).
 
-    Returns
-    -------
-    list[StructureNode]
+    Returns:
         Merged, parsed nodes for this chunk.
 
-    Raises
-    ------
-    ExtractionMaxRetriesError
-        If both phases exhaust all repair retries without a successful parse.
+    Raises:
+        ExtractionMaxRetriesError: If both phases exhaust all repair retries without a successful parse.
     """
     if llm is None:
         from scinr.newton.config import get_llm

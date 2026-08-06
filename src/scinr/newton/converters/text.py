@@ -32,21 +32,15 @@ class TextConverter(BaseConverter):
     def convert(self, source: Path) -> IntermediateDocument:
         """Convert a text or Markdown file.
 
-        Parameters
-        ----------
-        source:
-            Path to the ``.txt`` or ``.md`` file.
+        Args:
+            source: Path to the ``.txt`` or ``.md`` file.
 
-        Returns
-        -------
-        IntermediateDocument
+        Returns:
             Multi-page document (one page per ``_LINES_PER_PAGE`` lines).
             An empty file produces a single empty page.
 
-        Raises
-        ------
-        ConversionError
-            If the file cannot be read.
+        Raises:
+            ConversionError: If the file cannot be read.
         """
         if not source.exists():
             raise FileNotFoundError(f"File not found: {source}")

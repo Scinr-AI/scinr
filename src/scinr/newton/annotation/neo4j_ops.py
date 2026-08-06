@@ -730,6 +730,101 @@ async def ensure_theme_structure(driver: AsyncDriver, registry: ThemeRegistry) -
 
 
 # ---------------------------------------------------------------------------
+# Process-level memoization guards
+#
+# ensure_catalog_models/ensure_theme_structure are idempotent in Neo4j (they
+# use MERGE), but not idempotent at the Python-process level: if called N
+# times concurrently (e.g. once per document/task), they perform N redundant
+# round-trips to Neo4j. These "_once" wrappers ensure the underlying function
+# runs exactly once per process, even under concurrent asyncio callers, using
+# a check-lock-check pattern (a plain bool is not safe here: two tasks could
+# both read False before the first finishes writing).
+# ---------------------------------------------------------------------------
+
+_catalog_models_ensured: bool = False
+_catalog_models_lock = None
+
+_theme_structure_ensured: bool = False
+_theme_structure_lock = None
+
+
+def _get_catalog_models_lock():
+    """Return (creating if needed) the lock guarding ensure_catalog_models_once."""
+    import asyncio
+
+    global _catalog_models_lock
+    if _catalog_models_lock is None:
+        _catalog_models_lock = asyncio.Lock()
+    return _catalog_models_lock
+
+
+def _get_theme_structure_lock():
+    """Return (creating if needed) the lock guarding ensure_theme_structure_once."""
+    import asyncio
+
+    global _theme_structure_lock
+    if _theme_structure_lock is None:
+        _theme_structure_lock = asyncio.Lock()
+    return _theme_structure_lock
+
+
+async def ensure_catalog_models_once(driver: AsyncDriver) -> None:
+    """
+    Process-memoized wrapper around ensure_catalog_models.
+
+    Runs the real (Neo4j-idempotent) setup exactly once per process, even if
+    called concurrently from multiple tasks. Subsequent calls are a no-op.
+    Use reset_catalog_memoization() to force a re-run (e.g. in tests or after
+    configure() changes the underlying registry/driver).
+    """
+    global _catalog_models_ensured
+    if _catalog_models_ensured:
+        return
+    async with _get_catalog_models_lock():
+        if _catalog_models_ensured:
+            return
+        await ensure_catalog_models(driver)
+        _catalog_models_ensured = True
+
+
+async def ensure_theme_structure_once(driver: AsyncDriver, registry: ThemeRegistry) -> None:
+    """
+    Process-memoized wrapper around ensure_theme_structure.
+
+    Runs the real (Neo4j-idempotent) setup exactly once per process, even if
+    called concurrently from multiple tasks. Subsequent calls are a no-op.
+    Use reset_catalog_memoization() to force a re-run (e.g. in tests or after
+    configure() changes the underlying registry/driver).
+    """
+    global _theme_structure_ensured
+    if _theme_structure_ensured:
+        return
+    async with _get_theme_structure_lock():
+        if _theme_structure_ensured:
+            return
+        await ensure_theme_structure(driver, registry)
+        _theme_structure_ensured = True
+
+
+def reset_catalog_memoization() -> None:
+    """
+    Reset the process-level memoization guards for ensure_catalog_models_once
+    and ensure_theme_structure_once.
+
+    Call this after configure() so the next pipeline run re-executes the
+    Neo4j schema setup (e.g. after the theme registry or driver changed).
+    Also drops the cached locks, since an asyncio.Lock created under a
+    now-closed event loop should not be reused by a later run.
+    """
+    global _catalog_models_ensured, _catalog_models_lock
+    global _theme_structure_ensured, _theme_structure_lock
+    _catalog_models_ensured = False
+    _catalog_models_lock = None
+    _theme_structure_ensured = False
+    _theme_structure_lock = None
+
+
+# ---------------------------------------------------------------------------
 # Writing decisions
 # ---------------------------------------------------------------------------
 

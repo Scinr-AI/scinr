@@ -113,6 +113,35 @@ def _get_instance_relationships(field_info) -> list[dict]:
     return []
 
 
+def _stringify_if_dict(value: Any) -> Any:
+    """
+    Last-resort defensive coercion for values headed for a Neo4j scalar
+    property. Neo4j only supports primitive types or arrays of primitives —
+    a raw ``dict`` can never be written as a property value.
+
+    This is an independent third layer of defense (in addition to the
+    field-type sanitization and the ``mode="before"`` validator in
+    schema_composer.py): it protects against ANY future dict-typed value
+    that slips through by another path (a different theme, a future
+    annotation mechanism, a misdeclared custom model) so that a single bad
+    property never aborts the write of the entire extraction subgraph.
+
+    Parameters
+    ----------
+    value:
+        Candidate value for a Neo4j scalar property.
+
+    Returns
+    -------
+    Any
+        *value* unchanged if it is not a dict; otherwise a human-readable
+        "key: value; key2: value2" string representation of it.
+    """
+    if isinstance(value, dict):
+        return "; ".join(f"{k}: {v}" for k, v in value.items())
+    return value
+
+
 def _get_instance_key_fields(instance: BaseModel) -> dict[str, str] | None:
     """
     If the instance has ≥1 field marked with instance_key=True, return a dict
@@ -474,11 +503,17 @@ async def _write_model_fields(
                             idx=i,
                         )
                         entity_nodes[item_path] = le_uid
+                    if isinstance(item, dict):
+                        log.warning(
+                            "_write_model_fields: flattening unexpected dict item at "
+                            "field_path=%r to a string (Neo4j cannot store nested Maps)",
+                            item_path,
+                        )
                     scalarValues.append(
-                        item
+                        _stringify_if_dict(item)
                     )  # Siempre se insertan lo propiedades en las instancias, aunque se haga referencia a ellas en la labels (casos del if)
             if scalarValues:
-                scalar_props[field_name] = value
+                scalar_props[field_name] = scalarValues
             continue
 
         # ── Case: scalar with entity_label ────────────────────────────────
@@ -500,6 +535,13 @@ async def _write_model_fields(
         # ── Case: scalar -> accumulate as property ────
         if isinstance(value, (str, int, float, bool)):
             scalar_props[field_name] = value
+        elif isinstance(value, dict):
+            log.warning(
+                "_write_model_fields: flattening unexpected dict value at "
+                "field_path=%r to a string (Neo4j cannot store nested Maps)",
+                field_path,
+            )
+            scalar_props[field_name] = _stringify_if_dict(value)
 
     # ── Level 3: instance_relationships ──────────────────────────────────
     await _apply_instance_relationships(

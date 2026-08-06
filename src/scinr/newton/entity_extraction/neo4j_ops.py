@@ -6,15 +6,15 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from neo4j import AsyncDriver, Driver
+from neo4j import AsyncDriver
 
 from scinr.newton.entity_extraction.state import ExtractionTarget
 
 log = logging.getLogger(__name__)
 
 
-def fetch_extraction_targets(
-    driver: Driver,
+async def fetch_extraction_targets(
+    driver: AsyncDriver,
     document_name: str,
     only_unextracted: bool = False,
 ) -> list[ExtractionTarget]:
@@ -104,17 +104,17 @@ def fetch_extraction_targets(
     ORDER BY n.appearance_order
     """
 
-    with driver.session() as session:
+    async with driver.session() as session:
         try:
-            result = session.run(query, doc_name=document_name)
-            rows = [dict(r) for r in result]
+            result = await session.run(query, doc_name=document_name)
+            rows = await result.data()
         except Exception:
             log.warning(
                 "fetch_extraction_targets: apoc.coll.sortMaps unavailable, "
                 "falling back to unsorted query"
             )
-            result = session.run(fallback_query, doc_name=document_name)
-            rows = [dict(r) for r in result]
+            result = await session.run(fallback_query, doc_name=document_name)
+            rows = await result.data()
 
         targets: list[ExtractionTarget] = []
         for row in rows:
@@ -139,38 +139,12 @@ def fetch_extraction_targets(
     return targets
 
 
-def mark_info_units_extracted(driver: Driver, node_full_id: str) -> None:
-    """
-    Set extracted = ISO timestamp on all InfoUnits of the given StructureNode.
-    Only updates InfoUnits where extracted IS NULL (idempotent).
-    """
-    timestamp = datetime.now(UTC).isoformat()
-    with driver.session() as session:
-        result = session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})-[:HAS_INFO_UNIT]->(iu:InfoUnit)
-            WHERE iu.extracted IS NULL
-            SET iu.extracted = $timestamp
-            RETURN count(iu) AS updated
-            """,
-            nid=node_full_id,
-            timestamp=timestamp,
-        )
-        updated = result.single()["updated"]
-    log.info(
-        "mark_info_units_extracted: marked %d InfoUnits as extracted for node %r",
-        updated,
-        node_full_id,
-    )
-
-
 async def mark_info_units_extracted_async(driver: AsyncDriver, node_full_id: str) -> None:
     """Set ``extracted`` timestamp on all unextracted InfoUnits of the given StructureNode.
 
     Async version using the singleton async driver. Idempotent: only updates
     InfoUnits where ``extracted IS NULL``.
     """
-    from datetime import datetime
     timestamp = datetime.now(UTC).isoformat()
     async with driver.session() as session:
         result = await session.run(

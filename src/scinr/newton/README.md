@@ -24,7 +24,8 @@ from scinr.newton import (
     run_pipeline,
     run_preprocess, run_extraction, run_ingestion,
     run_annotation, run_entity_extraction, run_tabular_pipeline,
-    DocumentResult, StageResult, PipelineResult,
+    delete_document,
+    DocumentResult, StageResult, PipelineResult, DeletionResult,
     ScinrError, ConfigurationError, PreconditionError,
     ExtractionError, IngestionError, ModelError, StorageError, ConversionError,
 )
@@ -158,6 +159,35 @@ All stage functions are async and importable from `scinr.newton`:
 
 ---
 
+### Document Deletion
+
+**Module:** `scinr.newton.ingest.deletion`
+
+#### `delete_document(path, version=None)`
+
+Sync function (no event loop required). Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `--update` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
+
+```python
+from scinr.newton import delete_document
+
+result = delete_document("ModuloA/SubModulo/doc_a")        # deletes every version
+result = delete_document("ModuloA/SubModulo/doc_a", version=2)  # deletes only version 2
+print(result.found, result.documents_deleted, result.structure_nodes_deleted)
+```
+
+Behavior:
+
+1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
+2. Read-only check: finds every `(:Document {path: $path})` matching `version` (or all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no delete or garbage-collection queries are executed.
+3. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
+4. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
+   - **Pass 1:** deletes orphaned `:Entity`/`:ModelInstance` nodes (no `:ExtractionResult` reaches them within 7 hops).
+   - **Pass 2** (runs only after Pass 1 fully finishes): deletes orphaned `:LabeledEntity` nodes (no incoming relationship at all).
+
+**Returns:** `DeletionResult`
+
+---
+
 ### Result Types
 
 **Module:** `scinr.newton.results`
@@ -202,6 +232,28 @@ Aggregated result of a full `run_pipeline()` invocation.
 | `annotation` | `StageResult \| None` | Stage 3 result, or `None` if not executed. |
 | `entity_extraction` | `StageResult \| None` | Stage 4 result, or `None` if not executed. |
 | `tabular` | `StageResult \| None` | Tabular pipeline result, or `None` if not executed. |
+
+#### `DeletionResult`
+
+Result of a `delete_document()` call — full Document + cascade + garbage-collection deletion.
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | `str` | The Document `path` that was targeted for deletion. |
+| `version` | `int \| None` | The specific version requested, or `None` if all versions were targeted. |
+| `found` | `bool` | `True` if at least one matching Document existed before deletion. When `False`, all counters below are 0 and no delete or GC queries were executed. |
+| `versions_deleted` | `list[int]` | Sorted list of integer versions that matched and were deleted. Empty when `found` is `False`. |
+| `documents_deleted` | `int` | Number of `:Document` nodes deleted (the matched Document(s) plus any reached via `IS_COMPOSED_OF*`). |
+| `structure_nodes_deleted` | `int` | Number of `:StructureNode` nodes deleted. |
+| `info_units_deleted` | `int` | Number of `:InfoUnit` nodes deleted. |
+| `model_decisions_deleted` | `int` | Number of `:ModelDecision` nodes deleted. |
+| `proposed_models_deleted` | `int` | Number of `:ProposedModel` nodes deleted. |
+| `proposed_fields_deleted` | `int` | Number of `:ProposedField` nodes deleted. |
+| `extraction_results_deleted` | `int` | Number of `:ExtractionResult` nodes deleted. |
+| `gc_entity_model_instance_deleted` | `int` | Total `:Entity`/`:ModelInstance` nodes deleted across all GC iterations. |
+| `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at `GC_MAX_PASSES`). |
+| `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
+| `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at `GC_MAX_PASSES`). |
 
 ---
 

@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 _ROW_BATCH_SIZE = 500
 _PARALLEL_ROW_WRITES = 10
-_NORMALIZATION_LLM_CONCURRENCY = 5
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -373,14 +372,19 @@ async def _write_tabular_with_normalization(
             ]
             all_key_batches.append((key_batch, type_name))
 
-    # Step 4b: LLM extraction for ALL key batches concurrently
-    sem = asyncio.Semaphore(_NORMALIZATION_LLM_CONCURRENCY)
+    # Step 4b: LLM extraction for ALL key batches concurrently.
+    # Uses the global get_llm_semaphore() (not a local semaphore) so that
+    # normalization LLM calls share the same bounded concurrency pool as
+    # every other Bedrock caller in the pipeline (extraction, entity
+    # extraction, annotation), avoiding overshooting the botocore connection
+    # pool when multiple documents/tables are processed in parallel.
+    from scinr.newton.config import get_llm_semaphore
 
     async def _extract_key_batch(
         key_batch: list[NormalizationEntry],
         type_name: str,
     ) -> None:
-        async with sem:
+        async with get_llm_semaphore():
             logger.info(
                 "tabular: normalizing batch of %d keys (type: %s)",
                 len(key_batch),

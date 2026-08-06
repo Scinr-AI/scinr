@@ -17,8 +17,10 @@ from scinr.newton.exceptions import (
     ScinrError,
     StorageError,
 )
+from scinr.newton.ingest.deletion import delete_document
 from scinr.newton.pipeline import run_pipeline
 from scinr.newton.results import (
+    DeletionResult,
     DocumentResult,
     PipelineResult,
     StageResult,
@@ -54,6 +56,7 @@ __all__ = [
     "DocumentResult",
     "StageResult",
     "PipelineResult",
+    "DeletionResult",
     # Unified pipeline
     "run_pipeline",
     # Individual stage functions
@@ -63,6 +66,8 @@ __all__ = [
     "run_annotation",
     "run_entity_extraction",
     "run_tabular_pipeline",
+    # Document deletion
+    "delete_document",
     # Normalization
     "NormalizationEngine",
     # Version

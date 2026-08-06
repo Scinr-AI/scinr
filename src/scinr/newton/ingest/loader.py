@@ -20,6 +20,7 @@ Usage (library):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -35,6 +36,7 @@ from scinr.newton.ingest.nodes import (
 )
 from scinr.newton.ingest.schema import setup_schema
 from scinr.newton.models.document_structure import Document
+from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +97,7 @@ def _resolve_batch_version(
         )
     else:
         result = session.run(
-            "MATCH (d:Document) WHERE d.path IN $paths "
-            "RETURN max(d.version) AS max_version",
+            "MATCH (d:Document) WHERE d.path IN $paths RETURN max(d.version) AS max_version",
             paths=all_paths,
         )
 
@@ -107,6 +108,27 @@ def _resolve_batch_version(
         return max_version if max_version is not None else 1
     else:
         return (max_version + 1) if max_version is not None else 1
+
+
+def resolve_batch_version_sync(driver, all_paths: list[str], update_mode: bool) -> int:
+    """Public wrapper around _resolve_batch_version(): opens its own read
+    session and delegates to the existing private function, without
+    duplicating any logic. Intended to be called via asyncio.to_thread()
+    from the future per-document orchestration engine (does not exist yet).
+
+    Parameters
+    ----------
+    driver:
+        An open, authenticated Neo4j driver instance.
+    all_paths:
+        All document paths in the batch (leaves + ancestor folders) —
+        see _extract_all_paths() for how this list is computed today.
+    update_mode:
+        True → return the current latest version (no increment).
+        False → return the next version (increment).
+    """
+    with driver.session() as session:
+        return _resolve_batch_version(session, all_paths, update_mode)
 
 
 def _read_doc_path(path: Path) -> str | None:
@@ -190,33 +212,34 @@ def load_file(
         update_mode,
     )
 
-    with driver.session() as session:
-        with session.begin_transaction() as tx:
-            try:
-                insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
-                tx.commit()
-                logger.info(
-                    "Transaction committed for document: %s (v%d)",
-                    doc.document_name,
-                    resolved_version,
-                )
-            except ConstraintError as exc:
-                tx.rollback()
-                if (
-                    "constraint_document_path_version" in str(exc).lower()
-                    or "version" in str(exc).lower()
-                ):
-                    raise IngestionError(
-                        f"Version conflict: version {resolved_version} was already ingested by a "
-                        f"concurrent process. Retry the ingestion."
-                    ) from exc
-                raise
-            except Exception:
-                tx.rollback()
-                logger.exception(
-                    "Transaction rolled back for document: %s", doc.document_name
-                )
-                raise
+    def _do_insert() -> None:
+        with driver.session() as session:
+            with session.begin_transaction() as tx:
+                try:
+                    insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
+                    tx.commit()
+                    logger.info(
+                        "Transaction committed for document: %s (v%d)",
+                        doc.document_name,
+                        resolved_version,
+                    )
+                except ConstraintError as exc:
+                    tx.rollback()
+                    if (
+                        "constraint_document_path_version" in str(exc).lower()
+                        or "version" in str(exc).lower()
+                    ):
+                        raise IngestionError(
+                            f"Version conflict: version {resolved_version} was already "
+                            f"ingested by a concurrent process. Retry the ingestion."
+                        ) from exc
+                    raise
+                except Exception:
+                    tx.rollback()
+                    logger.exception("Transaction rolled back for document: %s", doc.document_name)
+                    raise
+
+    with_neo4j_retry_sync(_do_insert)
 
     return doc.document_name
 
@@ -259,9 +282,7 @@ def load_files(
     with driver.session() as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
-    logger.info(
-        "Batch version resolved: %d for %d path(s)", shared_version, len(all_paths)
-    )
+    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
     errors: dict[Path, Exception] = {}
     doc_names: list[str] = []
@@ -343,35 +364,133 @@ def _load_document_object(
         update_mode,
     )
 
-    with driver.session() as session:
-        with session.begin_transaction() as tx:
-            try:
-                insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
-                tx.commit()
-                logger.info(
-                    "Transaction committed for document: %s (v%d)",
-                    doc.document_name,
-                    resolved_version,
-                )
-            except ConstraintError as exc:
-                tx.rollback()
-                if (
-                    "constraint_document_path_version" in str(exc).lower()
-                    or "version" in str(exc).lower()
-                ):
-                    raise IngestionError(
-                        f"Version conflict: version {resolved_version} was already ingested by a "
-                        f"concurrent process. Retry the ingestion."
-                    ) from exc
-                raise
-            except Exception:
-                tx.rollback()
-                logger.exception(
-                    "Transaction rolled back for document: %s", doc.document_name
-                )
-                raise
+    def _do_insert() -> None:
+        with driver.session() as session:
+            with session.begin_transaction() as tx:
+                try:
+                    insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
+                    tx.commit()
+                    logger.info(
+                        "Transaction committed for document: %s (v%d)",
+                        doc.document_name,
+                        resolved_version,
+                    )
+                except ConstraintError as exc:
+                    tx.rollback()
+                    if (
+                        "constraint_document_path_version" in str(exc).lower()
+                        or "version" in str(exc).lower()
+                    ):
+                        raise IngestionError(
+                            f"Version conflict: version {resolved_version} was already "
+                            f"ingested by a concurrent process. Retry the ingestion."
+                        ) from exc
+                    raise
+                except Exception:
+                    tx.rollback()
+                    logger.exception("Transaction rolled back for document: %s", doc.document_name)
+                    raise
+
+    with_neo4j_retry_sync(_do_insert)
 
     return doc.document_name
+
+
+# ---------------------------------------------------------------------------
+# Async per-document ingestion wrappers (Bloque B — orchestration engine
+# does not exist yet, these are the building blocks it will call).
+# ---------------------------------------------------------------------------
+#
+# Design decision: two explicit functions (ingest_one for an in-memory
+# Document, ingest_one_from_path for a Path) rather than a single function
+# that dispatches internally on `Document | Path`. This mirrors the existing
+# convention in this module — load_file()/_load_document_object() and
+# load_files()/load_documents() are already split by input type instead of
+# accepting a union — so Bloque B call sites stay type-safe and unambiguous
+# without needing an isinstance() check here.
+
+
+async def ingest_one(
+    doc: Document,
+    driver,
+    update_mode: bool = False,
+    shared_version: int | None = None,
+) -> str:
+    """Async wrapper around _load_document_object() for the future
+    per-document orchestration engine (Bloque B, does not exist yet).
+
+    Acquires get_neo4j_sync_semaphore() in the event loop BEFORE dispatching
+    to asyncio.to_thread() — never acquire an asyncio.Semaphore inside the
+    worker thread it wraps (asyncio.Semaphore requires an active event loop
+    and is not usable from a plain worker thread). The semaphore is released
+    only after the synchronous work — including its own internal
+    with_neo4j_retry_sync retries — has fully completed, not before.
+
+    Parameters
+    ----------
+    doc:
+        A fully validated in-memory Document object.
+    driver:
+        An open, authenticated Neo4j driver instance.
+    update_mode:
+        If True, wipe existing structure and re-insert with the same version.
+    shared_version:
+        Pre-computed version for batch ingestion. When provided, skips
+        the per-document version query.
+
+    Returns
+    -------
+    str
+        The document_name of the successfully ingested document.
+    """
+    from scinr.newton.config import get_neo4j_sync_semaphore
+
+    semaphore = get_neo4j_sync_semaphore()
+    async with semaphore:
+        return await asyncio.to_thread(
+            _load_document_object, doc, driver, update_mode, shared_version
+        )
+
+
+async def ingest_one_from_path(
+    path: Path,
+    driver,
+    update_mode: bool = False,
+    shared_version: int | None = None,
+) -> str:
+    """Async wrapper around load_file() for the future per-document
+    orchestration engine (Bloque B, does not exist yet).
+
+    Analogous to ingest_one() but for a not-yet-loaded JSON extraction file
+    on disk, mirroring the existing load_file() vs _load_document_object()
+    split in this module. Same semaphore-before-thread contract as
+    ingest_one(): get_neo4j_sync_semaphore() is acquired in the event loop
+    before dispatching to asyncio.to_thread(), and released only after the
+    synchronous work (disk read, validation, insert, and its own
+    with_neo4j_retry_sync retries) has fully completed.
+
+    Parameters
+    ----------
+    path:
+        Path to a JSON extraction file produced by the pipeline.
+    driver:
+        An open, authenticated Neo4j driver instance.
+    update_mode:
+        If True, wipe existing structure and re-insert with the same version.
+    shared_version:
+        Pre-computed version for batch ingestion. When provided, skips
+        the per-document version query.
+
+    Returns
+    -------
+    str
+        The document_name of the successfully ingested document.
+    """
+    from scinr.newton.config import get_neo4j_sync_semaphore
+
+    semaphore = get_neo4j_sync_semaphore()
+    async with semaphore:
+        return await asyncio.to_thread(load_file, path, driver, update_mode, shared_version)
 
 
 def load_documents(
@@ -403,23 +522,16 @@ def load_documents(
         logger.info("No in-memory documents to ingest.")
         return []
 
-    logger.info(
-        "Ingesting %d in-memory document(s) (update_mode=%s).", len(documents), update_mode
-    )
+    logger.info("Ingesting %d in-memory document(s) (update_mode=%s).", len(documents), update_mode)
 
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
-    leaf_doc_paths = [
-        doc.doc_path if doc.doc_path else doc.document_name
-        for doc in documents
-    ]
+    leaf_doc_paths = [doc.doc_path if doc.doc_path else doc.document_name for doc in documents]
     all_paths = _extract_all_paths(leaf_doc_paths)
 
     with driver.session() as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
-    logger.info(
-        "Batch version resolved: %d for %d path(s)", shared_version, len(all_paths)
-    )
+    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
     errors: dict[str, Exception] = {}
     doc_names: list[str] = []
@@ -430,9 +542,7 @@ def load_documents(
             )
             doc_names.append(doc_name)
         except Exception as exc:
-            logger.exception(
-                "Failed to load in-memory document: %s", doc.document_name
-            )
+            logger.exception("Failed to load in-memory document: %s", doc.document_name)
             errors[doc.document_name] = exc
 
     success_count = len(documents) - len(errors)
@@ -483,9 +593,7 @@ def load_folder(
 
     json_files = sorted(folder.rglob(_FILE_GLOB))
     if not json_files:
-        logger.warning(
-            "No files matching '%s' found in '%s' (recursive).", _FILE_GLOB, folder
-        )
+        logger.warning("No files matching '%s' found in '%s' (recursive).", _FILE_GLOB, folder)
         return []
 
     logger.info(
@@ -503,9 +611,7 @@ def load_folder(
     with driver.session() as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
-    logger.info(
-        "Batch version resolved: %d for %d path(s)", shared_version, len(all_paths)
-    )
+    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
     errors: dict[Path, Exception] = {}
     doc_names: list[str] = []
