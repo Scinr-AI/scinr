@@ -14,6 +14,10 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
+from bson.errors import InvalidId
+from bson.objectid import ObjectId
+from gridfs.errors import NoFile
+
 from scinr.newton.storage.base import RawFileRepository
 from scinr.newton.storage.mongodb.client import get_db, get_gridfs_bucket
 
@@ -94,3 +98,58 @@ class MongoDBRawFileRepository(RawFileRepository):
             len(content),
         )
         return raw_file_id
+
+    async def delete(self, raw_file_id: str) -> None:
+        """Delete a raw file's binary (GridFS) and metadata (``raw_files``).
+
+        Idempotent: if *raw_file_id* is not a valid ObjectId, or no matching
+        metadata document is found (already deleted, or a repeated call),
+        this logs a warning and returns without raising. If the metadata
+        document exists but its GridFS binary is already gone
+        (``gridfs.errors.NoFile``), that is also logged and swallowed —
+        the metadata document is still deleted.
+
+        Parameters
+        ----------
+        raw_file_id:
+            The ``raw_file_id`` (``str(ObjectId)``) to delete.
+        """
+        try:
+            object_id = ObjectId(raw_file_id)
+        except InvalidId:
+            logger.warning(
+                "MongoDBRawFileRepository.delete: raw_file_id=%r is not a valid "
+                "ObjectId; nothing to delete.",
+                raw_file_id,
+            )
+            return
+
+        db = get_db()
+        from scinr.newton.config import get_config
+        cfg = get_config()
+
+        doc = await db[cfg.mongodb_raw_files_collection].find_one({"_id": object_id})
+        if doc is None:
+            logger.warning(
+                "MongoDBRawFileRepository.delete: raw_file_id=%r not found "
+                "(already deleted or invalid); nothing to delete.",
+                raw_file_id,
+            )
+            return
+
+        bucket = get_gridfs_bucket()
+        gridfs_id = doc.get("gridfs_id")
+        if gridfs_id is not None:
+            try:
+                await bucket.delete(gridfs_id)
+            except NoFile:
+                logger.warning(
+                    "MongoDBRawFileRepository.delete: GridFS binary for "
+                    "raw_file_id=%r (gridfs_id=%r) is already gone; deleting "
+                    "metadata only.",
+                    raw_file_id,
+                    gridfs_id,
+                )
+
+        await db[cfg.mongodb_raw_files_collection].delete_one({"_id": object_id})
+        logger.debug("Deleted raw file metadata for raw_file_id=%s", raw_file_id)

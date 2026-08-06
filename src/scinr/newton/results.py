@@ -108,6 +108,12 @@ class DeletionResult:
             garbage-collection iterations.
         gc_labeled_entity_passes: Number of GC iterations actually run for the
             LabeledEntity pass (capped at GC_MAX_PASSES).
+        raw_files_deleted: Number of raw_file_ids for which deletion was attempted
+            against the storage backend (GridFS + metadata), for the raw_file_ids
+            referenced by the deleted Document(s) and their descendants. Idempotent —
+            includes ids that were already absent, since delete() returns None either way.
+        converted_pages_deleted: Number of ConvertedPageRecord (converted Markdown
+            pages) deleted from the storage layer for the same raw_file_ids.
     """
 
     path: str
@@ -125,3 +131,5 @@ class DeletionResult:
     gc_entity_model_instance_passes: int
     gc_labeled_entity_deleted: int
     gc_labeled_entity_passes: int
+    raw_files_deleted: int
+    converted_pages_deleted: int

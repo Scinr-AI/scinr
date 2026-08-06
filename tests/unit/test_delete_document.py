@@ -85,6 +85,10 @@ class _FakeSession:
             if self.driver.existence_error is not None:
                 raise self.driver.existence_error
             return _FakeResult(self.driver.existence_rows)
+        if "RETURN DISTINCT n.raw_file_id AS raw_file_id" in query:
+            if self.driver.raw_file_ids_error is not None:
+                raise self.driver.raw_file_ids_error
+            return _FakeResult(self.driver.raw_file_id_rows)
         raise AssertionError(f"Unexpected session.run query: {query}")
 
     def begin_transaction(self) -> _FakeTx:
@@ -101,13 +105,16 @@ class _FakeDriver:
     def __init__(
         self,
         existence_rows: list[dict] | None = None,
+        raw_file_id_rows: list[dict] | None = None,
         cascade_rows: list[dict] | None = None,
         gc_emi_sequence: list[int] | None = None,
         gc_le_sequence: list[int] | None = None,
         existence_error: Exception | None = None,
+        raw_file_ids_error: Exception | None = None,
         cascade_error: Exception | None = None,
     ) -> None:
         self.existence_rows = existence_rows if existence_rows is not None else []
+        self.raw_file_id_rows = raw_file_id_rows if raw_file_id_rows is not None else []
         self._cascade_rows = cascade_rows if cascade_rows is not None else [
             {
                 "documents_deleted": 0,
@@ -125,6 +132,7 @@ class _FakeDriver:
         self.closed = False
         # Optional exceptions to simulate failures at specific points.
         self.existence_error = existence_error
+        self.raw_file_ids_error = raw_file_ids_error
         self.cascade_error = cascade_error
 
     def session(self) -> _FakeSession:
@@ -163,15 +171,100 @@ def patch_driver(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Fake storage repositories
+# ---------------------------------------------------------------------------
+
+
+class _FakeRawFileRepo:
+    """Fake RawFileRepository: instrumented, records calls into a shared
+    driver.calls log (kind="storage.raw_delete") so ordering relative to
+    Neo4j calls can be asserted the same way GC-pass ordering is asserted
+    elsewhere in this file.
+
+    ``raise_exc`` raises unconditionally on every call (used by the
+    single-id fail-fast tests). ``raise_on_id`` restricts that same
+    exception to only fire when ``raw_file_id == raise_on_id``, letting
+    tests simulate a failure part-way through a multi-id list while still
+    recording calls for ids processed before the failure.
+    """
+
+    def __init__(
+        self,
+        driver: _FakeDriver,
+        raise_exc: Exception | None = None,
+        raise_on_id: str | None = None,
+    ) -> None:
+        self.driver = driver
+        self.raise_exc = raise_exc
+        self.raise_on_id = raise_on_id
+        self.deleted_ids: list[str] = []
+
+    async def delete(self, raw_file_id: str) -> None:
+        self.driver.calls.append(("storage.raw_delete", raw_file_id, {}))
+        if self.raise_exc is not None and (
+            self.raise_on_id is None or raw_file_id == self.raise_on_id
+        ):
+            raise self.raise_exc
+        self.deleted_ids.append(raw_file_id)
+
+
+class _FakePageRepo:
+    """Fake PageRepository: instrumented the same way as _FakeRawFileRepo.
+
+    See _FakeRawFileRepo for the ``raise_exc``/``raise_on_id`` semantics.
+    """
+
+    def __init__(
+        self,
+        driver: _FakeDriver,
+        pages_per_id: dict[str, int] | None = None,
+        raise_exc: Exception | None = None,
+        raise_on_id: str | None = None,
+    ) -> None:
+        self.driver = driver
+        self.pages_per_id = pages_per_id or {}
+        self.raise_exc = raise_exc
+        self.raise_on_id = raise_on_id
+        self.deleted_ids: list[str] = []
+
+    async def delete_pages(self, raw_file_id: str) -> int:
+        self.driver.calls.append(("storage.page_delete", raw_file_id, {}))
+        if self.raise_exc is not None and (
+            self.raise_on_id is None or raw_file_id == self.raise_on_id
+        ):
+            raise self.raise_exc
+        self.deleted_ids.append(raw_file_id)
+        return self.pages_per_id.get(raw_file_id, 0)
+
+
+@pytest.fixture
+def patch_storage(monkeypatch):
+    """Monkeypatch scinr.newton.storage.factory.get_storage to return a given
+    (raw_file_repo, page_repo) pair, as imported lazily inside
+    deletion._delete_storage_for_raw_file_ids().
+    """
+
+    def _patch(raw_file_repo, page_repo) -> None:
+        monkeypatch.setattr(
+            "scinr.newton.storage.factory.get_storage",
+            lambda: (raw_file_repo, page_repo),
+        )
+
+    return _patch
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 class TestDeleteDocumentNotFound:
-    def test_no_matching_document_returns_found_false_with_zero_counters(self, patch_driver):
+    async def test_no_matching_document_returns_found_false_with_zero_counters(
+        self, patch_driver
+    ):
         patch_driver(_FakeDriver(existence_rows=[]))
 
-        result = delete_document("some/path", version=None)
+        result = await delete_document("some/path", version=None)
 
         assert isinstance(result, DeletionResult)
         assert result.found is False
@@ -187,11 +280,13 @@ class TestDeleteDocumentNotFound:
         assert result.gc_entity_model_instance_passes == 0
         assert result.gc_labeled_entity_deleted == 0
         assert result.gc_labeled_entity_passes == 0
+        assert result.raw_files_deleted == 0
+        assert result.converted_pages_deleted == 0
 
-    def test_no_matching_document_does_not_run_delete_or_gc_queries(self, patch_driver):
+    async def test_no_matching_document_does_not_run_delete_or_gc_queries(self, patch_driver):
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        delete_document("some/path", version=None)
+        await delete_document("some/path", version=None)
 
         # Only the read-only existence check should have run.
         execute_write_calls = [c for c in fake_driver.calls if c[0] == "session.execute_write"]
@@ -202,21 +297,36 @@ class TestDeleteDocumentNotFound:
         session_run_calls = [c for c in fake_driver.calls if c[0] == "session.run"]
         assert len(session_run_calls) == 1
 
-    def test_driver_is_closed_even_when_nothing_found(self, patch_driver):
+    async def test_no_matching_document_never_calls_get_storage(
+        self, patch_driver, monkeypatch
+    ):
+        """found=False must short-circuit before even the raw_file_ids
+        lookup or get_storage() are reached."""
+        from unittest.mock import MagicMock
+
+        patch_driver(_FakeDriver(existence_rows=[]))
+        fake_get_storage = MagicMock()
+        monkeypatch.setattr("scinr.newton.storage.factory.get_storage", fake_get_storage)
+
+        await delete_document("some/path", version=None)
+
+        fake_get_storage.assert_not_called()
+
+    async def test_driver_is_closed_even_when_nothing_found(self, patch_driver):
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        delete_document("some/path")
+        await delete_document("some/path")
 
         assert fake_driver.closed is True
 
-    def test_empty_string_path_is_passed_through_unchanged(self, patch_driver):
+    async def test_empty_string_path_is_passed_through_unchanged(self, patch_driver):
         """An empty-string path is not special-cased: it is passed through
         verbatim to the existence query, and (since it matches nothing)
         results in found=False rather than raising or silently defaulting.
         """
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        result = delete_document("")
+        result = await delete_document("")
 
         assert result.path == ""
         assert result.found is False
@@ -228,7 +338,7 @@ class TestDeleteDocumentNotFound:
 
 
 class TestDeleteDocumentCascade:
-    def test_found_document_runs_cascade_delete_with_correct_params(self, patch_driver):
+    async def test_found_document_runs_cascade_delete_with_correct_params(self, patch_driver):
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -248,7 +358,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        result = delete_document("docs/a", version=1)
+        result = await delete_document("docs/a", version=1)
 
         assert result.found is True
         assert result.versions_deleted == [1]
@@ -269,7 +379,7 @@ class TestDeleteDocumentCascade:
         assert len(cascade_calls) == 1
         assert cascade_calls[0] == {"path": "docs/a", "version": 1}
 
-    def test_multiple_cascade_rows_are_summed(self, patch_driver):
+    async def test_multiple_cascade_rows_are_summed(self, patch_driver):
         patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}, {"version": 2}],
@@ -298,7 +408,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        result = delete_document("docs/b")
+        result = await delete_document("docs/b")
 
         assert result.found is True
         assert result.versions_deleted == [1, 2]
@@ -310,7 +420,7 @@ class TestDeleteDocumentCascade:
         assert result.proposed_fields_deleted == 3
         assert result.extraction_results_deleted == 1
 
-    def test_version_none_passed_through_as_null(self, patch_driver):
+    async def test_version_none_passed_through_as_null(self, patch_driver):
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -319,7 +429,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        delete_document("docs/c")  # version defaults to None
+        await delete_document("docs/c")  # version defaults to None
 
         existence_calls = [
             params for kind, query, params in fake_driver.calls if kind == "session.run"
@@ -333,7 +443,7 @@ class TestDeleteDocumentCascade:
         ]
         assert cascade_calls[0] == {"path": "docs/c", "version": None}
 
-    def test_explicit_version_passed_through(self, patch_driver):
+    async def test_explicit_version_passed_through(self, patch_driver):
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 3}],
@@ -342,7 +452,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        delete_document("docs/d", version=3)
+        await delete_document("docs/d", version=3)
 
         cascade_calls = [
             params
@@ -351,7 +461,7 @@ class TestDeleteDocumentCascade:
         ]
         assert cascade_calls[0] == {"path": "docs/d", "version": 3}
 
-    def test_driver_is_closed_after_successful_deletion(self, patch_driver):
+    async def test_driver_is_closed_after_successful_deletion(self, patch_driver):
         """The happy path (found=True, cascade + GC all run) must still
         close the driver, not just the not-found early-return path.
         """
@@ -363,11 +473,11 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        delete_document("docs/i", version=1)
+        await delete_document("docs/i", version=1)
 
         assert fake_driver.closed is True
 
-    def test_existence_query_exception_propagates_and_still_closes_driver(self, patch_driver):
+    async def test_existence_query_exception_propagates_and_still_closes_driver(self, patch_driver):
         """If the existence check itself raises (e.g. a Neo4j connectivity
         error), delete_document must not swallow it: it should propagate to
         the caller, while still closing the driver via the `finally` block.
@@ -377,13 +487,13 @@ class TestDeleteDocumentCascade:
         )
 
         with pytest.raises(RuntimeError, match="neo4j unavailable"):
-            delete_document("docs/broken")
+            await delete_document("docs/broken")
 
         assert fake_driver.closed is True
         # No cascade or GC work should have been attempted.
         assert [c for c in fake_driver.calls if c[0] == "tx.run"] == []
 
-    def test_cascade_delete_exception_rolls_back_and_propagates(self, patch_driver):
+    async def test_cascade_delete_exception_rolls_back_and_propagates(self, patch_driver):
         """A failure inside the cascade-delete write transaction must roll
         back that transaction and re-raise it must not be swallowed into
         a successful DeletionResult, and no commit should have happened.
@@ -396,7 +506,7 @@ class TestDeleteDocumentCascade:
         )
 
         with pytest.raises(ValueError, match="cascade write failed"):
-            delete_document("docs/j", version=1)
+            await delete_document("docs/j", version=1)
 
         rollback_calls = [c for c in fake_driver.calls if c[0] == "tx.rollback"]
         commit_calls = [c for c in fake_driver.calls if c[0] == "tx.commit"]
@@ -413,7 +523,7 @@ class TestDeleteDocumentCascade:
 
 
 class TestDeleteDocumentGarbageCollection:
-    def test_gc_pass_stops_at_first_zero(self, patch_driver):
+    async def test_gc_pass_stops_at_first_zero(self, patch_driver):
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -422,7 +532,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = delete_document("docs/e", version=1)
+        result = await delete_document("docs/e", version=1)
 
         assert result.gc_entity_model_instance_deleted == 7
         assert result.gc_entity_model_instance_passes == 3
@@ -434,7 +544,7 @@ class TestDeleteDocumentGarbageCollection:
         )
         assert emi_run_count == 3
 
-    def test_gc_pass_caps_at_gc_max_passes_when_never_reaching_zero(self, patch_driver):
+    async def test_gc_pass_caps_at_gc_max_passes_when_never_reaching_zero(self, patch_driver):
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -443,7 +553,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = delete_document("docs/f", version=1)
+        result = await delete_document("docs/f", version=1)
 
         assert result.gc_entity_model_instance_passes == GC_MAX_PASSES
         assert result.gc_entity_model_instance_deleted == GC_MAX_PASSES
@@ -455,7 +565,7 @@ class TestDeleteDocumentGarbageCollection:
         )
         assert emi_run_count == GC_MAX_PASSES
 
-    def test_labeled_entity_pass_runs_only_after_entity_model_instance_pass_completes(
+    async def test_labeled_entity_pass_runs_only_after_entity_model_instance_pass_completes(
         self, patch_driver
     ):
         fake_driver = patch_driver(
@@ -466,7 +576,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = delete_document("docs/g", version=1)
+        result = await delete_document("docs/g", version=1)
 
         assert result.gc_entity_model_instance_deleted == 4
         assert result.gc_entity_model_instance_passes == 3
@@ -486,7 +596,7 @@ class TestDeleteDocumentGarbageCollection:
         ]
         assert labels == ["emi", "emi", "emi", "le", "le"]
 
-    def test_gc_second_pass_independent_max_passes(self, patch_driver):
+    async def test_gc_second_pass_independent_max_passes(self, patch_driver):
         patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -495,8 +605,304 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = delete_document("docs/h", version=1)
+        result = await delete_document("docs/h", version=1)
 
         assert result.gc_entity_model_instance_passes == 1
         assert result.gc_labeled_entity_passes == GC_MAX_PASSES
         assert result.gc_labeled_entity_deleted == GC_MAX_PASSES
+
+
+class TestDeleteDocumentStorageCleanup:
+    """Tests for the pre-cascade documental storage cleanup step."""
+
+    async def test_deletes_storage_for_each_distinct_raw_file_id_before_cascade(
+        self, patch_driver, patch_storage
+    ):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1"}, {"raw_file_id": "rid2"}],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 3, "rid2": 5})
+        patch_storage(raw_repo, page_repo)
+
+        result = await delete_document("docs/k", version=1)
+
+        assert raw_repo.deleted_ids == ["rid1", "rid2"]
+        assert page_repo.deleted_ids == ["rid1", "rid2"]
+        assert result.raw_files_deleted == 2
+        assert result.converted_pages_deleted == 8
+
+        # All storage deletion calls must complete before the cascade
+        # delete (tx.run containing "documents_deleted") ever runs.
+        kinds_in_order = [kind for kind, _, _ in fake_driver.calls]
+        storage_indices = [
+            i
+            for i, k in enumerate(kinds_in_order)
+            if k in ("storage.raw_delete", "storage.page_delete")
+        ]
+        cascade_indices = [
+            i
+            for i, (kind, query, _) in enumerate(fake_driver.calls)
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert storage_indices, "expected storage deletion calls to have happened"
+        assert cascade_indices, "expected the cascade delete to have run"
+        assert max(storage_indices) < min(cascade_indices)
+
+    async def test_documents_with_empty_raw_file_id_are_excluded(
+        self, patch_driver, patch_storage
+    ):
+        """The Cypher query itself filters out empty raw_file_id values
+        (folders / storage_backend='none' documents); this test pins that
+        only the non-empty ids returned by the query trigger storage
+        deletion calls.
+        """
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                # Simulates the server-side WHERE n.raw_file_id <> '' filter:
+                # the folder-parent Document (empty raw_file_id) never
+                # appears in these rows.
+                raw_file_id_rows=[{"raw_file_id": "rid1"}],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver)
+        patch_storage(raw_repo, page_repo)
+
+        result = await delete_document("docs/l", version=1)
+
+        assert raw_repo.deleted_ids == ["rid1"]
+        assert page_repo.deleted_ids == ["rid1"]
+        assert "" not in raw_repo.deleted_ids
+        assert result.raw_files_deleted == 1
+
+    async def test_page_repo_exception_propagates_and_skips_cascade_delete(
+        self, patch_driver, patch_storage
+    ):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1"}],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver, raise_exc=RuntimeError("mongo down"))
+        patch_storage(raw_repo, page_repo)
+
+        with pytest.raises(RuntimeError, match="mongo down"):
+            await delete_document("docs/m", version=1)
+
+        assert fake_driver.closed is True
+        cascade_calls = [
+            query
+            for kind, query, _ in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert cascade_calls == []
+        # raw_repo.delete() must never have been reached for this id since
+        # delete_pages() is called first and raised.
+        assert raw_repo.deleted_ids == []
+
+    async def test_raw_file_repo_exception_propagates_and_skips_cascade_delete(
+        self, patch_driver, patch_storage
+    ):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1"}],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver, raise_exc=ValueError("gridfs error"))
+        page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 2})
+        patch_storage(raw_repo, page_repo)
+
+        with pytest.raises(ValueError, match="gridfs error"):
+            await delete_document("docs/n", version=1)
+
+        assert fake_driver.closed is True
+        cascade_calls = [
+            query
+            for kind, query, _ in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert cascade_calls == []
+        # delete_pages() should have run (and returned normally) before
+        # delete() raised.
+        assert page_repo.deleted_ids == ["rid1"]
+
+    async def test_no_raw_file_ids_never_calls_get_storage(self, patch_driver, monkeypatch):
+        """When every Document in scope has an empty raw_file_id (so the
+        raw_file_ids query returns no rows), get_storage() must never be
+        called at all.
+        """
+        from unittest.mock import MagicMock
+
+        patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        fake_get_storage = MagicMock()
+        monkeypatch.setattr("scinr.newton.storage.factory.get_storage", fake_get_storage)
+
+        result = await delete_document("docs/o", version=1)
+
+        fake_get_storage.assert_not_called()
+        assert result.raw_files_deleted == 0
+        assert result.converted_pages_deleted == 0
+
+    async def test_converted_pages_deleted_sums_across_multiple_raw_file_ids(
+        self, patch_driver, patch_storage
+    ):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[
+                    {"raw_file_id": "rid1"},
+                    {"raw_file_id": "rid2"},
+                    {"raw_file_id": "rid3"},
+                ],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 1, "rid2": 0, "rid3": 4})
+        patch_storage(raw_repo, page_repo)
+
+        result = await delete_document("docs/p", version=1)
+
+        assert result.raw_files_deleted == 3
+        assert result.converted_pages_deleted == 5
+
+    async def test_raw_file_ids_query_receives_correct_params(self, patch_driver):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 2}],
+                raw_file_id_rows=[],
+            )
+        )
+
+        await delete_document("docs/q", version=2)
+
+        raw_file_id_calls = [
+            params
+            for kind, query, params in fake_driver.calls
+            if kind == "session.run" and "RETURN DISTINCT n.raw_file_id AS raw_file_id" in query
+        ]
+        assert len(raw_file_id_calls) == 1
+        assert raw_file_id_calls[0] == {"path": "docs/q", "version": 2}
+
+    async def test_page_repo_failure_mid_list_stops_before_processing_later_ids(
+        self, patch_driver, patch_storage
+    ):
+        """With three raw_file_ids, a delete_pages() failure on the second
+        one must stop the loop immediately: the third id's delete_pages()
+        and delete() must never be called, and the second id's raw_file_repo
+        .delete() (which runs after delete_pages() for that same id) must
+        never be called either, since the exception happens first.
+        """
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[
+                    {"raw_file_id": "rid1"},
+                    {"raw_file_id": "rid2"},
+                    {"raw_file_id": "rid3"},
+                ],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(
+            fake_driver,
+            pages_per_id={"rid1": 1, "rid3": 9},
+            raise_exc=RuntimeError("mongo down on rid2"),
+            raise_on_id="rid2",
+        )
+        patch_storage(raw_repo, page_repo)
+
+        with pytest.raises(RuntimeError, match="mongo down on rid2"):
+            await delete_document("docs/r", version=1)
+
+        assert fake_driver.closed is True
+        # rid1 was fully processed (both page delete and raw delete).
+        assert raw_repo.deleted_ids == ["rid1"]
+        # page_repo saw rid1 (succeeded) then rid2 (raised) — rid3 never reached.
+        page_delete_calls = [
+            rid for kind, rid, _ in fake_driver.calls if kind == "storage.page_delete"
+        ]
+        assert page_delete_calls == ["rid1", "rid2"]
+        raw_delete_calls = [
+            rid for kind, rid, _ in fake_driver.calls if kind == "storage.raw_delete"
+        ]
+        # rid2's raw_file_repo.delete() must never be reached: delete_pages()
+        # raised before raw_file_repo.delete(rid2) could run.
+        assert raw_delete_calls == ["rid1"]
+        # No cascade delete should have run.
+        cascade_calls = [
+            query
+            for kind, query, _ in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert cascade_calls == []
+
+    async def test_raw_file_repo_failure_mid_list_stops_before_processing_later_ids(
+        self, patch_driver, patch_storage
+    ):
+        """With three raw_file_ids, a raw_file_repo.delete() failure on the
+        second one (after its own delete_pages() succeeded) must stop the
+        loop before the third id is ever touched.
+        """
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[
+                    {"raw_file_id": "rid1"},
+                    {"raw_file_id": "rid2"},
+                    {"raw_file_id": "rid3"},
+                ],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(
+            fake_driver,
+            raise_exc=ValueError("gridfs error on rid2"),
+            raise_on_id="rid2",
+        )
+        page_repo = _FakePageRepo(
+            fake_driver, pages_per_id={"rid1": 1, "rid2": 2, "rid3": 9}
+        )
+        patch_storage(raw_repo, page_repo)
+
+        with pytest.raises(ValueError, match="gridfs error on rid2"):
+            await delete_document("docs/s", version=1)
+
+        assert fake_driver.closed is True
+        # delete_pages() ran for rid1 and rid2, but never for rid3.
+        page_delete_calls = [
+            rid for kind, rid, _ in fake_driver.calls if kind == "storage.page_delete"
+        ]
+        assert page_delete_calls == ["rid1", "rid2"]
+        # raw_file_repo.delete() ran for rid1 (succeeded) and rid2 (raised),
+        # but never for rid3.
+        raw_delete_calls = [
+            rid for kind, rid, _ in fake_driver.calls if kind == "storage.raw_delete"
+        ]
+        assert raw_delete_calls == ["rid1", "rid2"]
+        assert raw_repo.deleted_ids == ["rid1"]
+        cascade_calls = [
+            query
+            for kind, query, _ in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert cascade_calls == []

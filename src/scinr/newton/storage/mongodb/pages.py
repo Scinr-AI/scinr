@@ -113,3 +113,33 @@ class MongoDBPageRepository(PageRepository):
                 )
             )
         return records
+
+    async def delete_pages(self, raw_file_id: str) -> int:
+        """Delete every converted page belonging to *raw_file_id*.
+
+        Not an error if no pages exist for this ``raw_file_id`` — returns
+        ``0`` in that case rather than raising.
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID of the :class:`~storage.models.RawFileRecord` whose pages
+            should be deleted.
+
+        Returns
+        -------
+        int
+            Number of pages deleted (``0`` if none matched).
+        """
+        db = get_db()
+        from scinr.newton.config import get_config
+        cfg = get_config()
+        result = await db[cfg.mongodb_pages_collection].delete_many(
+            {"raw_file_id": raw_file_id}
+        )
+        logger.debug(
+            "Deleted %d converted page(s) for raw_file_id=%s",
+            result.deleted_count,
+            raw_file_id,
+        )
+        return result.deleted_count

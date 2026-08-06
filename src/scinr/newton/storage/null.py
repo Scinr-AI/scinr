@@ -21,6 +21,9 @@ class NullRawFileRepository(RawFileRepository):
     ) -> str:
         return ""  # raw_file_id empty string — documented no-storage sentinel
 
+    async def delete(self, raw_file_id: str) -> None:
+        return None  # no-op: nothing is ever stored, so nothing to delete
+
 
 class NullPageRepository(PageRepository):
     """No-op implementation. All writes are silently discarded."""
@@ -37,3 +40,6 @@ class NullPageRepository(PageRepository):
 
     async def get_pages(self, raw_file_id: str) -> list[ConvertedPageRecord]:
         return []
+
+    async def delete_pages(self, raw_file_id: str) -> int:
+        return 0  # no-op: nothing is ever stored, so nothing to delete
