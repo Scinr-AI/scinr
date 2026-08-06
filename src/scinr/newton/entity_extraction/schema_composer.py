@@ -105,14 +105,10 @@ def _sanitize_dict_types(type_str: str) -> str:
       the optional wrapper.
     - Strings that do not reference dict/Dict at all are returned unchanged.
 
-    Parameters
-    ----------
-    type_str:
-        The raw field_type string as supplied by supplementary_fields.
+    Args:
+        type_str: The raw field_type string as supplied by supplementary_fields.
 
-    Returns
-    -------
-    str
+    Returns:
         The sanitized type string, safe to eval() against the safe_ns used
         by _parse_type_string.
     """
@@ -241,18 +237,12 @@ def compose_extraction_schema(
       - Each complementary model as an optional field (snake_case class name)
       - Each supplementary field parsed from its type string
 
-    Parameters
-    ----------
-    primary_class:
-        The primary Pydantic model class for this extraction.
-    complementary_classes:
-        List of additional Pydantic model classes to include.
-    supplementary_fields:
-        List of dicts with keys: field_name, field_type, description, required.
+    Args:
+        primary_class: The primary Pydantic model class for this extraction.
+        complementary_classes: List of additional Pydantic model classes to include.
+        supplementary_fields: List of dicts with keys: field_name, field_type, description, required.
 
-    Returns
-    -------
-    type
+    Returns:
         A dynamically created Pydantic BaseModel subclass.
     """
     complementary_classes = complementary_classes or []

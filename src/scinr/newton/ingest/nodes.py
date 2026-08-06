@@ -73,12 +73,9 @@ def get_next_version(session, doc_path: str) -> int:
 
     Returns 1 if no document with that path exists yet.
 
-    Parameters
-    ----------
-    session:
-        An open Neo4j session (not a transaction).
-    doc_path:
-        Relative path of the document.
+    Args:
+        session: An open Neo4j session (not a transaction).
+        doc_path: Relative path of the document.
     """
     result = session.run(
         "MATCH (d:Document {path: $path}) RETURN max(d.version) AS max_version",
@@ -94,12 +91,9 @@ def get_current_latest_version(session, doc_path: str) -> int | None:
 
     Returns ``None`` if no document with that path exists.
 
-    Parameters
-    ----------
-    session:
-        An open Neo4j session (not a transaction).
-    doc_path:
-        Relative path of the document.
+    Args:
+        session: An open Neo4j session (not a transaction).
+        doc_path: Relative path of the document.
     """
     result = session.run(
         "MATCH (d:Document {path: $path, latest: true}) RETURN d.version AS version",
@@ -121,14 +115,10 @@ def delete_document_content(tx, doc_path: str, version: int) -> None:
     3. LabeledEntities → ExtractionResults
     4. StructureNodes
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    doc_path:
-        Relative path of the document.
-    version:
-        Integer version number of the document to wipe.
+    Args:
+        tx: An open Neo4j transaction.
+        doc_path: Relative path of the document.
+        version: Integer version number of the document to wipe.
     """
     _base = "MATCH (d:Document {path: $path, version: $version})-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)"
     params = {"path": doc_path, "version": version}
@@ -180,21 +170,14 @@ def insert_document(
     The 'latest' flag management (setting old version to latest=False and
     creating HAS_NEWER_VERSION) is handled separately by handle_versioning().
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    document_name:
-        Display name for the document (file stem or folder name).
-    doc_path:
-        Relative path from the pipeline input root (unique per document location).
-    version:
-        Integer version number.
-    is_folder:
-        True for folder-parent documents; False for leaf documents.
-    context_instructions:
-        Optional free-text user-provided ingestion context. When None, the
-        property is stored as null in Neo4j (i.e. effectively absent).
+    Args:
+        tx: An open Neo4j transaction.
+        document_name: Display name for the document (file stem or folder name).
+        doc_path: Relative path from the pipeline input root (unique per document location).
+        version: Integer version number.
+        is_folder: True for folder-parent documents; False for leaf documents.
+        context_instructions: Optional free-text user-provided ingestion context. When None, the
+            property is stored as null in Neo4j (i.e. effectively absent).
     """
     from datetime import datetime
     load_date = datetime.now(UTC).isoformat()
@@ -226,14 +209,10 @@ def handle_versioning(tx, doc_path: str, new_version: int) -> None:
     If a Document with the same path exists with latest=True (and a different version),
     it is marked latest=False and linked via HAS_NEWER_VERSION to the newly created version.
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    doc_path:
-        Relative path identifying this document location.
-    new_version:
-        The integer version number of the newly created Document node.
+    Args:
+        tx: An open Neo4j transaction.
+        doc_path: Relative path identifying this document location.
+        new_version: The integer version number of the newly created Document node.
     """
     tx.run(
         """
@@ -271,15 +250,11 @@ def insert_folder_document_hierarchy(
 
     Does NOT create the leaf document itself (that is done by insert_document).
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    folder_path:
-        Relative folder path (e.g. "ModuloA/SubModulo"). Use the doc_path's
-        parent: e.g. if doc_path="ModuloA/SubModulo/doc", pass "ModuloA/SubModulo".
-    version:
-        Integer version number shared across this ingestion run.
+    Args:
+        tx: An open Neo4j transaction.
+        folder_path: Relative folder path (e.g. "ModuloA/SubModulo"). Use the doc_path's
+            parent: e.g. if doc_path="ModuloA/SubModulo/doc", pass "ModuloA/SubModulo".
+        version: Integer version number shared across this ingestion run.
     """
     from datetime import datetime
     load_date = datetime.now(UTC).isoformat()
@@ -334,14 +309,10 @@ def link_leaf_to_folder(
 ) -> None:
     """Link a leaf document to its immediate folder parent (if any).
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    doc_path:
-        Full relative path of the leaf document (e.g. "ModuloA/SubModulo/doc_a").
-    version:
-        Integer version number.
+    Args:
+        tx: An open Neo4j transaction.
+        doc_path: Full relative path of the leaf document (e.g. "ModuloA/SubModulo/doc_a").
+        version: Integer version number.
     """
     # folder_path is everything before the last "/"
     if "/" not in doc_path:
@@ -384,18 +355,14 @@ def insert_info_unit(
     when the parent :StructureNode already exists — no orphan nodes are
     produced if the parent is missing.
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    info_unit:
-        The :class:`~scinr.newton.models.document_structure.InfoUnit`
-        to persist.
-    parent_node_id:
-        The composite Neo4j ``id`` of the parent :StructureNode
-        (``"{doc_path}::{version}::{ancestor_path/node_id}"``).
-        For example ``"Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested) or
-        ``"Amox 500 mg/0000/m3::2::5_3"`` (root-level node).
+    Args:
+        tx: An open Neo4j transaction.
+        info_unit: The :class:`~scinr.newton.models.document_structure.InfoUnit`
+            to persist.
+        parent_node_id: The composite Neo4j ``id`` of the parent :StructureNode
+            (``"{doc_path}::{version}::{ancestor_path/node_id}"``).
+            For example ``"Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested) or
+            ``"Amox 500 mg/0000/m3::2::5_3"`` (root-level node).
     """
     uid = _make_uid(parent_node_id, info_unit.title, info_unit.description)
     tx.run(
@@ -454,23 +421,16 @@ def insert_structure_node(
     - ``parent_id is None``  → ``(:Document {path: doc_path, version: version})-[:HAS_STRUCTURE]->(:StructureNode)``
     - ``parent_id is not None`` → ``(:StructureNode {id: parent_id})-[:HAS_CHILD]->(:StructureNode)``
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    node:
-        The :class:`~scinr.newton.models.document_structure.StructureNode`
-        to persist.
-    doc_path:
-        Document path used to build all composite ids.
-    version:
-        Integer version number used to build all composite ids and look up the Document node.
-    parent_id:
-        The composite Neo4j ``id`` of the parent :StructureNode, or ``None``
-        when this node is a direct child of the :Document node.
-    node_path:
-        Slash-separated ancestor ``node_id`` values leading up to (but NOT
-        including) the current node.  Empty string for root-level nodes.
+    Args:
+        tx: An open Neo4j transaction.
+        node: The :class:`~scinr.newton.models.document_structure.StructureNode`
+            to persist.
+        doc_path: Document path used to build all composite ids.
+        version: Integer version number used to build all composite ids and look up the Document node.
+        parent_id: The composite Neo4j ``id`` of the parent :StructureNode, or ``None``
+            when this node is a direct child of the :Document node.
+        node_path: Slash-separated ancestor ``node_id`` values leading up to (but NOT
+            including) the current node.  Empty string for root-level nodes.
     """
     role_val = node.role if isinstance(node.role, str) else node.role.value
     role_label = ROLE_TO_LABEL[role_val]
@@ -578,18 +538,13 @@ def insert_document_graph(
     6. Link leaf to its immediate folder parent.
     7. Recursively insert all StructureNodes.
 
-    Parameters
-    ----------
-    tx:
-        An open Neo4j transaction.
-    doc:
-        The fully validated Document to persist.
-    resolved_version:
-        The integer version to assign. Always provided by the caller;
-        never derived from ``doc.version``.
-    update_mode:
-        If True, existing structure for this version is deleted before
-        re-insertion. No new version is created; no HAS_NEWER_VERSION link.
+    Args:
+        tx: An open Neo4j transaction.
+        doc: The fully validated Document to persist.
+        resolved_version: The integer version to assign. Always provided by the caller;
+            never derived from ``doc.version``.
+        update_mode: If True, existing structure for this version is deleted before
+            re-insertion. No new version is created; no HAS_NEWER_VERSION link.
     """
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
 

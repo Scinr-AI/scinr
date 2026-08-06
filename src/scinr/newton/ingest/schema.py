@@ -184,10 +184,8 @@ def setup_schema(driver: Driver) -> None:
     Also drops the legacy ``constraint_document_name`` unique constraint if it
     exists (replaced by the ``(path, version)`` composite constraint).
 
-    Parameters
-    ----------
-    driver:
-        An open, authenticated :class:`neo4j.Driver` instance.
+    Args:
+        driver: An open, authenticated :class:`neo4j.Driver` instance.
     """
     # ------------------------------------------------------------------
     # Best-effort Neo4j minimum version check (>= 4.4 required)

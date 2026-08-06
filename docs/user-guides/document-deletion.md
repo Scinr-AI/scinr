@@ -1,0 +1,220 @@
+# Document Deletion
+
+`delete_document()` permanently removes a `:Document` node and its entire subgraph from Neo4j, then runs garbage collection on orphaned nodes. This is the definitive way to remove a document from your knowledge graph — it is irreversible and cannot be undone.
+
+---
+
+## Introduction
+
+The `delete_document()` function is a standalone synchronous operation that:
+
+1. **Locates** the target `:Document` node(s) by `path` (and optionally `version`).
+2. **Cascade-deletes** the document and every node reachable from it:
+   - Folder-parent documents and siblings via `IS_COMPOSED_OF*`
+   - All `:StructureNode` descendants via `HAS_STRUCTURE*` / `HAS_CHILD*`
+   - All `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children
+3. **Garbage-collects** orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes in two independent passes.
+
+The function opens and closes its own Neo4j driver — you do not need to manage connections manually.
+
+---
+
+## When to Use Deletion vs. Update
+
+`scinr` provides two mechanisms for replacing document content:
+
+| Operation | What it does | Use when |
+|---|---|---|
+| `delete_document()` | Permanently removes the `:Document` node and all descendants. No undo. | The document should no longer exist in the graph at all. |
+| `--update` re-ingestion | Keeps the `:Document` node, wipes its content, and re-ingests new data. | You want to refresh the content of an existing document while preserving its identity and version history. |
+
+If you simply need to update content, use the `--update` flag with `run_pipeline()`. Use `delete_document()` only when you want complete, permanent removal.
+
+---
+
+## Basic Usage
+
+```python
+from scinr.newton import delete_document, configure, DeletionResult
+
+configure(
+    neo4j_uri="bolt://localhost:7687",
+    neo4j_user="neo4j",
+    neo4j_password="password",
+)
+
+result = delete_document("/path/to/document.pdf")
+print(f"Found: {result.found}")
+print(f"Documents deleted: {result.documents_deleted}")
+```
+
+The `path` parameter matches the `path` property on `:Document` nodes in Neo4j. This is the file path (relative or absolute) as it was recorded at ingestion time.
+
+---
+
+## Version-Targeted Deletion
+
+By default, `delete_document()` deletes **all versions** of a document matching the given `path`:
+
+```python
+# Delete ALL versions of a document
+result = delete_document("/path/to/document.pdf")
+```
+
+To delete a **specific version**, pass the `version` parameter:
+
+```python
+# Delete only version 2
+result = delete_document("/path/to/document.pdf", version=2)
+```
+
+When `version` is specified, only that version's `:Document` node and its cascade are removed. Other versions of the same document remain untouched.
+
+---
+
+## Understanding the Cascade
+
+When you call `delete_document()`, the following nodes are deleted in a single transaction:
+
+### Target Document(s)
+
+The `:Document` node(s) matching the `path` (and `version`, if specified). If the document is part of a folder hierarchy, every `:Document` reachable via `IS_COMPOSED_OF*` is also deleted — this includes folder-parent documents and their sibling documents.
+
+### Structure Tree
+
+For each deleted document, all descendants are removed:
+
+- `:StructureNode` nodes reached via `HAS_STRUCTURE*` and `HAS_CHILD*`
+- `:InfoUnit` nodes attached to those structure nodes
+- `:ModelDecision` nodes (annotation results)
+- `:ProposedModel` and `:ProposedField` nodes (annotation details)
+- `:ExtractionResult` nodes (entity extraction results)
+
+### Visual Representation
+
+```
+(:Document {path: "/path/to/document.pdf"})
+  │
+  ├─[:IS_COMPOSED_OF]→ (:Document)  [folder parent — also deleted]
+  │
+  └─[:HAS_STRUCTURE]→ (:StructureNode)
+                         ├─[:HAS_CHILD]→ (:StructureNode)
+                         │                    ├─[:HAS_INFO_UNIT]→ (:InfoUnit)
+                         │                    ├─[:HAS_MODEL_DECISION]→ (:ModelDecision)
+                         │                    │                              ├─[:HAS_PROPOSED_MODEL]→ (:ProposedModel)
+                         │                    │                              │                              └─[:HAS_PROPOSED_FIELD]→ (:ProposedField)
+                         │                    └─[:HAS_EXTRACTION]→ (:ExtractionResult)
+                         └─[:HAS_CHILD]→ (:StructureNode)
+```
+
+All of the above are `DETACH DELETE`d in a single query, meaning all their relationships are severed before the nodes are removed.
+
+---
+
+## Garbage Collection
+
+After the cascade delete, two independent garbage-collection passes run to clean up orphaned nodes that were not directly connected to the deleted documents.
+
+### Pass 1: Entity / ModelInstance
+
+Finds `:Entity` and `:ModelInstance` nodes that are no longer reachable from any `:ExtractionResult` within 7 hops:
+
+```cypher
+MATCH (mi:Entity|ModelInstance)
+WHERE NOT EXISTS {
+  MATCH (e:ExtractionResult)-[*1..7]->(mi)
+}
+DETACH DELETE mi
+```
+
+### Pass 2: LabeledEntity
+
+Finds `:LabeledEntity` nodes with no incoming relationships at all:
+
+```cypher
+MATCH (mi:LabeledEntity)
+WHERE NOT EXISTS { (mi)<--() }
+DETACH DELETE mi
+```
+
+### Iteration Behavior
+
+Each pass runs up to **7 iterations** (`GC_MAX_PASSES = 7`). A pass stops early as soon as an iteration deletes zero nodes. This handles cascading orphans — deleting a batch of `:Entity` nodes might reveal new orphaned `:LabeledEntity` nodes that were only reachable through the deleted entities.
+
+---
+
+## Inspecting DeletionResult
+
+`delete_document()` returns a `DeletionResult` dataclass with detailed counters:
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | `str` | The document `path` that was targeted for deletion. |
+| `version` | `int \| None` | The specific version requested, or `None` if all versions were targeted. |
+| `found` | `bool` | `True` if at least one matching `:Document` existed before deletion. When `False`, all counters are `0` and no queries were executed. |
+| `versions_deleted` | `list[int]` | Sorted list of integer versions that matched and were deleted. Empty when `found` is `False`. |
+| `documents_deleted` | `int` | Number of `:Document` nodes deleted (matched documents plus any reached via `IS_COMPOSED_OF*`). |
+| `structure_nodes_deleted` | `int` | Number of `:StructureNode` nodes deleted. |
+| `info_units_deleted` | `int` | Number of `:InfoUnit` nodes deleted. |
+| `model_decisions_deleted` | `int` | Number of `:ModelDecision` nodes deleted. |
+| `proposed_models_deleted` | `int` | Number of `:ProposedModel` nodes deleted. |
+| `proposed_fields_deleted` | `int` | Number of `:ProposedField` nodes deleted. |
+| `extraction_results_deleted` | `int` | Number of `:ExtractionResult` nodes deleted. |
+| `gc_entity_model_instance_deleted` | `int` | Total `:Entity`/`:ModelInstance` nodes deleted across all GC iterations. |
+| `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at 7). |
+| `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
+| `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at 7). |
+
+### Example Output
+
+```python
+result = delete_document("/path/to/document.pdf")
+
+if result.found:
+    print(f"Deleted {result.documents_deleted} document(s), "
+          f"{result.structure_nodes_deleted} structure node(s)")
+    print(f"GC cleaned up {result.gc_entity_model_instance_deleted} entity/model instance(s) "
+          f"and {result.gc_labeled_entity_deleted} labeled entity(s)")
+else:
+    print("No document found at that path.")
+```
+
+---
+
+## Important Caveats
+
+### Irreversible Operation
+
+`delete_document()` uses `DETACH DELETE` — once nodes are removed, they cannot be recovered. There is no undo mechanism. Always verify the target `path` and `version` before calling.
+
+### No Undo
+
+Unlike `--update` re-ingestion (which preserves the `:Document` node and allows you to re-run the pipeline), `delete_document()` removes the document entirely. If you need the document back, you must re-ingest it from the original source file.
+
+### Shared LabeledEntity Deduplication
+
+`:LabeledEntity` nodes are globally deduplicated — the same entity value from multiple documents shares a single node. The garbage collection pass only removes `:LabeledEntity` nodes that have **no incoming relationships at all**. If the same labeled entity appears in other documents that remain in the graph, it will **not** be deleted. This is intentional and preserves cross-document entity integrity.
+
+### IS_COMPOSED_OF Cascade Scope
+
+If the target document is part of a folder hierarchy (connected via `IS_COMPOSED_OF`), the cascade delete reaches **all** documents connected through that relationship — including folder-parent documents and their siblings. This means deleting a leaf document in a folder hierarchy may also delete the parent folder document and its other children.
+
+If you need to delete only a single document without affecting its folder hierarchy, consider using `--update` re-ingestion instead, or manually manage the folder structure before deletion.
+
+### Version Isolation
+
+When `version` is specified, only that version's cascade is deleted. However, shared `:LabeledEntity` nodes connected to other versions are preserved by the GC pass (they still have incoming relationships from the remaining versions).
+
+### Driver Management
+
+`delete_document()` opens its own Neo4j driver via `get_driver()` and closes it in a `finally` block. You do not need to manage driver lifecycle manually. However, if you are calling `delete_document()` in a tight loop, consider the connection overhead — each call creates and closes a driver.
+
+---
+
+## See Also
+
+- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model, node types, and relationships affected by deletion.
+- **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, including the `--update` flag for in-place document updates.
+- **[Deletion API](../api/deletion.md)** — Auto-generated reference for `delete_document()`.
+- **[Results API](../api/results.md)** — `DeletionResult` dataclass reference.
+- **[Architecture](../architecture.md)** — Pipeline stages and Neo4j schema details.

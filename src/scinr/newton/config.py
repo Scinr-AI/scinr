@@ -81,7 +81,7 @@ Use these values in ``enabled_base_themes`` to activate specific built-in themes
 Extend with plain ``str`` values for user-defined themes added via
 ``extra_models_paths``.
 
-Example::
+Examples::
 
     configure(
         llm=...,
@@ -153,10 +153,8 @@ def get_config() -> ScinrConfig:
     """
     Return the current ScinrConfig singleton.
 
-    Raises
-    ------
-    ConfigurationError
-        If configure() has not been called yet.
+    Raises:
+        ConfigurationError: If configure() has not been called yet.
     """
     global _config
     if _config is None:
@@ -628,16 +626,15 @@ def get_available_themes() -> dict[str, list[str]]:
     Does **not** require :func:`configure` to have been called first —
     it initialises the registry with default settings if needed.
 
-    Returns
-    -------
-    dict with two keys:
+    Returns:
+        dict with two keys:
 
-    ``"builtin"``
-        Theme paths that ship with the scinr-ingest package.
-    ``"user"``
-        Theme paths loaded from ``extra_models_paths``.
+        ``"builtin"``
+            Theme paths that ship with the scinr-ingest package.
+        ``"user"``
+            Theme paths loaded from ``extra_models_paths``.
 
-    Example::
+    Examples::
 
         from scinr.newton import get_available_themes
 

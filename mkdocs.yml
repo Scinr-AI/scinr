@@ -44,11 +44,11 @@ plugins:
           options:
             docstring_style: google
             docstring_section_style: table
-            show_source: true
+            show_source: false
             show_root_heading: true
             show_symbol_type_heading: true
             separate_signature: true
-            signature_crossrefs: true
+            show_signature_annotations: true
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -66,15 +66,28 @@ nav:
   - Getting Started: getting-started.md
   - Architecture: architecture.md
   - Configuration: configuration.md
-  - CLI Reference: cli.md
   - User Guides:
+      - Quick Start: user-guides/quick-start.md
+      - Running the Pipeline: user-guides/running-pipeline.md
+      - Custom Themes: user-guides/custom-themes.md
       - Custom Models: user-guides/custom-models.md
+      - Model Design Patterns: user-guides/model-patterns.md
+      - Graph Relationships: user-guides/graph-relationships.md
+      - Normalization: user-guides/normalization.md
       - Tabular Pipeline: user-guides/tabular-pipeline.md
       - Neo4j Graph Storage: user-guides/neo4j-graph.md
+      - Document Deletion: user-guides/document-deletion.md
+      - Storage Backends: user-guides/storage-backends.md
+      - Performance Tuning: user-guides/performance-tuning.md
   - API Reference:
       - Overview: api/index.md
       - Pipeline (run_pipeline): api/pipeline.md
       - Configuration (configure): api/config.md
       - Stages: api/stages.md
+      - Normalization: api/normalization.md
+      - Converters: api/converters.md
+      - Storage: api/storage.md
+      - Utilities: api/utilities.md
       - Exceptions: api/exceptions.md
+      - Deletion (delete_document): api/deletion.md
       - Results: api/results.md

@@ -19,12 +19,11 @@ def make_uid(*parts: str) -> str:
     for any input. Existing Neo4j nodes whose UIDs were generated with the old
     formula will have stale UIDs after this update.
 
-    Examples
-    --------
-    >>> make_uid("a||b", "c") != make_uid("a", "b||c")  # True — no collision
-    True
-    >>> make_uid("hello", "world")  # deterministic
-    '<some 16-char hex string>'
+    Examples:
+        >>> make_uid("a||b", "c") != make_uid("a", "b||c")  # True — no collision
+        True
+        >>> make_uid("hello", "world")  # deterministic
+        '<some 16-char hex string>'
     """
     encoded = "||".join(f"{len(p)}:{p}" for p in parts)
     return hashlib.sha256(encoded.encode()).hexdigest()[:16]
@@ -40,29 +39,23 @@ def make_instance_uid(model_class: str, key_fields: dict[str, str]) -> str:
     allowing Neo4j MERGE to deduplicate them globally (analogous to how
     LabeledEntity nodes are deduplicated by label + normalized_value).
 
-    Parameters
-    ----------
-    model_class:
-        The Pydantic model class name (e.g. 'ConditionModel').
-    key_fields:
-        Dict mapping field_name → already-normalized value for all fields
-        marked with ``json_schema_extra={"instance_key": True}``.
-        Values must be pre-normalized by the caller (lowercase, accent-stripped,
-        whitespace-collapsed). The dict is sorted by key name internally so that
-        field insertion order does not affect the UID.
+    Args:
+        model_class: The Pydantic model class name (e.g. 'ConditionModel').
+        key_fields: Dict mapping field_name → already-normalized value for all fields
+            marked with ``json_schema_extra={"instance_key": True}``.
+            Values must be pre-normalized by the caller (lowercase, accent-stripped,
+            whitespace-collapsed). The dict is sorted by key name internally so that
+            field insertion order does not affect the UID.
 
-    Returns
-    -------
-    str
+    Returns:
         16-character hex UID.
 
-    Examples
-    --------
-    >>> make_instance_uid("ConditionModel", {"condition_id": "1", "variation_code": "q.i.a.1(a)"})
-    '<some 16-char hex string>'
-    >>> # Order of keys does not matter:
-    >>> make_instance_uid("ConditionModel", {"variation_code": "q.i.a.1(a)", "condition_id": "1"})
-    '<same 16-char hex string>'
+    Examples:
+        >>> make_instance_uid("ConditionModel", {"condition_id": "1", "variation_code": "q.i.a.1(a)"})
+        '<some 16-char hex string>'
+        >>> # Order of keys does not matter:
+        >>> make_instance_uid("ConditionModel", {"variation_code": "q.i.a.1(a)", "condition_id": "1"})
+        '<same 16-char hex string>'
     """
     parts = ["mi", model_class]
     for field_name in sorted(key_fields.keys()):

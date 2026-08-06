@@ -86,16 +86,11 @@ def compact_extraction(
     """
     Merge new_nodes (extracted from one chunk) into the growing Document tree.
 
-    Parameters
-    ----------
-    document:
-        The accumulator Document being built across all chunks.
-    new_nodes:
-        Nodes returned by a single ``extract_chunk()`` call.
+    Args:
+        document: The accumulator Document being built across all chunks.
+        new_nodes: Nodes returned by a single ``extract_chunk()`` call.
 
-    Returns
-    -------
-    Document
+    Returns:
         The same ``document`` object, mutated in-place and returned.
     """
     for node in new_nodes:

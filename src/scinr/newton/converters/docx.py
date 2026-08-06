@@ -58,23 +58,16 @@ class DocxConverter(BaseConverter):
     def convert(self, source: Path) -> IntermediateDocument:
         """Convert a DOCX file to the intermediate format.
 
-        Parameters
-        ----------
-        source:
-            Path to the ``.docx`` file.
+        Args:
+            source: Path to the ``.docx`` file.
 
-        Returns
-        -------
-        IntermediateDocument
+        Returns:
             Multi-page document.  The number of pages depends on which
             pagination strategy is applied (see class docstring).
 
-        Raises
-        ------
-        ConversionError
-            If ``python-docx`` is not installed or the file cannot be parsed.
-        FileNotFoundError
-            If *source* does not exist.
+        Raises:
+            ConversionError: If ``python-docx`` is not installed or the file cannot be parsed.
+            FileNotFoundError: If *source* does not exist.
         """
         try:
             import docx  # type: ignore[import-untyped]
@@ -221,14 +214,10 @@ class DocxConverter(BaseConverter):
 def _has_page_break(paragraph) -> bool:  # type: ignore[no-untyped-def]
     """Return True if the paragraph contains a manual page break.
 
-    Parameters
-    ----------
-    paragraph:
-        A ``python-docx`` ``Paragraph`` object.
+    Args:
+        paragraph: A ``python-docx`` ``Paragraph`` object.
 
-    Returns
-    -------
-    bool
+    Returns:
         ``True`` if any run in the paragraph contains a ``<w:br
         w:type="page"/>`` element.
     """
@@ -244,14 +233,10 @@ def _has_page_break(paragraph) -> bool:  # type: ignore[no-untyped-def]
 def _heading_level(paragraph) -> int | None:  # type: ignore[no-untyped-def]
     """Detect the Markdown heading level for a paragraph.
 
-    Parameters
-    ----------
-    paragraph:
-        A ``python-docx`` ``Paragraph`` object.
+    Args:
+        paragraph: A ``python-docx`` ``Paragraph`` object.
 
-    Returns
-    -------
-    int | None
+    Returns:
         Heading level (1–6) if the paragraph is a heading, ``None`` otherwise.
     """
     style_name: str = paragraph.style.name if paragraph.style else ""
@@ -273,16 +258,11 @@ def _heading_level(paragraph) -> int | None:  # type: ignore[no-untyped-def]
 def _para_to_markdown(paragraph, heading_level: int | None) -> str:  # type: ignore[no-untyped-def]
     """Convert a paragraph to a Markdown string.
 
-    Parameters
-    ----------
-    paragraph:
-        A ``python-docx`` ``Paragraph`` object.
-    heading_level:
-        Heading level (1–6) or ``None`` for body text.
+    Args:
+        paragraph: A ``python-docx`` ``Paragraph`` object.
+        heading_level: Heading level (1–6) or ``None`` for body text.
 
-    Returns
-    -------
-    str
+    Returns:
         Markdown representation of the paragraph (may be empty).
     """
     text = paragraph.text.strip()
@@ -297,14 +277,10 @@ def _para_to_markdown(paragraph, heading_level: int | None) -> str:  # type: ign
 def _docx_table_to_markdown(table) -> str:  # type: ignore[no-untyped-def]
     """Convert a ``python-docx`` Table to a GFM Markdown table.
 
-    Parameters
-    ----------
-    table:
-        A ``python-docx`` ``Table`` object.
+    Args:
+        table: A ``python-docx`` ``Table`` object.
 
-    Returns
-    -------
-    str
+    Returns:
         GFM Markdown table string, or empty string if the table has no rows.
     """
     rows = table.rows

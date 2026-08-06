@@ -79,26 +79,20 @@ class DocumentUnit:
     ``document_names_dir``, unresolved names read from disk — see module
     docstring "Known design discrepancy" note).
 
-    Attributes
-    ----------
-    kind:
-        One of ``"raw_file"``, ``"extraction_json"``, ``"ingestion_json"``,
-        ``"pre_ingested"``.
-    source_path:
-        The file this unit was discovered from. ``None`` for
-        ``"pre_ingested"`` units (no filesystem source).
-    doc_path:
-        For ``raw_file`` / ``extraction_json`` / ``ingestion_json``: the
-        document path derived exactly as the real stage would derive it
-        (see module docstring). For ``pre_ingested``: the document name
-        itself (leaf name, Neo4j-confirmed for ``document_names``;
-        unresolved for ``document_names_dir``).
-    relative_dir:
-        Directory of *source_path* relative to the input root. ``Path(".")``
-        for ``pre_ingested`` units (no filesystem source).
-    document_name_hint:
-        Human-readable document name (typically a filename stem, without any
-        directory prefix).
+    Attributes:
+        kind: One of ``"raw_file"``, ``"extraction_json"``, ``"ingestion_json"``,
+            ``"pre_ingested"``.
+        source_path: The file this unit was discovered from. ``None`` for
+            ``"pre_ingested"`` units (no filesystem source).
+        doc_path: For ``raw_file`` / ``extraction_json`` / ``ingestion_json``: the
+            document path derived exactly as the real stage would derive it
+            (see module docstring). For ``pre_ingested``: the document name
+            itself (leaf name, Neo4j-confirmed for ``document_names``;
+            unresolved for ``document_names_dir``).
+        relative_dir: Directory of *source_path* relative to the input root. ``Path(".")``
+            for ``pre_ingested`` units (no filesystem source).
+        document_name_hint: Human-readable document name (typically a filename stem, without any
+            directory prefix).
     """
 
     kind: Literal["raw_file", "extraction_json", "ingestion_json", "pre_ingested"]
@@ -116,20 +110,15 @@ class UnitResult:
     Produced by the future ``_process_document_unit()`` (Paso 2,
     ``pipeline.py``, does not exist yet).
 
-    Attributes
-    ----------
-    unit_id:
-        Resolved ``doc_path`` / final document name for this unit.
-    stage_results:
-        Only the stages actually reached by this unit (keyed by stage name,
-        e.g. ``"preprocess"``, ``"extraction"``, ``"ingestion"``,
-        ``"annotation"``, ``"entity_extraction"``).
-    stopped_at:
-        Name of the stage where processing stopped due to failure, or
-        ``None`` if the unit completed every stage it was asked to run.
-    fatal_error:
-        Exception message not attributable to any single concrete stage
-        (defense-in-depth catch-all), or ``None`` if no such error occurred.
+    Attributes:
+        unit_id: Resolved ``doc_path`` / final document name for this unit.
+        stage_results: Only the stages actually reached by this unit (keyed by stage name,
+            e.g. ``"preprocess"``, ``"extraction"``, ``"ingestion"``,
+            ``"annotation"``, ``"entity_extraction"``).
+        stopped_at: Name of the stage where processing stopped due to failure, or
+            ``None`` if the unit completed every stage it was asked to run.
+        fatal_error: Exception message not attributable to any single concrete stage
+            (defense-in-depth catch-all), or ``None`` if no such error occurred.
     """
 
     unit_id: str
@@ -151,15 +140,11 @@ def _validate_exclusive(**kwargs: object) -> str:
     every combination), so this module must not assume it has already been
     validated by a caller.
 
-    Returns
-    -------
-    str
+    Returns:
         The name of the single provided (non-``None``) keyword argument.
 
-    Raises
-    ------
-    ValueError
-        If zero, or more than one, of the values is not ``None``.
+    Raises:
+        ValueError: If zero, or more than one, of the values is not ``None``.
     """
     provided = [name for name, value in kwargs.items() if value is not None]
     if len(provided) != 1:
@@ -191,15 +176,12 @@ def _discover_raw_file_units(
     ``scinr.newton.stages.extraction.run_extraction()``'s
     ``folder_path``/``doc_path`` combination rule).
 
-    Parameters
-    ----------
-    input_raw:
-        Root folder to walk recursively.
-    tabular_extensions:
-        File extensions (e.g. ``{".csv", ".xlsx"}``) to exclude from the
-        result. When ``None``, no extension is excluded on this basis alone
-        (unsupported-format files are still skipped via the converter
-        registry, exactly as ``convert_one()`` does).
+    Args:
+        input_raw: Root folder to walk recursively.
+        tabular_extensions: File extensions (e.g. ``{".csv", ".xlsx"}``) to exclude from the
+            result. When ``None``, no extension is excluded on this basis alone
+            (unsupported-format files are still skipped via the converter
+            registry, exactly as ``convert_one()`` does).
     """
     from scinr.newton.converters.base import UnsupportedFormatError
     from scinr.newton.converters.registry import get_converter
@@ -438,43 +420,31 @@ async def _discover_units(
     ``document_name`` field of an ``extract-*.json`` file), or resolves leaf
     document names already confirmed in Neo4j.
 
-    Parameters
-    ----------
-    input_raw:
-        Folder of raw source files (PDF, DOCX, CSV, XLSX, …) to enumerate as
-        ``"raw_file"`` units.
-    extraction_input_dir:
-        Folder of intermediate JSON files (Stage 0 output) to enumerate as
-        ``"extraction_json"`` units.
-    ingestion_input_dir:
-        Folder of ``extract-*.json`` files (Stage 1 output) to enumerate as
-        ``"ingestion_json"`` units.
-    document_names:
-        Explicit list of Neo4j document names to resolve to leaf documents
-        (``"pre_ingested"`` units, Neo4j-confirmed).
-    document_names_dir:
-        Folder of ``extract-*.json`` files to read raw ``document_name``
-        values from (``"pre_ingested"`` units, unresolved — see module
-        docstring).
-    tabular_extensions:
-        Only used with *input_raw*: file extensions to exclude from the
-        result (e.g. tabular files routed to a separate pipeline).
+    Args:
+        input_raw: Folder of raw source files (PDF, DOCX, CSV, XLSX, …) to enumerate as
+            ``"raw_file"`` units.
+        extraction_input_dir: Folder of intermediate JSON files (Stage 0 output) to enumerate as
+            ``"extraction_json"`` units.
+        ingestion_input_dir: Folder of ``extract-*.json`` files (Stage 1 output) to enumerate as
+            ``"ingestion_json"`` units.
+        document_names: Explicit list of Neo4j document names to resolve to leaf documents
+            (``"pre_ingested"`` units, Neo4j-confirmed).
+        document_names_dir: Folder of ``extract-*.json`` files to read raw ``document_name``
+            values from (``"pre_ingested"`` units, unresolved — see module
+            docstring).
+        tabular_extensions: Only used with *input_raw*: file extensions to exclude from the
+            result (e.g. tabular files routed to a separate pipeline).
 
-    Returns
-    -------
-    list[DocumentUnit]
+    Returns:
         The discovered units, in the order produced by each branch (see the
         corresponding ``_discover_*_units()`` helper's docstring).
 
-    Raises
-    ------
-    ValueError
-        If zero, or more than one, of the five mutually-exclusive parameters
-        is provided, or (for ``document_names_dir``) if no readable
-        ``document_name`` field is found in any file.
-    FileNotFoundError
-        If the given directory parameter does not point to an existing
-        directory.
+    Raises:
+        ValueError: If zero, or more than one, of the five mutually-exclusive parameters
+            is provided, or (for ``document_names_dir``) if no readable
+            ``document_name`` field is found in any file.
+        FileNotFoundError: If the given directory parameter does not point to an existing
+            directory.
     """
     which = _validate_exclusive(
         input_raw=input_raw,
@@ -508,11 +478,9 @@ def build_all_paths_for_versioning(units: Sequence[DocumentUnit]) -> list[str]:
     Delegates to ``ingest.loader._extract_all_paths()`` to avoid duplicating
     its ancestor-folder-expansion logic.
 
-    Parameters
-    ----------
-    units:
-        Discovered ``DocumentUnit``s (any kind). Units with an empty
-        ``doc_path`` are ignored.
+    Args:
+        units: Discovered ``DocumentUnit``s (any kind). Units with an empty
+            ``doc_path`` are ignored.
     """
     from scinr.newton.ingest.loader import _extract_all_paths
 

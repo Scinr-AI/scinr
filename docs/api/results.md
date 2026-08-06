@@ -5,3 +5,5 @@
 ::: scinr.newton.results.StageResult
 
 ::: scinr.newton.results.PipelineResult
+
+::: scinr.newton.results.DeletionResult

@@ -211,13 +211,8 @@ async def run_pipeline(
         PreconditionError: If invalid parameters or mutually exclusive options are supplied.
         ExtractionError: If entity extraction fails.
         IngestionError: If Neo4j graph write fails.
-
-    Raises
-    ------
-    ValueError
-        If any parameter combination is invalid (see validation section).
-    FileNotFoundError
-        If a required directory does not exist.
+        ValueError: If any parameter combination is invalid (see validation section).
+        FileNotFoundError: If a required directory does not exist.
     """
     # ── Imports (deferred to avoid circular imports at module level) ──────────
     from scinr.newton.ingest.config import get_driver
@@ -727,68 +722,48 @@ async def _process_document_unit(
       failed-node count, and the concrete error(s) reported for it;
       ``"continue"`` performs the exact same advancement but logs nothing.
 
-    Parameters
-    ----------
-    unit:
-        The document unit to process (see ``pipeline_units.DocumentUnit``).
-    effective_stages:
-        Ordered list of stage names requested for this run (a subset of
-        ``{"preprocess", "extraction", "ingestion", "annotation",
-        "entity_extraction"}``).
-    document_semaphore:
-        Shared semaphore bounding how many document units run concurrently.
-    sync_driver:
-        Shared sync Neo4j ``Driver``, or ``None`` if ``"ingestion"`` is not
-        in *effective_stages*.
-    shared_ingest_version:
-        Pre-computed batch version forwarded to ``ingest_one()`` /
-        ``ingest_one_from_path()``.
-    converter_output_dir:
-        Folder where Stage 0 writes intermediate JSON to disk, or ``None``
-        to keep the converted document in memory only (a fresh temporary
-        directory, scoped to and removed immediately after this unit's
-        ``convert_one()`` call via ``tempfile.TemporaryDirectory()``, is
-        created per unit in that case, since ``convert_one()`` requires a
-        concrete output directory on disk).
-    extraction_output_dir:
-        Folder where Stage 1 writes ``extract-*.json`` output, or ``None``
-        to keep the extracted document in memory only.
-    extraction_input_dir:
-        Root input folder for ``extraction_json`` units, used to mirror the
-        relative subdirectory structure under *extraction_output_dir*.
-    raw_file_repo:
-        Optional ``RawFileRepository`` forwarded to ``convert_one()``.
-    page_repo:
-        Optional ``PageRepository`` forwarded to ``convert_one()``.
-    context_instructions:
-        Free-text context forwarded to ``convert_one()`` and
-        ``run_annotation()``.
-    update_mode:
-        Forwarded to ``ingest_one()`` / ``ingest_one_from_path()``.
-    manual:
-        Forwarded to ``run_annotation()``.
-    model_class:
-        Forwarded to ``run_annotation()`` (required when *manual* is
-        ``True``).
-    only_unannotated:
-        Forwarded to ``run_annotation()``.
-    only_unextracted:
-        Forwarded to ``run_entity_extraction()``.
-    on_partial_failure:
-        Controls whether this unit keeps advancing to its next requested
-        stage after ``annotation`` or ``entity_extraction`` reports
-        ``nodes_failed > 0`` for it. ``"abort"`` (default) stops the unit
-        at that stage (``stopped_at`` set); ``"continue"`` and ``"warn"``
-        let it keep advancing. Has no effect on the unconditional
-        ``preprocess``/``extraction``/``ingestion`` stops described above.
-        ``"warn"`` additionally logs a per-document warning at the exact
-        moment this unit decides to keep advancing despite the partial
-        failure (document name, failing stage, failed-node count, and
-        concrete error detail); ``"continue"`` stays silent.
+    Args:
+        unit: The document unit to process (see ``pipeline_units.DocumentUnit``).
+        effective_stages: Ordered list of stage names requested for this run (a subset of
+            ``{"preprocess", "extraction", "ingestion", "annotation",
+            "entity_extraction"}``).
+        document_semaphore: Shared semaphore bounding how many document units run concurrently.
+        sync_driver: Shared sync Neo4j ``Driver``, or ``None`` if ``"ingestion"`` is not
+            in *effective_stages*.
+        shared_ingest_version: Pre-computed batch version forwarded to ``ingest_one()`` /
+            ``ingest_one_from_path()``.
+        converter_output_dir: Folder where Stage 0 writes intermediate JSON to disk, or ``None``
+            to keep the converted document in memory only (a fresh temporary
+            directory, scoped to and removed immediately after this unit's
+            ``convert_one()`` call via ``tempfile.TemporaryDirectory()``, is
+            created per unit in that case, since ``convert_one()`` requires a
+            concrete output directory on disk).
+        extraction_output_dir: Folder where Stage 1 writes ``extract-*.json`` output, or ``None``
+            to keep the extracted document in memory only.
+        extraction_input_dir: Root input folder for ``extraction_json`` units, used to mirror the
+            relative subdirectory structure under *extraction_output_dir*.
+        raw_file_repo: Optional ``RawFileRepository`` forwarded to ``convert_one()``.
+        page_repo: Optional ``PageRepository`` forwarded to ``convert_one()``.
+        context_instructions: Free-text context forwarded to ``convert_one()`` and
+            ``run_annotation()``.
+        update_mode: Forwarded to ``ingest_one()`` / ``ingest_one_from_path()``.
+        manual: Forwarded to ``run_annotation()``.
+        model_class: Forwarded to ``run_annotation()`` (required when *manual* is
+            ``True``).
+        only_unannotated: Forwarded to ``run_annotation()``.
+        only_unextracted: Forwarded to ``run_entity_extraction()``.
+        on_partial_failure: Controls whether this unit keeps advancing to its next requested
+            stage after ``annotation`` or ``entity_extraction`` reports
+            ``nodes_failed > 0`` for it. ``"abort"`` (default) stops the unit
+            at that stage (``stopped_at`` set); ``"continue"`` and ``"warn"``
+            let it keep advancing. Has no effect on the unconditional
+            ``preprocess``/``extraction``/``ingestion`` stops described above.
+            ``"warn"`` additionally logs a per-document warning at the exact
+            moment this unit decides to keep advancing despite the partial
+            failure (document name, failing stage, failed-node count, and
+            concrete error detail); ``"continue"`` stays silent.
 
-    Returns
-    -------
-    UnitResult
+    Returns:
         ``stage_results`` contains only the stages actually reached.
         ``stopped_at`` names the stage where this unit stopped due to a
         failure, or ``None`` if it completed every requested stage (or hit
