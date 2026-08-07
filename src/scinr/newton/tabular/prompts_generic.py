@@ -171,8 +171,9 @@ TABULAR_MAPPING_PROMPT_TEMPLATE = """You are a data mapping specialist. Your tas
    field at high confidence, emit BOTH entries (both qualify under CASE A). Do not suppress
    the medium-confidence entry.
 
-7. Two different columns must NOT map to the same (target_model, model_field_name) pair unless
-   they are truly equivalent. Flag such cases in the notes field of the mapping entry.
+7. Multiple columns MAY map to the same (target_model, model_field_name) pair when they hold
+   complementary fragments of one concept — merged automatically (string fields joined with
+   "; ", duplicates dropped). Note the reason in the notes field.
 
 8. Every column must appear at least once in the output. Use the sample rows to infer column
    semantics when the header name is ambiguous.

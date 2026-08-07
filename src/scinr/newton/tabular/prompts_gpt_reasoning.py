@@ -94,7 +94,7 @@ A mapping is correct when:
 - Confidence reflects semantic match quality: "high" (strong semantic match), "medium" (plausible match), "low" (no good match anywhere).
 - Columns with at least one "medium" or "high" candidate emit one entry per qualifying target field (CASE A). Columns with no "medium" match emit exactly one entry with `model_field_name="__extra__"`, `confidence="low"`, `target_model="primary"` (CASE B). Never both cases for the same column; never more than one `__extra__` per column.
 - `target_model` is `"primary"`, `"supplementary"`, or the exact CamelCase complementary model name.
-- No two columns share the same `(target_model, model_field_name)` pair unless truly equivalent — flag duplicates in the `notes` field.
+- Multiple columns MAY share the same `(target_model, model_field_name)` pair when they hold complementary fragments of one concept — merged automatically (string fields joined with `"; "`, duplicates dropped). Note the reason in the `notes` field.
 - `__extra__` is preferred over force-fitting a column to a semantically mismatched field.
 - Each entry includes a brief rationale explaining the mapping decision.
 

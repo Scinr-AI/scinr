@@ -413,6 +413,19 @@ class StudyPhase(str, Enum):
     PHASE_4 = "phase_4"
 ```
 
+### Field types when the model targets the tabular pipeline
+
+If a model is (or may be) used with the **tabular ingestion pipeline** (direct CSV/XLSX
+row mapping), every mappable field must be `str` or `list[str]` — not `int`, `float`,
+`date`, `Enum`, or a nested submodel. The tabular pipeline combines/deduplicates values
+when multiple columns map to the same field, but only for those two types; other types
+silently keep the last value processed. **Do not reach for `@model_validator` to fix
+this** — all tabular row instantiation goes through `model_construct()`, which skips
+every Pydantic validator unconditionally, so it would never run. If a field truly needs a
+real type, wrap it in a nested submodel marked `normalization_model: True` instead. See
+[`model-creation/AGENTS.md` §4.7](AGENTS.md#47-models-used-with-the-tabular-pipeline-fields-must-be-str-or-liststr)
+for the full rationale and a worked example.
+
 ---
 
 ## 7. `field_relationships` Syntax

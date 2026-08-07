@@ -485,6 +485,8 @@ result = asyncio.run(run_tabular_pipeline("files/data/", update_mode=True))
 
 The tabular pipeline is also automatically invoked by `--stage all` (and `run_pipeline()` with `input_raw`) when CSV/XLSX/XLS files are present in the input directory.
 
+> When two or more columns map to the same model field, values are combined/deduplicated (only for `str` and `list[str]` fields — other field types keep the last value and log a warning). See the [Tabular Pipeline guide, §7.4](../../../docs/user-guides/tabular-pipeline.md#74-combining-values-when-multiple-columns-map-to-the-same-field) for details.
+
 ---
 
 ### CLI Reference

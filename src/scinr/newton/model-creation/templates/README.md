@@ -43,5 +43,6 @@ instance_key: True (boolean)             → "instance_key": True
 - [ ] `catalog.py` con `THEME_DESCRIPTION` y `SELECTABLE_MODELS`
 - [ ] Si los modelos se referencian entre sí desde secciones distintas: `instance_key: True` en los campos clave del modelo destino
 - [ ] `instance_relationships` declarado en los campos que enlazan con modelos en otros StructureNode
+- [ ] Si el modelo se usará (o podría usarse) con el **pipeline tabular** (ingesta directa de CSV/XLSX): todos los campos mapeables son `str` o `list[str]` — nunca `int`, `float`, `date`, `Enum` ni submodelos anidados a ese nivel. **No** usar `@model_validator`/`@field_validator` para coerción de tipo — nunca se ejecutan en este pipeline (`model_construct()` los omite). Ver [`AGENTS.md` §4.7](../AGENTS.md#47-models-used-with-the-tabular-pipeline-fields-must-be-str-or-liststr) para el detalle y la alternativa real (`normalization_model` sobre un submodelo anidado).
 
 Ver el [README principal](../README.md) para la guía completa y el checklist de integración.
