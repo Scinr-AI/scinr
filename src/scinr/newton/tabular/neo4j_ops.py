@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import types as _builtin_types
+import typing
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from neo4j import AsyncDriver
 from pydantic import BaseModel
@@ -785,23 +787,174 @@ def _build_row_dict(headers: list[str], row_values: list[str]) -> dict[str, str]
     return {h: v for h, v in zip(headers, row_values) if h}
 
 
+def _merge_values(raw_values: list[str]) -> list[str]:
+    """Merge raw column values mapped to the same target field, deduplicating
+    by containment (substring OR word-token subset), processed sequentially in
+    the given order. Preserves original formatting (trim only) of surviving values.
+
+    Sequential semantics:
+    - If a bigger/superset value was already accepted, a later smaller/subset value
+      is skipped entirely (not inserted).
+    - If a smaller/subset value was already accepted and a later bigger/superset
+      value arrives, the smaller survivor(s) are removed and replaced by the new one.
+    - Values with no containment relation to any existing survivor are kept as
+      distinct entries, in order of first appearance.
+
+    100% deterministic: same input list always produces the same output list.
+    """
+
+    def _normalize(s: str) -> str:
+        return " ".join(s.split()).lower()
+
+    survivors: list[str] = []  # original strings (trimmed only), in order
+    survivors_norm: list[str] = []  # parallel normalized forms, for comparison only
+
+    for raw in raw_values:
+        original = raw.strip()
+        if not original:
+            continue
+        norm = _normalize(original)
+        if not norm:
+            continue
+        norm_tokens = set(norm.split())
+
+        # 1. Is this new value redundant vs. an existing survivor?
+        redundant = False
+        for s_norm in survivors_norm:
+            s_tokens = set(s_norm.split())
+            if norm in s_norm or norm_tokens <= s_tokens:
+                redundant = True
+                break
+        if redundant:
+            continue
+
+        # 2. Does this new value make existing survivors redundant? (bigger arrives later)
+        kept_pairs = []
+        for orig_s, s_norm in zip(survivors, survivors_norm, strict=True):
+            s_tokens = set(s_norm.split())
+            if s_norm in norm or s_tokens <= norm_tokens:
+                continue  # drop the smaller/subset survivor
+            kept_pairs.append((orig_s, s_norm))
+        survivors = [p[0] for p in kept_pairs]
+        survivors_norm = [p[1] for p in kept_pairs]
+
+        # 3. Insert the new value
+        survivors.append(original)
+        survivors_norm.append(norm)
+
+    return survivors
+
+
+def _merge_and_join(raw_values: list[str], field_name: str, context: str) -> str:
+    """Merge raw_values via _merge_values() and join the survivors with "; ".
+
+    Shared by the str-typed assembly paths in _route_row_values() (primary
+    str fields, supplementary fields, complementary fields) to avoid
+    repeating the merge -> join -> debug-log pattern. Logs a debug message
+    when more than one raw value was received, describing the merge outcome.
+
+    `context` is a short human-readable description of where the field lives
+    (e.g. "primary", "supplementary", or "complementary 'ClassName'") and is
+    interpolated directly before " field %r received ..." in the log message.
+    """
+    merged = _merge_values(raw_values)
+    final_str = "; ".join(merged)
+    if len(raw_values) > 1:
+        logger.debug(
+            "_route_row_values: %s field %r received %d value(s), "
+            "%d survived merge -> %r",
+            context,
+            field_name,
+            len(raw_values),
+            len(merged),
+            final_str,
+        )
+    return final_str
+
+
+def _classify_merge_type(annotation: object) -> str:
+    """Classify a Pydantic field annotation for _route_row_values() merging.
+
+    Unwraps Optional[X]/Union[X, None] to find the real inner type, then
+    classifies it as one of:
+    - "str": the inner type is `str`, or the type cannot be determined
+      confidently (no annotation, `Any`, complex multi-member Union). Fail-safe
+      default.
+    - "list_str": the inner type is `list[str]`, or a bare unparametrized
+      `list`. Fail-safe default for list-like fields.
+    - "other": any other type (int, float, bool, date, datetime, Enum, a
+      nested BaseModel, etc.) — not eligible for containment-based merging.
+    """
+    if annotation is None or annotation is Any:
+        return "str"
+
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+
+    # Union[...] / Optional[...] (incl. PEP 604 `X | None`) → unwrap
+    is_union = origin is typing.Union
+    if not is_union and hasattr(_builtin_types, "UnionType"):
+        is_union = isinstance(annotation, _builtin_types.UnionType)
+    if is_union:
+        non_none_args = [a for a in args if a is not type(None)]
+        if len(non_none_args) == 1:
+            return _classify_merge_type(non_none_args[0])
+        # Complex multi-member Union — can't determine confidently.
+        return "str"
+
+    if annotation is str:
+        return "str"
+
+    if origin is list:
+        if not args or args[0] is str:
+            return "list_str"
+        return "other"
+
+    if annotation is list:
+        # Bare `list` with no subscript at all.
+        return "list_str"
+
+    return "other"
+
+
 def _route_row_values(
     row_dict: dict[str, str],
     mapping: ColumnMapping,
     primary_cls: type,
-) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, str | list[str]], dict[str, str], dict[str, dict[str, str]]]:
     """Route row dict values to primary, supplementary, and complementary kwargs.
 
     Returns (primary_kwargs, supplementary_kwargs, comp_kwargs) where comp_kwargs
     is {CamelCaseClassName: {field_name: value}}.
 
+    When multiple columns map to the same (target, field_name), their raw
+    values are combined via containment-based deduplication (see
+    _merge_values()) instead of the last column silently overwriting the
+    others. Columns are processed in mapping.mappings order (their order of
+    appearance), which keeps the whole pipeline deterministic: the same
+    (row_dict, mapping, primary_cls) always yields the same output.
+
+    Type-aware assembly (primary target only, since only there do we have the
+    real Pydantic class to introspect via primary_cls.model_fields):
+    - str fields               → "; ".join(merged_values)   (str)
+    - list[str] fields         → merged_values               (list[str])
+    - any other type           → last raw value wins, unmerged (str), with a
+      warning suggesting str/list[str] or a model_validator for type coercion.
+
+    supplementary_kwargs and comp_kwargs entries have no accessible Pydantic
+    class at this point, so they are always treated as str: merged via
+    _merge_values() and joined with "; ".
+
     Same routing logic as _instantiate_composite_from_row but returns raw dicts
     instead of instantiating models. Reusable for both pre-scan and instantiation.
     """
     primary_field_set = set(primary_cls.model_fields.keys())
-    primary_kwargs: dict[str, str] = {}
-    supplementary_kwargs: dict[str, str] = {}
-    comp_kwargs: dict[str, dict[str, str]] = {}
+
+    # Pass 1: collect candidate raw values per (target, field_name), preserving
+    # mapping.mappings order (insertion order of dict keys == first-seen order).
+    primary_raw: dict[str, list[str]] = {}
+    supplementary_raw: dict[str, list[str]] = {}
+    comp_raw: dict[str, dict[str, list[str]]] = {}
 
     for col_mapping in mapping.mappings:
         if col_mapping.confidence == "low":
@@ -818,7 +971,7 @@ def _route_row_values(
 
         if target == "primary":
             if field_name in primary_field_set:
-                primary_kwargs[field_name] = value
+                primary_raw.setdefault(field_name, []).append(value)
             else:
                 logger.warning(
                     "_route_row_values: field %r not found in primary model %r — skipping",
@@ -826,11 +979,64 @@ def _route_row_values(
                     primary_cls.__name__,
                 )
         elif target == "supplementary":
-            supplementary_kwargs[field_name] = value
+            supplementary_raw.setdefault(field_name, []).append(value)
         else:
-            if target not in comp_kwargs:
-                comp_kwargs[target] = {}
-            comp_kwargs[target][field_name] = value
+            comp_raw.setdefault(target, {}).setdefault(field_name, []).append(value)
+
+    # Pass 2: assemble final kwargs, merging/deduping and applying type-aware
+    # join semantics for primary; str-only merge for supplementary/complementary.
+    primary_kwargs: dict[str, str | list[str]] = {}
+    supplementary_kwargs: dict[str, str] = {}
+    comp_kwargs: dict[str, dict[str, str]] = {}
+
+    for field_name, raw_values in primary_raw.items():
+        field_info = primary_cls.model_fields.get(field_name)
+        annotation = field_info.annotation if field_info is not None else None
+        category = _classify_merge_type(annotation)
+
+        if category == "other":
+            final_value: str | list[str] = raw_values[-1]
+            if len(raw_values) > 1:
+                logger.warning(
+                    "_route_row_values: field %r of model %r has an unsupported "
+                    "type for value merging (%r) — %d values received, using "
+                    "the last one (%r) without combining. Consider using str "
+                    "or list[str] for this field if it will receive multiple "
+                    "mapped columns in the tabular pipeline, or add a Pydantic "
+                    "model_validator to coerce/merge the value after construction.",
+                    field_name,
+                    primary_cls.__name__,
+                    annotation,
+                    len(raw_values),
+                    final_value,
+                )
+            primary_kwargs[field_name] = final_value
+            continue
+
+        if category == "str":
+            primary_kwargs[field_name] = _merge_and_join(raw_values, field_name, "primary")
+        else:
+            merged = _merge_values(raw_values)
+            if len(raw_values) > 1:
+                logger.debug(
+                    "_route_row_values: primary field %r received %d value(s), "
+                    "%d survived merge -> %r",
+                    field_name,
+                    len(raw_values),
+                    len(merged),
+                    merged,
+                )
+            primary_kwargs[field_name] = merged
+
+    for field_name, raw_values in supplementary_raw.items():
+        supplementary_kwargs[field_name] = _merge_and_join(raw_values, field_name, "supplementary")
+
+    for target, field_map in comp_raw.items():
+        comp_kwargs[target] = {}
+        for field_name, raw_values in field_map.items():
+            comp_kwargs[target][field_name] = _merge_and_join(
+                raw_values, field_name, f"complementary {target!r}"
+            )
 
     return primary_kwargs, supplementary_kwargs, comp_kwargs
 

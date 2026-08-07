@@ -329,6 +329,114 @@ class Fee(ExtractionModel):
     rate:           str = Field(..., description="Fee amount without currency symbol.")
 ```
 
+### 4.7 Models used with the tabular pipeline: fields **must** be `str` or `list[str]`
+
+The tabular pipeline (direct CSV/XLSX/XLS ingestion) instantiates row models with
+`model_construct(**kwargs)` — it does **not** run Pydantic's validation/coercion machinery
+on row data. This has a direct consequence for field typing:
+
+- When two or more source **columns** are mapped (by the LLM's `map_columns` step) to the
+  **same** model field, the tabular pipeline **combines** the column values instead of
+  letting the last-processed column silently win — but **only if the field's declared type
+  is `str` or `list[str]`**. Values are deduplicated by containment (a value fully
+  contained in — or whose words all appear in — a more complete value in the same group is
+  dropped) and then either joined with `"; "` (`str` fields) or appended as list items
+  (`list[str]` fields).
+- For **any other field type** — `int`, `float`, `bool`, `date`, `datetime`, an `Enum`, or a
+  nested submodel — this combination logic does **not** apply. The pipeline keeps the
+  **last** value it processes for that field (pre-existing "last write wins" behavior) and
+  logs a **warning**; no exception is raised, and column data mapped earlier to that field
+  is silently discarded.
+
+**Rule:** if a model is (or may be) used with the tabular pipeline, declare every field the
+tabular column-mapper can target as `str` or `list[str]` — never `int`, `float`, `bool`,
+`date`, `datetime`, `Enum`, or a nested submodel at the mappable-field level.
+
+**`@model_validator` / `@field_validator` will NEVER run for these fields — do not use them
+for type coercion here.** All row instantiation in the tabular pipeline goes through
+`model_construct(**kwargs)` (`src/scinr/newton/tabular/neo4j_ops.py`, primary/composite/
+component instance creation), and `model_construct()` explicitly **bypasses Pydantic's
+entire validation machinery** — every `field_validator` and every `model_validator`, in
+`mode="before"`, `"after"`, or `"wrap"`, is skipped unconditionally. There is no later
+point in the tabular flow (Neo4j write via `graph_mapper.py`, or the `NormalizationEngine`
+for a plain scalar field) that re-validates the value either. A validator you add to a
+model used by the tabular pipeline will look correct, pass tests that call the model
+normally (e.g. `BatchRecord(year="2023")`), and then silently never execute in production
+tabular ingestion — the field stays a raw string forever. Do not write this pattern again.
+
+If a field genuinely needs to end up as a real, non-string type after the tabular
+pipeline, the **only mechanism that actually runs validation/coercion today** is the
+existing LLM-based normalization system
+(`src/scinr/newton/tabular/normalization/`): wrap the value in a **nested Pydantic
+submodel** and mark that field `json_schema_extra={"normalization_model": True, ...}` (see
+§6.4). The `NormalizationEngine` calls `with_structured_output(...)` and then
+`TypeAdapter(...).validate_python(...)` on the result — this is real Pydantic validation,
+but it only applies to the nested submodel, never to a bare scalar field on the primary
+model.
+
+```python
+# ❌ BAD — model used with the tabular pipeline; the LLM may map two source
+# columns ("Batch Year", "Year Column") to `year`. Multi-column combination
+# never kicks in because the type is int: whichever column is processed last
+# silently wins, and a warning is logged, but data from the other column is lost.
+class BatchRecord(ExtractionModel):
+    year: int | None = Field(default=None, description="...")
+
+
+# ❌ ALSO BAD — looks like a fix, but model_construct() skips model_validator
+# entirely. parse_year() never runs during tabular ingestion; year_int stays
+# None on every row, silently.
+from pydantic import model_validator
+
+
+class BatchRecord(ExtractionModel):
+    year: str | None = Field(default=None, description="...")
+    year_int: int | None = Field(default=None, description="...")
+
+    @model_validator(mode="after")
+    def parse_year(self) -> "BatchRecord":
+        if self.year and self.year.strip().isdigit():
+            self.year_int = int(self.year.strip())
+        return self
+
+
+# ✅ GOOD — `year` stays str for tabular column-mapping/combination. A real int
+# is obtained by wrapping it in a nested submodel marked normalization_model:
+# True; the tabular NormalizationEngine runs an LLM call + real Pydantic
+# validation (TypeAdapter.validate_python) to fill `year_normalized`.
+class ParsedYear(ExtractionModel):
+    """Normalized batch year, derived from the raw `year` string."""
+
+    value: int | None = Field(default=None, description="Parsed 4-digit year, e.g. 2023.")
+
+
+class BatchRecord(ExtractionModel):
+    year: str | None = Field(
+        default=None,
+        description=(
+            "Batch year as it appears in the source column(s), digits only "
+            "(e.g. '2023'). None if not stated."
+        ),
+    )
+    year_normalized: ParsedYear | None = Field(
+        default=None,
+        description="Structured year derived from `year` via LLM normalization.",
+        json_schema_extra={
+            "normalization_model": True,
+            "normalization_source_fields": ["year"],
+        },
+    )
+```
+
+This restriction applies specifically to fields the tabular column-mapper can write to
+(i.e. any field on a model used, or reused, by the tabular pipeline). It does not affect
+models used exclusively with Stage 3–4 (PDF/DOCX) extraction, where the extraction LLM's
+`with_structured_output()` call performs full Pydantic validation (and validators DO run
+there) and normal typed fields (`int`, `date`, `Enum`, etc.) work as expected. See the
+[Tabular Pipeline user guide, §7.4](../../../../docs/user-guides/tabular-pipeline.md#74-combining-values-when-multiple-columns-map-to-the-same-field)
+for the full mechanics of the combination/dedup logic, and §6.4 below for the
+`normalization_model` mechanism.
+
 ---
 
 ## 5. Graph Relationships
@@ -944,6 +1052,8 @@ class XxxModelList(ExtractionModel):
 | Validator without `check_fields=False` on inherited base | Pydantic raises `PydanticUserError` when a subclass doesn't declare the validated field | Always use `check_fields=False` on validators in shared base classes |
 | Omitting `normalization_model` on a field of a model used with the TABULAR pipeline | The tabular `NormalizationEngine` hook has nothing to trigger on; the nested submodel field silently stays `None`/unpopulated on every row, with no error raised | Add `normalization_model: True` + explicit `normalization_source_fields` on every field that needs tabular-time normalization (mandatory for structured/tabular usage — see §6.5) |
 | Omitting `normalization_source_fields` (relying on the implicit fallback) on a wide model | Engine silently sends ALL other scalar fields of the parent model as source data to the normalization LLM — wastes tokens and leaks irrelevant context | Always set `normalization_source_fields` explicitly to the exact sibling fields needed |
+| Declaring a mappable field as `int`/`float`/`bool`/`date`/`Enum`/nested-submodel on a model used with the TABULAR pipeline | `model_construct()` skips validation; multi-column combination only merges `str`/`list[str]` fields, so if two columns map to that field the last one processed silently wins and earlier column data is lost (warning-only, no error) | Use `str` or `list[str]` for the field. If a real type is genuinely needed, wrap it in a nested submodel marked `normalization_model: True` (see §4.7/§6.4) — never a `@model_validator`, which never runs in this pipeline |
+| Adding `@model_validator`/`@field_validator` to a model expecting it to coerce a tabular field's type | `model_construct()` (used for ALL row instantiation in the tabular pipeline) unconditionally skips every validator, in every mode; the field silently stays a raw `str` forever | Do not rely on validators for tabular-pipeline type coercion at all; use a `normalization_model`-marked nested submodel instead (see §4.7/§6.4) |
 
 ---
 
@@ -961,6 +1071,7 @@ class XxxModelList(ExtractionModel):
 - [ ] Every optional scalar uses `default=None`
 - [ ] Every list field uses `default_factory=list`
 - [ ] Enums use `str` as base class
+- [ ] If the model is (or may be) used with the tabular pipeline: every mappable field is `str` or `list[str]`; no `@model_validator`/`@field_validator` is relied upon for type coercion on this model (they never run in the tabular pipeline — `model_construct()` skips them). If a real type is genuinely needed, it is obtained via a nested submodel marked `normalization_model: True` (see §4.7/§6.4)
 
 ### Graph annotations
 - [ ] `entity_label` only on short, stable, identifier-like fields (not free-text)

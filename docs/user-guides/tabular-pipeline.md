@@ -372,6 +372,48 @@ Since extraction models inherit from `ExtractionModel` (which sets `extra="forbi
 
 When the `AnnotationDecision` includes complementary models, the pipeline resolves them and composes a composite schema. Each row can produce instances of the primary model and all complementary models simultaneously.
 
+### 7.4 Combining Values When Multiple Columns Map to the Same Field
+
+It is common for the LLM column mapping (`map_columns`) to map **two or more columns to the same model field** — for example, when a sheet does not have a clean 1:1 header-to-field correspondence and the LLM reasonably assigns overlapping columns to the same target. When this happens, the pipeline **combines** the values instead of silently letting the last-processed column overwrite the field.
+
+**Combination logic — applies only to `str` and `list[str]` fields:**
+
+1. Every non-empty value routed to the same field is collected, in the order the LLM emitted the corresponding entries in `ColumnMapping.mappings` — **not** the column's left-to-right position in the source file.
+2. The collected values are deduplicated **by containment**, not by exact string match: if a value is fully contained in — or all of its individual words appear in — another, more complete value in the same group, the shorter/redundant value is dropped and only the more complete value survives.
+3. The surviving values are combined:
+   - **`str` fields:** joined with `"; "` as the separator.
+   - **`list[str]` fields:** appended as separate list elements (no string concatenation).
+4. Empty values (`""`, whitespace-only) never participate — they are filtered out before deduplication even starts.
+
+**Example:**
+
+Three columns — `"Drug"`, `"Strength (mg)"`, `"Unit"` — are all mapped to the same field (e.g. `product_description: str`). For a given row:
+
+```
+"Drug"           → "Amox 500 mg"
+"Strength (mg)"  → "500 mg"
+"Unit"           → "mg"
+```
+
+Both `"500 mg"` and `"mg"` are fully contained (as a substring, and word-for-word) inside `"Amox 500 mg"`, so they are discarded as redundant. The final value written to `product_description` is:
+
+```
+"Amox 500 mg"
+```
+
+If the field were `list[str]` instead of `str`, the same containment-based dedup applies, but the surviving value(s) are appended as list elements rather than joined into a single string.
+
+**Any other field type (`int`, `float`, `bool`, `date`, `datetime`, `Enum`, nested submodels, …):**
+
+The combine/dedup logic described above applies **only** to `str` and `list[str]` fields. For every other field type, the pipeline does **not** attempt to merge multiple column values — it keeps the **last** value it processes (the pre-existing "last write wins" behavior) and emits a **warning** in the logs. No exception is raised and the pipeline never crashes because of this, but values from earlier-processed columns mapped to that field are silently discarded.
+
+> **⚠️ Model design recommendation:** because of this asymmetry, **extraction models intended for the tabular pipeline should declare every mappable field as `str` or `list[str]`.** If a field genuinely needs a non-string type (a parsed `int`, a `date`, a validated `Enum` member, etc.), **do not** try to solve it with a `@model_validator`/`@field_validator` on the model — every row instantiation in the tabular pipeline uses `model_construct(**kwargs)` (never a normal constructor call), and `model_construct()` unconditionally skips **all** Pydantic validators, in every mode (`"before"`, `"after"`, `"wrap"`). A validator added for this purpose will simply never execute in the tabular pipeline; the field will silently stay a raw string. The only mechanism that actually performs real Pydantic validation/coercion in this pipeline today is the existing LLM-based normalization system: wrap the value in a **nested Pydantic submodel** and mark it `json_schema_extra={"normalization_model": True, ...}` (see **[§8.1](#81-the-normalization_model-mechanism)**) — the `NormalizationEngine` fills it via `with_structured_output()` + `TypeAdapter(...).validate_python(...)`, which is real validation, applied to the nested submodel. See **[Custom Models](custom-models.md)** and the model-creation `AGENTS.md` §4.7 for the full explanation and a worked example.
+
+**Determinism and configuration:**
+
+- Combination order follows the order of entries for that field in `ColumnMapping.mappings` — i.e., the order the LLM emitted the mappings, not the column's position in the source file.
+- This behavior is **always active**; there is no `configure()` flag to disable it. Given the same row values and the same column mapping, the combined result is always the same.
+
 ---
 
 ## 8. Normalization Integration
@@ -698,6 +740,7 @@ asyncio.run(main())
 | Column mapping wrong | Theme classification incorrect | Check `THEME_DESCRIPTION` in your `catalog.py` |
 | CSV delimiter wrong | Auto-detection failed on unusual format | Set `tabular_delimiter=";"` or `tabular_delimiter="\t"` |
 | `.xls` files fail | Excel 97-2003 format not supported | Convert to `.xlsx` first |
+| Only one of several mapped columns' data survives on a field | Field type is not `str`/`list[str]` — multi-column combination only applies to those two types; other types keep the last value processed | Change the field to `str` or `list[str]`. Do **not** add a `model_validator` — it never runs in the tabular pipeline (`model_construct()` skips it). If a real type is genuinely needed, wrap it in a nested submodel marked `normalization_model: True` (see [§7.4](#74-combining-values-when-multiple-columns-map-to-the-same-field) and [§8.1](#81-the-normalization_model-mechanism)) |
 | Validation errors on row | Extra columns not mapped to model fields | Add missing fields to model, or use `default=None` |
 | Duplicate headers cause issues | Source file has repeated column names | Headers are auto-deduped (`col`, `col_2`, `col_3`) — check mapping |
 | XLSX sheet skipped | Worksheet is entirely empty | Empty worksheets are silently skipped (expected behavior) |

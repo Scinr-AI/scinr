@@ -123,8 +123,9 @@ Accuracy here directly determines the quality of all row-level data extraction.
 7. If a column fits both a complementary model field at medium confidence AND a
    supplementary field at high confidence, emit BOTH entries (both qualify under
    CASE A). Do not suppress the medium-confidence entry.
-8. Two different columns MUST NOT map to the same (target_model, model_field_name)
-   pair unless they are truly equivalent. Flag such cases in notes.
+8. Multiple columns MAY map to the same (target_model, model_field_name) pair when they
+   hold complementary fragments of one concept — merged automatically (string fields
+   joined with '; ', duplicates dropped). Note the reason in notes.
 9. Every column must appear at least once in the output. Use the sample rows to
    infer column semantics when the header name is ambiguous.
 10. Prefer exact field matches over approximate ones. If coverage is under 25%,

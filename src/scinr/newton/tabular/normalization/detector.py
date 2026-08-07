@@ -84,7 +84,7 @@ def extract_source_values(
         # Campos fuente explícitos
         for src_field in spec.source_fields:
             val = getattr(instance, src_field, None)
-            if val is not None and val != "":
+            if val is not None and val != "" and val != []:
                 values[src_field] = val
     else:
         # Todos los campos del modelo (fuente implícita)
@@ -97,7 +97,7 @@ def extract_source_values(
             if ann_type is not None:
                 continue
             val = getattr(instance, field_name, None)
-            if val is not None and val != "":
+            if val is not None and val != "" and val != []:
                 values[field_name] = val
 
     return values
@@ -119,7 +119,7 @@ def extract_source_values_from_dict(
     if spec.source_fields:
         for src_field in spec.source_fields:
             val = source_dict.get(src_field)
-            if val is not None and val != "":
+            if val is not None and val != "" and val != []:
                 values[src_field] = val
     else:
         # All fields of the model (implicit source)
@@ -130,7 +130,7 @@ def extract_source_values_from_dict(
             if ann_type is not None:
                 continue
             val = source_dict.get(field_name)
-            if val is not None and val != "":
+            if val is not None and val != "" and val != []:
                 values[field_name] = val
 
     return values
