@@ -377,3 +377,56 @@ class TestMistralOcrConfig:
                 neo4j_password=_DUMMY_PASS,
                 mistral_ocr_max_retries=0,
             )
+
+
+class TestFullDocstringConfig:
+    """Tests for the full_docstring parameter."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_full_docstring_env(self, monkeypatch):
+        """Ensure no stray FULL_DOCSTRING env var leaks between tests in this class."""
+        monkeypatch.delenv("FULL_DOCSTRING", raising=False)
+
+    def test_defaults_to_true_without_explicit_arg(self):
+        """configure() without full_docstring applies the documented default (True)."""
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.full_docstring is True
+
+    def test_explicit_override_is_respected(self):
+        """full_docstring=False can be set explicitly."""
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+            full_docstring=False,
+        )
+        assert cfg.full_docstring is False
+
+    def test_env_var_is_respected_when_no_explicit_arg(self, monkeypatch):
+        """FULL_DOCSTRING env var is used when no explicit kwarg is passed."""
+        monkeypatch.setenv("FULL_DOCSTRING", "false")
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.full_docstring is False
+
+        monkeypatch.setenv("FULL_DOCSTRING", "true")
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.full_docstring is True

@@ -128,6 +128,7 @@ class ScinrConfig:
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] = "fail_fast"
     # Pipeline behaviour
     prompt_caching_enabled: bool = True
+    full_docstring: bool = True
     extraction_batch_size: int = 3
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
@@ -207,6 +208,7 @@ def configure(
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
     # Pipeline behaviour
     prompt_caching_enabled: bool | None = None,
+    full_docstring: bool | None = None,
     extraction_batch_size: int | None = None,
     llm_concurrency: int | None = None,
     neo4j_concurrency: int | None = None,
@@ -269,6 +271,10 @@ def configure(
             aislada) — en ese caso el documento aborta siempre,
             independientemente del valor de `mistral_ocr_error_strategy`.
         prompt_caching_enabled: Enable prompt caching for supported LLM providers.
+        full_docstring: Use the full class docstring (True, default) or only its first
+            non-empty line (False) when building the model catalog description shown
+            to the LLM during annotation and stored as `CatalogModel.description` in
+            Neo4j. Env: `FULL_DOCSTRING`. Default: `True`.
         extraction_batch_size: Pages per extraction chunk (default: `1`).
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
         neo4j_concurrency: Max concurrent Neo4j write sessions (default: `10`).
@@ -434,6 +440,11 @@ def configure(
         if prompt_caching_enabled is not None
         else os.getenv("PROMPT_CACHING_ENABLED", "true").lower() == "true"
     )
+    resolved_full_docstring = (
+        full_docstring
+        if full_docstring is not None
+        else os.getenv("FULL_DOCSTRING", "true").lower() == "true"
+    )
     resolved_batch_size = (
         extraction_batch_size
         if extraction_batch_size is not None
@@ -530,6 +541,7 @@ def configure(
         mistral_ocr_chunk_concurrency=resolved_mistral_ocr_chunk_concurrency,
         mistral_ocr_error_strategy=resolved_mistral_ocr_error_strategy,
         prompt_caching_enabled=resolved_caching,
+        full_docstring=resolved_full_docstring,
         extraction_batch_size=resolved_batch_size,
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,

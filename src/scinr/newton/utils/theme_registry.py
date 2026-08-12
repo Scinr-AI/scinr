@@ -610,11 +610,14 @@ class ThemeRegistry:
         This format is readable by all LLM families (Claude, OpenAI, Kimi, GLM, etc.)
         and replaces the previous XML <model_catalog> format.
         """
+        from scinr.newton.config import get_config
+        full_docstring = get_config().full_docstring
+
         lines = ["Available annotation models:", ""]
         for idx, cls in enumerate(theme.models, start=1):
             if self._is_list_container(cls):
                 item_cls = self._get_list_item_class(cls)
-                summary = self._get_docstring_summary(cls)
+                summary = self._get_docstring_description(cls, full_docstring=full_docstring)
                 fields = self._get_field_names(cls)
                 lines.append(f"{idx}. {cls.__name__} [list container] — {summary}")
                 lines.append(f"   Fields: {', '.join(fields)}")
@@ -622,7 +625,7 @@ class ThemeRegistry:
                     item_fields = self._get_field_names(item_cls)
                     lines.append(f"   Each item ({item_cls.__name__}): {', '.join(item_fields)}")
             else:
-                summary = self._get_docstring_summary(cls)
+                summary = self._get_docstring_description(cls, full_docstring=full_docstring)
                 fields = self._get_field_names(cls)
                 lines.append(f"{idx}. {cls.__name__} — {summary}")
                 lines.append(f"   Fields: {', '.join(fields)}")
@@ -808,9 +811,24 @@ class ThemeRegistry:
         return args[0]
 
     @staticmethod
-    def _get_docstring_summary(cls: type) -> str:
-        """Extract the first non-empty line of a class docstring."""
+    def _get_docstring_description(cls: type, full_docstring: bool = True) -> str:
+        """
+        Build the model description used in the LLM catalog and in
+        ``CatalogModel.description`` (Neo4j).
+
+        When ``full_docstring`` is True (default), returns the complete class
+        docstring, dedented and stripped. When False, returns only the first
+        non-empty line (legacy short-summary behaviour).
+
+        Falls back to ``f"Model for {cls.__name__}"`` when the class has no
+        docstring at all.
+        """
         doc = cls.__doc__ or ""
+        if not doc.strip():
+            return f"Model for {cls.__name__}"
+        if full_docstring:
+            import inspect
+            return inspect.cleandoc(doc).strip()
         for line in doc.strip().splitlines():
             line = line.strip()
             if line:

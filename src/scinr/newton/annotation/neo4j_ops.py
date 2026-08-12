@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from neo4j import AsyncDriver
 
 from scinr.newton.annotation.models import AnnotationDecision
+from scinr.newton.config import get_config
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 
 if TYPE_CHECKING:
@@ -440,7 +441,7 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
     async with driver.session() as session:
         # ── 4. Create / update CatalogModel nodes ─────────────────────────────
         for model_name, cls in all_models.items():
-            description = ThemeRegistry._get_docstring_summary(cls)
+            description = ThemeRegistry._get_docstring_description(cls, full_docstring=get_config().full_docstring)
             selectable = model_name in selectable_names
             await session.run(
                 """
