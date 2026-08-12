@@ -73,6 +73,7 @@ configure(
 | `extra_converters` | `dict[str, type] \| None` | — | `{}` | Maps file extensions to `BaseConverter` subclasses, overriding built-in converters. |
 | `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral API key for PDF OCR conversion. |
 | `prompt_caching_enabled` | `bool \| None` | `PROMPT_CACHING_ENABLED` | `True` | Enable Bedrock Converse prompt caching (~90% token cost reduction on repeated calls). |
+| `full_docstring` | `bool \| None` | `FULL_DOCSTRING` | `True` | Use the full class docstring (vs. only its first line) when building the model catalog description for LLM prompts (annotation stage) and Neo4j `CatalogModel.description`. |
 | `extraction_batch_size` | `int \| None` | `EXTRACTION_BATCH_SIZE` | `1` | Pages processed per extraction chunk (sliding window step). |
 | `llm_concurrency` | `int \| None` | `LLM_CONCURRENCY` | `4` | Max concurrent LLM calls (asyncio semaphore size). |
 | `neo4j_concurrency` | `int \| None` | `NEO4J_CONCURRENCY` | `10` | Max concurrent Neo4j session writes during annotation and entity extraction. |

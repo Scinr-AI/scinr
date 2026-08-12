@@ -230,3 +230,68 @@ class TestThemeRegistryHelpers:
 
         registry = ThemeRegistry(models_root=models_dir)
         assert registry.get_all_theme_paths() == []
+
+
+class TestGetDocstringDescription:
+    """Tests for ThemeRegistry._get_docstring_description."""
+
+    def test_multiline_docstring_full_docstring_true_returns_all_lines(self):
+        class MultilineDoc:
+            """First line.
+
+            Second paragraph line one.
+            Second paragraph line two.
+            """
+
+        result = ThemeRegistry._get_docstring_description(MultilineDoc, full_docstring=True)
+        assert "First line." in result
+        assert "Second paragraph line one." in result
+        assert "Second paragraph line two." in result
+
+    def test_multiline_docstring_full_docstring_false_returns_first_line_only(self):
+        class MultilineDoc:
+            """First line.
+
+            Second paragraph line one.
+            Second paragraph line two.
+            """
+
+        result = ThemeRegistry._get_docstring_description(MultilineDoc, full_docstring=False)
+        assert result == "First line."
+
+    def test_no_docstring_returns_fallback_for_both_modes(self):
+        class NoDoc:
+            pass
+
+        assert (
+            ThemeRegistry._get_docstring_description(NoDoc, full_docstring=True)
+            == f"Model for {NoDoc.__name__}"
+        )
+        assert (
+            ThemeRegistry._get_docstring_description(NoDoc, full_docstring=False)
+            == f"Model for {NoDoc.__name__}"
+        )
+
+    def test_single_line_docstring_returns_same_value_for_both_modes(self):
+        class SingleLineDoc:
+            """Just one line."""
+
+        assert (
+            ThemeRegistry._get_docstring_description(SingleLineDoc, full_docstring=True)
+            == "Just one line."
+        )
+        assert (
+            ThemeRegistry._get_docstring_description(SingleLineDoc, full_docstring=False)
+            == "Just one line."
+        )
+
+    def test_full_docstring_defaults_to_true(self):
+        class MultilineDoc:
+            """First line.
+
+            Second line.
+            """
+
+        result = ThemeRegistry._get_docstring_description(MultilineDoc)
+        assert "First line." in result
+        assert "Second line." in result

@@ -154,6 +154,7 @@ from scinr.newton import configure
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
 | `prompt_caching_enabled` | `bool \| None` | Enable prompt caching (Bedrock). |
+| `full_docstring` | `bool \| None` | Use the full class docstring (vs. only its first line) when building the model catalog description for LLM prompts (annotation stage) and Neo4j `CatalogModel.description`. |
 | `extraction_batch_size` | `int \| None` | Pages per extraction chunk. |
 | `llm_concurrency` | `int \| None` | Maximum concurrent LLM calls. |
 | `neo4j_concurrency` | `int \| None` | Maximum async Neo4j concurrency. |
@@ -411,6 +412,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **OCR Concurrency** | `mistral_ocr_chunk_concurrency` | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` |
 | **OCR Error Strategy** | `mistral_ocr_error_strategy` | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` |
 | **Prompt Caching** | `prompt_caching_enabled` | `PROMPT_CACHING_ENABLED` | `true` |
+| **Full Docstring** | `full_docstring` | `FULL_DOCSTRING` | `true` |
 | **Extraction Batch** | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | `1` |
 | **Prompt Family** | `prompt_family` | `PROMPT_FAMILY` | `generic` |
 | **Extra Models Paths** | `extra_models_paths` | `SCINR_EXTRA_MODELS_PATHS` | `""` |
