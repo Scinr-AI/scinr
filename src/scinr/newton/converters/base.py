@@ -135,13 +135,28 @@ class BaseConverter(ABC):
        without leading dot, e.g. ``frozenset({"pdf"})``).
     2. Implement ``convert(source)``.
 
+    Subclasses whose ``convert()`` is implemented as a coroutine (``async
+    def``) rather than a regular blocking method — e.g. converters that
+    perform genuine async network I/O, like ``PdfConverter`` calling the
+    Mistral OCR API — must set the class attribute ``is_async = True``.
+    ``ABC`` cannot verify at runtime whether a subclass's ``convert()`` is a
+    coroutine function, so this flag is purely declarative: callers (see
+    ``scinr.newton.converters.main._run_convert()``) read it to decide
+    whether to ``await converter.convert(source)`` directly on the event
+    loop, or to dispatch the (blocking, sync) call to a worker thread via
+    ``asyncio.to_thread()``.
+
     Parameters
     ----------
     supported_extensions : frozenset[str]
         Class attribute listing the file extensions this converter handles.
+    is_async : bool
+        Class attribute declaring whether ``convert()`` is a coroutine
+        function. Defaults to ``False`` (regular sync method).
     """
 
     supported_extensions: frozenset[str] = frozenset()
+    is_async: bool = False
 
     @abstractmethod
     def convert(self, source: Path) -> IntermediateDocument:
@@ -188,8 +203,17 @@ class BaseConverter(ABC):
         Raises
         ------
         ConversionError
-            If conversion fails.
+            If conversion fails, or if this converter declares
+            ``is_async = True`` (async converters are not supported by
+            this method).
         """
+        if self.is_async:
+            raise ConversionError(
+                f"{type(self).__name__}.convert_and_write() does not support "
+                "async converters (is_async=True). Use 'await converter.convert(source)' "
+                "directly, or scinr.newton.converters.main._run_convert(), instead."
+            )
+
         if not source.exists():
             raise FileNotFoundError(f"Source file not found: {source}")
 
