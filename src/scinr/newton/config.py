@@ -122,7 +122,7 @@ class ScinrConfig:
     mistral_api_key: str | None = None
     mistral_ocr_safe_max_pages: int = 900
     mistral_ocr_safe_max_bytes: int = 45 * 1024 * 1024  # 45 MiB
-    mistral_ocr_max_retries: int = 3
+    mistral_ocr_max_retries: int = 15
     mistral_ocr_retry_backoff_seconds: float = 2.0
     mistral_ocr_chunk_concurrency: int = 1  # reservado para paralelismo futuro, no usado aún
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] = "fail_fast"
@@ -251,8 +251,8 @@ def configure(
         mistral_ocr_safe_max_bytes: Máximo de bytes por chunk de PDF (tamaño ya
             serializado) enviado a la API de Mistral OCR antes de dividirlo.
             Env: `MISTRAL_OCR_SAFE_MAX_BYTES`. Default: `45 * 1024 * 1024` (45 MiB).
-        mistral_ocr_max_retries: Número máximo de intentos por chunk ante errores
-            de red o HTTP reintentables. Env: `MISTRAL_OCR_MAX_RETRIES`. Default: `3`.
+    mistral_ocr_max_retries: Número máximo de intentos por chunk ante errores
+        de red o HTTP reintentables. Env: `MISTRAL_OCR_MAX_RETRIES`. Default: `15`.
         mistral_ocr_retry_backoff_seconds: Base (en segundos) del backoff exponencial
             entre reintentos. Env: `MISTRAL_OCR_RETRY_BACKOFF_SECONDS`. Default: `2.0`.
         mistral_ocr_chunk_concurrency: Reservado para paralelismo futuro entre chunks
@@ -408,7 +408,7 @@ def configure(
     resolved_mistral_ocr_max_retries = (
         mistral_ocr_max_retries
         if mistral_ocr_max_retries is not None
-        else int(os.getenv("MISTRAL_OCR_MAX_RETRIES", "3"))
+        else int(os.getenv("MISTRAL_OCR_MAX_RETRIES", "15"))
     )
     if resolved_mistral_ocr_max_retries < 1:
         raise ConfigurationError(

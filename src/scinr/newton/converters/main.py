@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 from scinr.newton.converters.api_json import ApiJsonConverter
 from scinr.newton.converters.api_xml import ApiXmlConverter
 from scinr.newton.converters.base import (
+    BaseConverter,
     ConversionError,
     IntermediateDocument,
     UnsupportedFormatError,
@@ -72,6 +73,22 @@ def _guess_content_type(path: Path) -> str:
     """Infer MIME type from file extension. Falls back to 'application/octet-stream'."""
     mime, _ = mimetypes.guess_type(str(path))
     return mime or "application/octet-stream"
+
+
+async def _run_convert(converter: BaseConverter, source: Path) -> IntermediateDocument:
+    """Run converter.convert(source) respecting its sync/async contract.
+
+    Async converters (converter.is_async is True, e.g. PdfConverter) are
+    awaited directly on the event loop — their blocking work is genuine
+    network I/O already expressed as native coroutines, so no thread is
+    needed. Sync converters are dispatched to asyncio.to_thread() so their
+    CPU/local-disk-bound work does not block the event loop, allowing
+    other tasks (bounded by the caller's semaphore) to make real progress
+    concurrently.
+    """
+    if getattr(converter, "is_async", False):
+        return await converter.convert(source)
+    return await asyncio.to_thread(converter.convert, source)
 
 
 def _parse_headers(header_list: list[str]) -> dict[str, str]:
@@ -308,6 +325,19 @@ async def convert_one(
     distinction is moot: every level is sequential, so the whole tree is
     processed one entry at a time, exactly as before.
 
+    In addition to this per-level semaphore separation, the actual
+    conversion work for each entry (``converter.convert(entry)``) is
+    dispatched via ``_run_convert()`` rather than called directly: sync
+    converters run in a worker thread (``asyncio.to_thread()``), while
+    async converters (e.g. ``PdfConverter``, whose conversion is genuine
+    network I/O) are awaited directly on the event loop. This matters
+    because before this dispatch existed, a blocking in-coroutine call to
+    ``converter.convert()`` monopolised the event loop for its entire
+    duration, silently negating whatever concurrency the semaphore had
+    scheduled — i.e. `parallel_docs > 1` had no real effect. Dispatching
+    through ``_run_convert()`` is what makes the semaphore's scheduled
+    parallelism translate into actual concurrent progress.
+
     Parameters
     ----------
     entry:
@@ -417,7 +447,7 @@ async def convert_one(
             )
 
         # 2. Convert to IntermediateDocument (existing behaviour)
-        doc = converter.convert(entry)
+        doc = await _run_convert(converter, entry)
         # Inject metadata
         doc.folder_path = folder_path_str
         doc.raw_file_id = raw_file_id  # None when no repo
@@ -648,10 +678,35 @@ async def convert_single_file(
         return None
 
     if raw_file_repo is None and page_repo is None:
-        # No storage: legacy behaviour (sync convert_and_write)
-        # TODO: legacy path does not support context_instructions injection
-        written_path = converter.convert_and_write(path, output_dir)
-        return written_path
+        # No storage: convert via _run_convert() and write the JSON
+        # directly, instead of delegating to convert_and_write() (base.py).
+        # Delegating would silently break for is_async=True converters
+        # (e.g. PdfConverter): convert_and_write() calls self.convert(source)
+        # as a plain synchronous call, which for an async convert() just
+        # builds an un-awaited coroutine object instead of running it, and
+        # the subsequent doc.to_json() call then fails with a confusing
+        # AttributeError far removed from the real cause (base.py's
+        # convert_and_write() now also guards against direct misuse of this
+        # kind — see its ConversionError check — but this path avoids it
+        # entirely by not calling it). Rebuilding the same steps here
+        # (output dir creation, collision-safe output path via
+        # _resolve_output_path(), JSON write) keeps this path correct for
+        # both sync and async converters, and additionally closes a
+        # pre-existing gap: context_instructions is now injected on this
+        # path too (previously only the storage-aware branch below did).
+        output_dir.mkdir(parents=True, exist_ok=True)
+        resolved_output_path = converter._resolve_output_path(path, output_dir)
+        try:
+            doc = await _run_convert(converter, path)
+        except ConversionError:
+            raise
+        except Exception as exc:
+            raise ConversionError(f"Failed to convert {path}: {exc}") from exc
+        doc.context_instructions = context_instructions
+        doc.document_name = path.stem
+        resolved_output_path.write_text(doc.to_json(), encoding="utf-8")
+        logger.info("Written: %s (%d page(s))", resolved_output_path, len(doc.pages))
+        return resolved_output_path
 
     # With storage: full process with MongoDB
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -666,7 +721,7 @@ async def convert_single_file(
     )
 
     # 2. Convert to IntermediateDocument
-    doc = converter.convert(path)
+    doc = await _run_convert(converter, path)
     doc.raw_file_id = raw_file_id
     doc.context_instructions = context_instructions
     doc.document_name = path.stem

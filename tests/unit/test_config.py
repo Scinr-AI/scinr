@@ -283,7 +283,7 @@ class TestMistralOcrConfig:
         )
         assert cfg.mistral_ocr_safe_max_pages == 900
         assert cfg.mistral_ocr_safe_max_bytes == 45 * 1024 * 1024
-        assert cfg.mistral_ocr_max_retries == 3
+        assert cfg.mistral_ocr_max_retries == 15
         assert cfg.mistral_ocr_retry_backoff_seconds == 2.0
         assert cfg.mistral_ocr_chunk_concurrency == 1
         assert cfg.mistral_ocr_error_strategy == "fail_fast"

@@ -17,10 +17,10 @@ errores por chunk es configurable vía ``mistral_ocr_error_strategy``
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,6 +115,7 @@ class PdfConverter(BaseConverter):
     """
 
     supported_extensions: frozenset[str] = frozenset({"pdf"})
+    is_async: bool = True
 
     def __init__(
         self,
@@ -136,8 +137,17 @@ class PdfConverter(BaseConverter):
     # Public interface
     # ------------------------------------------------------------------
 
-    def convert(self, source: Path) -> IntermediateDocument:
+    async def convert(self, source: Path) -> IntermediateDocument:
         """Convert a PDF file to the intermediate format.
+
+        This is a native ``async def`` coroutine (not a sync method
+        dispatched to a thread): the actual conversion work is genuine
+        network I/O against the Mistral OCR API (``httpx.AsyncClient``,
+        with ``asyncio.sleep()`` backoff between retries), so it can be
+        awaited directly on the event loop without blocking it. See
+        ``is_async = True`` on this class and
+        ``scinr.newton.converters.main._run_convert()`` for how callers
+        dispatch based on this contract.
 
         Parameters
         ----------
@@ -200,7 +210,7 @@ class PdfConverter(BaseConverter):
         must_split = needs_splitting(pdf_bytes, limits.safe_max_pages, limits.safe_max_bytes)
 
         if not must_split:
-            pages = self._convert_chunk(
+            pages = await self._convert_chunk(
                 pdf_bytes, api_key, source.name, page_offset=0, limits=limits
             )
             logger.info("Converted %d page(s) from %s", len(pages), source.name)
@@ -236,7 +246,7 @@ class PdfConverter(BaseConverter):
                 len(chunk.pdf_bytes),
             )
             try:
-                paginas_chunk = self._convert_chunk(
+                paginas_chunk = await self._convert_chunk(
                     chunk.pdf_bytes,
                     api_key,
                     etiqueta,
@@ -343,7 +353,7 @@ class PdfConverter(BaseConverter):
             error_strategy=error_strategy,
         )
 
-    def _convert_chunk(
+    async def _convert_chunk(
         self,
         pdf_bytes: bytes,
         api_key: str,
@@ -396,7 +406,7 @@ class PdfConverter(BaseConverter):
         }
 
         logger.info("Calling Mistral OCR API for %s", chunk_label)
-        data = self._post_to_mistral_with_retry(
+        data = await self._post_to_mistral_with_retry(
             payload, headers, limits, chunk_label, error_label=error_label
         )
 
@@ -409,7 +419,7 @@ class PdfConverter(BaseConverter):
             self._map_page(page_data, index_offset=page_offset) for page_data in data["pages"]
         ]
 
-    def _post_to_mistral_with_retry(
+    async def _post_to_mistral_with_retry(
         self,
         payload: dict,
         headers: dict,
@@ -451,16 +461,20 @@ class PdfConverter(BaseConverter):
         last_request_exc: httpx.RequestError | None = None
         for attempt in range(1, limits.max_retries + 1):
             try:
-                response = httpx.post(
-                    _MISTRAL_OCR_URL,
-                    json=payload,
-                    headers=headers,
-                    timeout=httpx.Timeout(300.0),
-                )
+                async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+                    response = await client.post(
+                        _MISTRAL_OCR_URL,
+                        json=payload,
+                        headers=headers,
+                    )
             except httpx.RequestError as exc:
                 last_request_exc = exc
                 if attempt < limits.max_retries:
-                    backoff = limits.retry_backoff_seconds * (2 ** (attempt - 1))
+                    # Backoff exponencial con límite de 5 minutos (300s) entre retries
+                    backoff = min(
+                        limits.retry_backoff_seconds * (2 ** (attempt - 1)),
+                        300.0  # 5 minutos máximo entre retries sucesivos
+                    )
                     logger.warning(
                         "Network error calling Mistral OCR API for %s (attempt %d/%d): %s. "
                         "Retrying in %.1fs...",
@@ -470,7 +484,7 @@ class PdfConverter(BaseConverter):
                         exc,
                         backoff,
                     )
-                    time.sleep(backoff)
+                    await asyncio.sleep(backoff)
                     continue
                 raise ConversionError(
                     f"Network error calling Mistral OCR API for {chunk_label} "
@@ -479,7 +493,11 @@ class PdfConverter(BaseConverter):
 
             if response.is_error:
                 if response.status_code in _RETRYABLE_STATUS_CODES and attempt < limits.max_retries:
-                    backoff = limits.retry_backoff_seconds * (2 ** (attempt - 1))
+                    # Backoff exponencial con límite de 5 minutos (300s) entre retries
+                    backoff = min(
+                        limits.retry_backoff_seconds * (2 ** (attempt - 1)),
+                        300.0  # 5 minutos máximo entre retries sucesivos
+                    )
                     logger.warning(
                         "Mistral OCR API returned HTTP %d for %s (attempt %d/%d). "
                         "Retrying in %.1fs...",
@@ -489,7 +507,7 @@ class PdfConverter(BaseConverter):
                         limits.max_retries,
                         backoff,
                     )
-                    time.sleep(backoff)
+                    await asyncio.sleep(backoff)
                     continue
                 # error_label=None preserva el formato de mensaje EXACTO
                 # previo a esta funcionalidad (caso sin split); con
