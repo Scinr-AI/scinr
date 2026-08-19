@@ -36,6 +36,7 @@ Fulltext indexes (semantic search):
 """
 
 import logging
+import re
 
 from neo4j import Driver
 
@@ -191,26 +192,37 @@ def setup_schema(driver: Driver) -> None:
     # Best-effort Neo4j minimum version check (>= 4.4 required)
     # ------------------------------------------------------------------
     with driver.session() as session:
-        try:
-            result = session.run(
-                "CALL dbms.components() YIELD versions RETURN versions[0] AS version"
-            )
-            record = result.single()
-            if record:
-                version_str = record["version"]
-                parts = version_str.split(".")
-                major, minor = int(parts[0]), int(parts[1])
+        result = session.run(
+            "CALL dbms.components() YIELD versions "
+            "RETURN versions[0] AS version"
+        )
+        
+        record = result.single()
+        
+        if record:
+            version_str = record["version"]
+        
+            # Versiones normales: 4.4.18, 5.26.1, etc.
+            match = re.match(r"^(\d+)\.(\d+)", version_str)
+        
+            if match:
+                major = int(match.group(1))
+                minor = int(match.group(2))
+        
                 if (major, minor) < (4, 4):
                     from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
-                        f"scinr-ingest requires Neo4j >= 4.4. "
-                        f"Please upgrade your Neo4j instance."
+                        "scinr-ingest requires Neo4j >= 4.4. "
+                        "Please upgrade your Neo4j instance."
                     )
-        except ConfigurationError:
-            raise
-        except Exception:
-            pass  # version check is best-effort; proceed if query fails
+            else:
+                # Formato desconocido (por ejemplo, Aura: 27-aura).
+                # No bloqueamos la conexión.
+                logger.warning(
+                    "Could not parse Neo4j version %r; skipping compatibility check.",
+                    version_str,
+                )
 
     # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
     with driver.session() as session:
