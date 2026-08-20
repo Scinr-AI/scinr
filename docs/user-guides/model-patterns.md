@@ -474,7 +474,7 @@ Tabular file (CSV/XLSX)
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
 | `normalization_enabled` | `NORMALIZATION_ENABLED` | `False` | Enable/disable the normalization engine |
-| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` | Max entries per LLM batch call |
+| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `3` | Max entries per LLM batch call |
 | `normalization_llm` | — | Falls back to main `llm` | Dedicated LLM for normalization calls |
 
 ---
@@ -1185,5 +1185,6 @@ Processing a document with `VariationModel` produces:
 
 - **[Custom Models](custom-models.md)** — Basic model definition and field descriptions.
 - **[Tabular Pipeline](tabular-pipeline.md)** — How the tabular pipeline uses normalization models.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and node types.
+- **[Neo4j Graph Storage — instance_key linking](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — §4 "Instance Keys" and §9 "Instance Relationships" of this guide map directly onto this section's real-graph validation (UID hashing, shell-node lifecycle, live `CTDSectionSpec` example).
+- **[Neo4j Graph Storage — Normalized Models](neo4j-graph.md#normalized-models-tabular-pipeline)** — §7 "The Normalization Model Mechanism" of this guide maps directly onto this section's explanation of how normalized fields are written to the graph.
 - **[Architecture](../architecture.md)** — Detailed pipeline stage walkthrough, including entity extraction graph mapping.

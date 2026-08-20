@@ -622,7 +622,7 @@ child_code: str = Field(
 )
 ```
 
-Produces: `(:LabeledEntity:VariationCode {value:"Q.I.a.1"}) -[:HAS_CHILD_VARIATION_CODE]-> (:LabeledEntity:VariationCode {value:"Q.I.a.1(a)"})`
+Produces: `(:LabeledEntity {label:"VariationCode", value:"Q.I.a.1"}) -[:HAS_CHILD_VARIATION_CODE]-> (:LabeledEntity {label:"VariationCode", value:"Q.I.a.1(a)"})`
 
 **Rules:**
 - Both source and target fields must have `entity_label`.
@@ -930,5 +930,6 @@ class ContactRecord(ExtractionModel):
 - **[Running the Pipeline](running-pipeline.md)** — Full reference for `run_pipeline()`, including manual annotation mode (`manual=True`, `model_class=`).
 - **[Configuration](../configuration.md)** — All `configure()` parameters, including `normalization_enabled` and `normalization_llm` for the tabular normalization engine.
 - **[Tabular Pipeline](tabular-pipeline.md)** — Working with CSV, XLSX, and spreadsheet data.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding `:ModelInstance`, `:LabeledEntity`, and relationship types in the graph.
+- **[Neo4j Graph Storage — instance_key linking](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — See the `instance_key` deduplication mechanism validated against a real, populated graph (with a live `CTDSectionSpec` example), including the UID-hashing algorithm and shell-node lifecycle.
+- **[Neo4j Graph Storage — Normalized Models](neo4j-graph.md#normalized-models-tabular-pipeline)** — How a `normalization_model` field is actually written to the graph.
 - **[Architecture](../architecture.md)** — Detailed walkthrough of each pipeline stage, including how annotation (Stage 3) and entity extraction (Stage 4) use extraction models.

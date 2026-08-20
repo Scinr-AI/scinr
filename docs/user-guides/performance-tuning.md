@@ -176,19 +176,19 @@ configure(extraction_batch_size=1)  # Default: 1 page per chunk
 
 ### Normalization Batch Size (`normalization_batch_size`)
 
-**Default:** `5`  **Env var:** `NORMALIZATION_BATCH_SIZE`
+**Default:** `3`  **Env var:** `NORMALIZATION_BATCH_SIZE`
 
 The number of normalization entries grouped per LLM call in the tabular pipeline. Each call sends multiple table entries to the LLM for structural normalization.
 
 ```python
-configure(normalization_batch_size=5)  # Default: 5 entries per call
+configure(normalization_batch_size=3)  # Default: 3 entries per call
 ```
 
 #### Trade-offs
 
 | Value | Pros | Cons |
 | :--- | :--- | :--- |
-| `3-5` (default) | Balanced quality and cost | Moderate number of calls |
+| `3` (default) | Balanced quality and cost | Moderate number of calls |
 | `10-15` | Fewer calls, lower cost | Larger context per call |
 | `15-20` | Maximum cost savings | Risk of context overflow |
 | `20+` | Fewest calls | May exceed model context window |
@@ -376,7 +376,7 @@ configure(
     neo4j_concurrency=5,         # Light Neo4j load
     neo4j_sync_concurrency=5,    # Light sync load
     extraction_batch_size=1,     # Maximum quality
-    normalization_batch_size=5,  # Default
+    normalization_batch_size=3,  # Default
     prompt_caching_enabled=True, # Still useful for small batches
 )
 
@@ -480,7 +480,7 @@ configure(
     neo4j_concurrency=30,        # Max Neo4j throughput
     neo4j_sync_concurrency=25,   # Max sync throughput
     extraction_batch_size=1,     # Smaller batches = faster per call
-    normalization_batch_size=5,  # Default batch size
+    normalization_batch_size=3,  # Default batch size
     mistral_ocr_chunk_concurrency=4,  # Parallel OCR
     mistral_ocr_error_strategy="best_effort",  # Don't wait on failures
 )

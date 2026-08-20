@@ -329,6 +329,8 @@ class Fee(ExtractionModel):
     rate:           str = Field(..., description="Fee amount without currency symbol.")
 ```
 
+> **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Cross-Section `:ModelInstance` Linking via `instance_key`](../../../../docs/user-guides/neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key).
+
 ### 4.7 Models used with the tabular pipeline: fields **must** be `str` or `list[str]`
 
 The tabular pipeline (direct CSV/XLSX/XLS ingestion) instantiates row models with
@@ -687,6 +689,8 @@ This mechanism is:
   exactly as described in §4–§5. `normalization_model` only governs *how the field gets
   filled in* when the source is tabular; it does not change anything about how the graph
   is built from it afterward.
+
+> **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Normalized Models (Tabular Pipeline)](../../../../docs/user-guides/neo4j-graph.md#normalized-models-tabular-pipeline) shows exactly how a normalized field is written to the graph as a separate, linked `:ModelInstance` node.
 
 ### 6.5 Mandatory clarification: structured, unstructured, or both
 
