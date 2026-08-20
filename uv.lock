@@ -2395,7 +2395,7 @@ wheels = [
 
 [[package]]
 name = "scinr"
-version = "0.3.0"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -2415,6 +2415,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-pptx" },
     { name = "pyyaml" },
+    { name = "tiktoken" },
 ]
 
 [package.optional-dependencies]
@@ -2480,6 +2481,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "ruff", marker = "extra == 'docs'", specifier = "==0.15.20" },
+    { name = "tiktoken", specifier = ">=0.13" },
 ]
 provides-extras = ["bedrock", "openai", "ollama", "mongodb", "docs", "dev"]
 

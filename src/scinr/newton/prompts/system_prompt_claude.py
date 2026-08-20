@@ -305,6 +305,11 @@ Each failure state has exactly one correct response. Do not improvise.
    → If level ambiguity persists, use <previous_page> hierarchy to resolve.
    → If still ambiguous, assign the higher-level role (section over subsection
      or freeform_block).
+   → EXCEPTION: if <extraction_mode> is present and reads "fast", invert this
+     fallback — prefer the lower-level role (subsection or freeform_block)
+     instead of section, since a chunk processed in isolation cannot reliably
+     confirm a new top-level section and a wrong SECTION classification is
+     permanent.
 
 8. CURRENT_PAGE contains only subsections whose parent was extracted in a
    previous chunk (orphaned subsections, no parent visible on this page):
@@ -355,6 +360,10 @@ AMBIGUOUS HEADING LEVEL (cannot determine role for a heading):
   → Step 2 — If level is still ambiguous, inspect <previous_page> hierarchy.
   → Step 3 — If still unclear: assign the higher-level role (section over
     subsection or freeform_block).
+  → EXCEPTION: if <extraction_mode> is present and reads "fast", invert Step 3
+    — prefer the lower-level role (subsection or freeform_block) instead of
+    section, since a chunk processed in isolation cannot reliably confirm a
+    new top-level section and a wrong SECTION classification is permanent.
 
 HEADING PRESENT BUT SECTION SCOPE IS UNCLEAR:
   → Create the node with its observable title and assigned role.

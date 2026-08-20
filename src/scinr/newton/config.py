@@ -133,6 +133,10 @@ class ScinrConfig:
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
     neo4j_sync_concurrency: int = 8
+    # Consolidation (fast_extraction Stage 1 post-extraction merge step)
+    consolidation_token_safety_margin: float = 0.75
+    consolidation_max_output_tokens: int | None = None
+    consolidation_max_input_tokens: int | None = 65536
     # Logging
     log_level: str = "INFO"
     # Prompt family
@@ -213,6 +217,10 @@ def configure(
     llm_concurrency: int | None = None,
     neo4j_concurrency: int | None = None,
     neo4j_sync_concurrency: int | None = None,
+    # Consolidation (fast_extraction Stage 1 post-extraction merge step)
+    consolidation_token_safety_margin: float | None = None,
+    consolidation_max_output_tokens: int | None = None,
+    consolidation_max_input_tokens: int | None = None,
     # Logging
     log_level: str = "INFO",
     # Prompt family
@@ -280,6 +288,22 @@ def configure(
         neo4j_concurrency: Max concurrent Neo4j write sessions (default: `10`).
         neo4j_sync_concurrency: Max concurrent Stage 2 (sync ingestion) dispatches
             to asyncio.to_thread() (default: `8`).
+        consolidation_token_safety_margin: Fraction of `max_tokens` used as the
+            output-token ceiling for the Stage 1 `fast_extraction` consolidation
+            LLM call, when `consolidation_max_output_tokens` is unset. Env:
+            `CONSOLIDATION_TOKEN_SAFETY_MARGIN`. Default: `0.75`.
+        consolidation_max_output_tokens: Explicit output-token ceiling for the
+            Stage 1 `fast_extraction` consolidation LLM call's decisions array.
+            When `None` (default), derived as `max_tokens * consolidation_token_safety_margin`.
+            Env: `CONSOLIDATION_MAX_OUTPUT_TOKENS`.
+        consolidation_max_input_tokens: Input-token ceiling that governs the batch
+            size of the Stage 1 `fast_extraction` consolidation's sliding-window
+            algorithm (see `structure_consolidation.consolidate_structure()`) —
+            each batch of consecutive chunks (plus its backward buffer from the
+            immediately preceding batch) is kept under this ceiling. Default:
+            `65536` (64k). Passing `None` explicitly to `ScinrConfig` directly
+            (bypassing `configure()`) skips the ceiling check entirely as a
+            defensive fallback — not the normal path. Env: `CONSOLIDATION_MAX_INPUT_TOKENS`.
         log_level: Logging level string (`"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`).
         prompt_family: Prompt family to use (`"generic"`, `"claude"`, or `"gpt_reasoning"`).
         normalization_enabled: Enable post-extraction normalization for tabular data.
@@ -464,6 +488,25 @@ def configure(
         else int(_neo4j_sync_concurrency_env)
     )
 
+    # ── Consolidation (fast_extraction Stage 1 post-extraction merge step) ────
+    resolved_consolidation_token_safety_margin = (
+        consolidation_token_safety_margin
+        if consolidation_token_safety_margin is not None
+        else float(os.getenv("CONSOLIDATION_TOKEN_SAFETY_MARGIN", "0.75"))
+    )
+    _consolidation_max_output_tokens_env = os.getenv("CONSOLIDATION_MAX_OUTPUT_TOKENS")
+    resolved_consolidation_max_output_tokens = (
+        consolidation_max_output_tokens
+        if consolidation_max_output_tokens is not None
+        else (int(_consolidation_max_output_tokens_env) if _consolidation_max_output_tokens_env else None)
+    )
+    _consolidation_max_input_tokens_env = os.getenv("CONSOLIDATION_MAX_INPUT_TOKENS")
+    resolved_consolidation_max_input_tokens = (
+        consolidation_max_input_tokens
+        if consolidation_max_input_tokens is not None
+        else (int(_consolidation_max_input_tokens_env) if _consolidation_max_input_tokens_env else 65536)
+    )
+
     # ── Prompt family ─────────────────────────────────────────────────────────
     _env_prompt_family = os.getenv("PROMPT_FAMILY", "generic").lower()
     if prompt_family is not None:
@@ -546,6 +589,9 @@ def configure(
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,
         neo4j_sync_concurrency=resolved_neo4j_sync_concurrency,
+        consolidation_token_safety_margin=resolved_consolidation_token_safety_margin,
+        consolidation_max_output_tokens=resolved_consolidation_max_output_tokens,
+        consolidation_max_input_tokens=resolved_consolidation_max_input_tokens,
         log_level=log_level,
         prompt_family=resolved_prompt_family,
         normalization_enabled=resolved_normalization_enabled,

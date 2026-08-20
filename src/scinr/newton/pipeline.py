@@ -104,6 +104,8 @@ async def run_pipeline(
     parallel_docs: int = 5,
     # ── Behaviour on partial failure ─────────────────────────────────────────
     on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
+    # ── Stage 1 extraction performance (opt-in) ───────────────────────────────
+    fast_extraction: bool = False,
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
@@ -202,6 +204,20 @@ async def run_pipeline(
 
         tabular_extensions: File extensions to process via tabular pipeline (default: `.csv`, `.xlsx`, `.xls`).
         tabular_delimiter: Delimiter character for CSV tabular files.
+        fast_extraction: Opt-in, resolved once per call and passed explicitly through
+            every layer down to Stage 1 — never read from global config, by design,
+            so that concurrent `run_pipeline()` calls with different values never
+            interfere with each other. When `True`, Stage 1 extraction runs chunks
+            in parallel and defers cross-chunk hierarchy resolution to a single
+            post-extraction consolidation LLM call instead of incremental
+            deterministic prefix-matching. This can reduce Stage 1 wall-clock time
+            substantially for multi-chunk documents, but concentrates
+            hierarchy-correctness risk into one LLM call — a degenerate or
+            partially-failed consolidation response has a larger blast radius than
+            the default per-chunk behavior. Recommended only after validating output
+            quality against representative documents. Default: `False` (safe,
+            unchanged legacy behavior). Raises `ValueError` if `True` while
+            `"extraction"` is not in `stages`.
 
     Returns:
         PipelineResult containing stage metrics, execution flags, and duration.
@@ -345,6 +361,14 @@ async def run_pipeline(
         effective_stages = [s for s in effective_stages if s != "preprocess"]
         logger.info(
             "Skipping 'preprocess': extraction_input_dir='%s'", extraction_input_dir
+        )
+
+    # ── 9b. fast_extraction requires 'extraction' in stages — checked after
+    # the skip logic above, which may have just removed 'extraction' from
+    # effective_stages (e.g. ingestion_input_dir/extraction_input_dir skips). ──
+    if fast_extraction and "extraction" not in effective_stages:
+        raise ValueError(
+            "fast_extraction=True has no effect unless 'extraction' is included in stages."
         )
 
     # ── 10. Replaces pre-flight check ─────────────────────────────────────────
@@ -536,6 +560,7 @@ async def run_pipeline(
                         only_unannotated=only_unannotated,
                         only_unextracted=only_unextracted,
                         on_partial_failure=on_partial_failure,
+                        fast_extraction=fast_extraction,
                     )
                     for u in units
                 ],
@@ -682,6 +707,7 @@ async def _process_document_unit(
     model_class: str | None,
     only_unannotated: bool,
     only_unextracted: bool,
+    fast_extraction: bool,
     on_partial_failure: Literal["abort", "continue", "warn"] = "abort",
 ) -> UnitResult:
     """Process a single ``DocumentUnit`` end-to-end through whichever of
@@ -752,6 +778,10 @@ async def _process_document_unit(
             ``True``).
         only_unannotated: Forwarded to ``run_annotation()``.
         only_unextracted: Forwarded to ``run_entity_extraction()``.
+        fast_extraction: Forwarded to ``extract_one_intermediate()`` / ``extract_one_file()``
+            at the Stage 1 call sites below. Resolved once per ``run_pipeline()`` call
+            and passed explicitly all the way down — never read from global config.
+            See ``run_pipeline()``'s docstring for the full tradeoff explanation.
         on_partial_failure: Controls whether this unit keeps advancing to its next requested
             stage after ``annotation`` or ``entity_extraction`` reports
             ``nodes_failed > 0`` for it. ``"abort"`` (default) stops the unit
@@ -840,11 +870,13 @@ async def _process_document_unit(
             if "extraction" in effective_stages:
                 extraction_out = Path(extraction_output_dir) if extraction_output_dir else None
                 if unit.kind == "raw_file":
-                    doc_obj = await extract_one_intermediate(intermediate_doc, extraction_out)
+                    doc_obj = await extract_one_intermediate(
+                        intermediate_doc, extraction_out, fast_extraction=fast_extraction
+                    )
                 elif unit.kind == "extraction_json":
                     extraction_in = Path(extraction_input_dir) if extraction_input_dir else None
                     doc_obj = await extract_one_file(
-                        unit.source_path, extraction_out, extraction_in
+                        unit.source_path, extraction_out, extraction_in, fast_extraction=fast_extraction
                     )
 
                 if doc_obj is None:
