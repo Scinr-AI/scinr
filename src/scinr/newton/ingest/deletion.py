@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from scinr.newton.config import get_config
 from scinr.newton.ingest.config import get_driver
 from scinr.newton.results import DeletionResult
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
@@ -130,7 +131,8 @@ def _run_cascade_delete(driver, path: str, version: int | None) -> dict[str, int
     """
     def _do_delete() -> dict[str, int]:
         local_counters = dict.fromkeys(_CASCADE_COUNTER_FIELDS, 0)
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             with session.begin_transaction() as tx:
                 try:
                     result = tx.run(_CASCADE_DELETE_QUERY, path=path, version=version)
@@ -178,7 +180,8 @@ def _run_gc_pass(driver, query: str, label: str) -> tuple[int, int]:
 
     def _do_gc_iteration() -> int:
         try:
-            with driver.session() as session:
+            cfg = get_config()
+            with driver.session(database=cfg.neo4j_database) as session:
                 return session.execute_write(lambda tx: tx.run(query).single()["borrados"])
         except Exception:
             logger.exception(
@@ -218,7 +221,8 @@ def _fetch_existing_versions(driver, path: str, version: int | None) -> list[int
     """
 
     def _do_query() -> list[int | None]:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             existence_result = session.run(_EXISTENCE_QUERY, path=path, version=version)
             return [record["version"] for record in existence_result]
 
@@ -237,7 +241,8 @@ def _fetch_raw_file_ids(driver, path: str, version: int | None) -> list[str]:
     """
 
     def _do_query() -> list[str]:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             result = session.run(_RAW_FILE_IDS_QUERY, path=path, version=version)
             return [record["raw_file_id"] for record in result]
 

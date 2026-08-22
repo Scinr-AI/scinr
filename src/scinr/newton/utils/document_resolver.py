@@ -11,6 +11,8 @@ import logging
 
 from neo4j import AsyncDriver, Driver
 
+from scinr.newton.config import get_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,7 +44,8 @@ def resolve_leaf_document_names(driver: Driver, document_name: str) -> list[str]
       ELSE [root.name]
     END AS names_to_process
     """
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         result = session.run(query, name=document_name)
         record = result.single()
 
@@ -96,7 +99,8 @@ async def resolve_leaf_document_names_async(
       ELSE [root.name]
     END AS names_to_process
     """
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(query, name=document_name)
         record = await result.single()
 

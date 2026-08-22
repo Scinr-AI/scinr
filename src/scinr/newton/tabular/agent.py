@@ -7,6 +7,7 @@ from pathlib import Path
 
 from neo4j import Driver
 
+from scinr.newton.config import get_config
 from scinr.newton.tabular.graph import tabular_graph
 from scinr.newton.tabular.state import TabularState
 
@@ -47,7 +48,8 @@ async def run_tabular_agent(
     )
 
     # Step 1: create Document node + folder hierarchy
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         with session.begin_transaction() as tx:
             try:
                 if "/" in doc_path:

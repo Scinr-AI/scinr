@@ -66,7 +66,8 @@ async def fetch_nodes_to_annotate(
            n.appearance_order AS appearance_order,
            coalesce(n.theme, 'default') AS theme
     """
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(query, doc_name=document_name)
         return await result.data()
 
@@ -387,7 +388,8 @@ async def fetch_node_context(
         node_id, full_id, title, role, info_units, children,
         depth, depth_limit_reached.
     """
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         return await _fetch_node_context_with_session(
             session=session,
             full_node_id=full_node_id,
@@ -437,8 +439,8 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
 
     field_count = 0
     agg_count = 0
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # ── 4. Create / update CatalogModel nodes ─────────────────────────────
         for model_name, cls in all_models.items():
             description = ThemeRegistry._get_docstring_description(cls, full_docstring=get_config().full_docstring)
@@ -688,8 +690,8 @@ async def ensure_theme_structure(driver: AsyncDriver, registry: ThemeRegistry) -
     Idempotent (uses MERGE). Call once at agent startup alongside ensure_catalog_models.
     """
     structure = registry.get_neo4j_theme_structure()
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # Create all Theme nodes
         for item in structure:
             await session.run(
@@ -865,8 +867,8 @@ async def write_annotation(
         else "null",
     )
     timestamp = datetime.now(UTC).isoformat()
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # ── Guard: verify StructureNode exists ────────────────────────────
         result = await session.run(
             "MATCH (n:StructureNode {id: $node_id}) RETURN count(n) AS cnt",
@@ -1113,9 +1115,9 @@ async def write_manual_annotation(
         Number of StructureNodes updated. Returns 0 if no qualifying nodes are found.
     """
     timestamp = datetime.now(UTC).isoformat()
-
+    cfg = get_config()
     # ── 1. Fetch all StructureNodes with at least one InfoUnit ────────────────
-    async with driver.session() as session:
+    async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(
             """
             MATCH (d:Document {name: $doc_name, latest: true})
@@ -1134,9 +1136,9 @@ async def write_manual_annotation(
             document_name,
         )
         return 0
-
+    cfg = get_config()
     # ── 2. For each node: clear stale subgraphs, write new ModelDecision ─────
-    async with driver.session() as session:
+    async with driver.session(database=cfg.neo4j_database) as session:
         for full_node_id in node_ids:
             decision_uid = _make_uid(
                 "manual_model_decision",
@@ -1253,7 +1255,8 @@ async def fetch_document_context_instructions(
         MATCH (d:Document {name: $document_name, latest: true})
         RETURN d.context_instructions AS context_instructions
     """
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(query, document_name=document_name)
         record = await result.single()
         if record is None:

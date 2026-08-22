@@ -53,6 +53,7 @@ from typing import Any
 from neo4j import AsyncDriver
 from pydantic import BaseModel
 
+from scinr.newton.config import get_config
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.uid import make_instance_uid as _make_instance_uid
 from scinr.newton.utils.uid import make_uid as _make_uid
@@ -203,8 +204,8 @@ async def write_extraction_subgraph(
     from datetime import datetime
 
     timestamp = datetime.now(UTC).isoformat()
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # ── Guard: verify StructureNode exists ────────────────────────────
         result = await session.run(
             "MATCH (n:StructureNode {id: $nid}) RETURN count(n) AS cnt",
@@ -882,8 +883,8 @@ async def write_triple_subgraph(
 
     # Collect all TripleItem instances from the `triples` field
     triple_items = getattr(triple_instance, "triples", None) or []
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # ── Guard: verify StructureNode exists ────────────────────────────
         result = await session.run(
             "MATCH (n:StructureNode {id: $nid}) RETURN count(n) AS cnt",
