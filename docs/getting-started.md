@@ -118,37 +118,37 @@ PROMPT_CACHING_ENABLED=true
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
 
 # ─── PDF Conversion (Mistral OCR) ───────────────────────────────────────────
 MISTRAL_API_KEY=your_mistral_api_key
 
 # ─── Storage (optional) ─────────────────────────────────────────────────────
-STORAGE_BACKEND=none
-MONGODB_URI=mongodb://localhost:27017
-MONGODB_DATABASE=scinr
+STORAGE_BACKEND=mongodb
+MONGO_URI=mongodb://user:pass@localhost:27017
 
 # ─── Pipeline ───────────────────────────────────────────────────────────────
-EXTRACTION_BATCH_SIZE=1
-LLM_CONCURRENCY=4
+EXTRACTION_BATCH_SIZE=3
+LLM_CONCURRENCY=32
 ```
 
 ### Required fields for a first run
 
 | Variable | What to set |
 | :--- | :--- |
-| `MODEL_ID` | Your LLM model identifier. For Bedrock: `us.anthropic.claude-sonnet-4-6`. Not used if you pass `llm=` directly to `configure()`. |
+| `NEO4J_URI` | The uri from your Neo4j database. |
 | `NEO4J_USER` | Your Neo4j username (usually `neo4j`). |
 | `NEO4J_PASSWORD` | Your Neo4j password. |
+| `NEO4J_DATABASE` | Your Neo4j database name.(usually `neo4j`). |
 
 ### Optional fields
 
 | Variable | What to set |
 | :--- | :--- |
-| `AWS_DEFAULT_REGION` | AWS region for Bedrock (default: `us-east-1`). |
-| `REPAIR_MODEL_ID` | A cheaper/faster model for JSON repair (default: falls back to `MODEL_ID`). |
 | `MISTRAL_API_KEY` | Mistral API key for PDF OCR. |
 | `STORAGE_BACKEND` | `none` (default) or `mongodb` for persistent storage. |
-| `PROMPT_FAMILY` | `generic` (default), `claude`, or `gpt_reasoning`. |
+| `EXTRACTION_BATCH_SIZE` | It indicates the number of pages processed in the same call. The recommended values for most use cases are 2 or 3. |
+| `LLM_CONCURRENCY` | It indicates the number of llm calls that are done in parallel. You can start with 32, but it depends mainly from the rate limits from your provider. |
 
 > **Note:** `python-dotenv` is included as a core dependency. When you call `configure()`, it automatically loads variables from a `.env` file in your current working directory. You do not need to import `dotenv` manually.
 
@@ -165,11 +165,7 @@ Create a directory and place some documents in it. `scinr` supports the followin
 | PDF | `.pdf` | Text-based via `pdfplumber`; OCR via Mistral API |
 | Word | `.docx` | Full text + structure extraction |
 | Excel | `.xlsx`, `.xls` | Routed to tabular pipeline automatically |
-| PowerPoint | `.pptx` | Slide text extraction |
 | CSV | `.csv` | Routed to tabular pipeline automatically |
-| HTML | `.html` | Cleaned and parsed |
-| JSON | `.json` | API responses, structured data |
-| Text | `.txt`, `.md` | Plain text |
 
 ```bash
 mkdir -p raw_docs
@@ -178,7 +174,7 @@ mkdir -p raw_docs
 
 ### Step 2: Run the pipeline
 
-The following script configures `scinr` and runs the full 6-stage pipeline on all documents in `raw_docs/`:
+The following script configures `scinr` and runs the full pipeline on all documents in `raw_docs/`:
 
 ```python
 import asyncio
@@ -190,10 +186,14 @@ async def main():
     #   1. Explicit arguments (highest priority)
     #   2. Environment variables / .env file
     #   3. Hard-coded defaults
+    llm = ChatBedrockConverse(...)
+
     configure(
+        llm=llm,
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
-        neo4j_password="your_password",
+        neo4j_password="password",
+        mistral_api_key="", # Needed por pdfs OCR
     )
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -223,60 +223,14 @@ python run_ingestion.py
 
 The full pipeline runs these stages in order:
 
-1. **Preprocess** — Converts raw files to an intermediate JSON/Markdown format.
+1. **Preprocess** — Converts raw files to an intermediate JSON with the content transformed into Markdown.
 2. **Extraction** — Uses the LLM to parse document structure and extract hierarchical sections.
-3. **Ingestion** — Writes document and structure nodes into Neo4j.
+3. **Ingestion** — Writes document, structure nodes and Info Units into Neo4j.
 4. **Annotation** — An LLM agent assigns an extraction model to each structural node.
 5. **Entity Extraction** — Extracts typed Pydantic entities from annotated nodes and writes them as graph subgraphs.
-6. **Tabular** — If `.csv`, `.xlsx`, or `.xls` files are detected in `input_raw`, they are processed through a separate tabular pipeline with LLM-powered normalization.
 
-### Using a specific LLM provider
+1a. **Tabular** — If `.csv`, `.xlsx`, or `.xls` files are detected in `input_raw`, they are processed through a separate tabular pipeline with LLM-powered normalization.
 
-If you prefer to construct the LLM explicitly rather than relying on `MODEL_ID`:
-
-#### OpenAI
-
-```python
-from langchain_openai import ChatOpenAI
-from scinr.newton import configure, run_pipeline
-
-configure(
-    llm=ChatOpenAI(model="gpt-4o"),
-    neo4j_user="neo4j",
-    neo4j_password="your_password",
-)
-```
-
-#### AWS Bedrock
-
-```python
-from langchain_aws import ChatBedrockConverse
-from scinr.newton import configure, run_pipeline
-
-configure(
-    llm=ChatBedrockConverse(
-        model="us.anthropic.claude-sonnet-4-6",
-        region_name="us-east-1",
-        max_tokens=65536,
-        temperature=0,
-    ),
-    neo4j_user="neo4j",
-    neo4j_password="your_password",
-)
-```
-
-#### Ollama
-
-```python
-from langchain_ollama import ChatOllama
-from scinr.newton import configure, run_pipeline
-
-configure(
-    llm=ChatOllama(model="llama3"),
-    neo4j_user="neo4j",
-    neo4j_password="your_password",
-)
-```
 
 ### Running individual stages
 
@@ -307,25 +261,28 @@ After the pipeline completes, your data is available in Neo4j. Here are ways to 
 ```cypher
 -- List all ingested documents
 MATCH (d:Document)
-RETURN d.document_name AS name, d.version AS version, d.file_path AS path
-ORDER BY d.document_name;
+RETURN d.name AS name, d.version AS version, d.path AS path
+ORDER BY d.name;
 
 -- Count structure nodes per document
-MATCH (d:Document)-[:HAS_STRUCTURE_NODE]->(s:StructureNode)
-RETURN d.document_name AS document, count(s) AS nodes
+MATCH (d:Document)-[:HAS_STRUCTURE|HAS_CHILD]->(s:StructureNode)
+RETURN d.name AS document, count(s) AS nodes
 ORDER BY nodes DESC;
 
--- View annotated nodes with their assigned model
-MATCH (s:StructureNode)
-WHERE s.model_class IS NOT NULL
-RETURN s.text AS text, s.model_class AS model, count(s) AS count
-ORDER BY count DESC;
+--NOTE: The root structure nodes are connected through HAS_STRUCTURE with the Document, while structure nodes are conected to other child structure nodes through HAS_CHILD relationship.  
 
--- Explore extracted entities and their relationships
-MATCH (e)
-WHERE head(labels(e)) <> 'Document' AND head(labels(e)) <> 'StructureNode'
-RETURN head(labels(e)) AS type, count(e) AS count
-ORDER BY count DESC;
+-- View annotated nodes with their assigned model and Info Units
+MATCH (s:StructureNode)-[:HAS_MODEL_DECISION]->(m:ModelDecision)
+MATCH (s)-[:HAS_INFO_UNIT]->(i:InfoUnit)
+WHERE m.matched_model_class IS NOT NULL
+RETURN s.node_id as Structure_Node_ID, s.title as Structure_Node_Title, m.matched_model_class AS model, collect(i.description) as Info_Unit_Descriptions
+ORDER BY s.node_id;
+
+-- NOTE: You can check with this query how the matched model adapts to the information contained in the structure node title and the Info Unit Descriptions.
+
+-- Explore extracted Instances and their relationships
+MATCH (s:StructureNode)-[rsm:HAS_EXTRACTION]->(m:ExtractionResult)-[rmm2*..7]->(m2:ModelInstance)
+return s,rsm,m,rmm2, m2
 ```
 
 ### Via Python
@@ -338,7 +295,7 @@ async def verify():
         "bolt://localhost:7687",
         auth=("neo4j", "your_password")
     ) as driver:
-        async with driver.session() as session:
+        async with driver.session(database=cfg.neo4j_database) as session:
             result = await session.run(
                 "MATCH (d:Document) RETURN count(d) AS doc_count"
             )
@@ -375,13 +332,12 @@ if result.ingestion:
 
 ### `ConfigurationError: No LLM configured`
 
-You must either:
-- Set `MODEL_ID` in your `.env` file (for AWS Bedrock), or
+You must:
 - Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance.
 
 ### `ConfigurationError: Neo4j username/password is not configured`
 
-Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`. Alternatively, use `NEO4J_AUTH=neo4j/password` as a combined format.
+Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`.
 
 ### Neo4j connection refused
 
@@ -392,27 +348,17 @@ Make sure your Neo4j instance is running and accessible:
 python -c "from neo4j import GraphDatabase; d = GraphDatabase.driver('bolt://localhost:7687', auth=('neo4j', 'password')); d.verify_connectivity(); d.close(); print('OK')"
 ```
 
-### `ImportError: langchain-aws is not installed`
-
-If you set `MODEL_ID` but haven't installed the Bedrock extra:
-
-```bash
-pip install "scinr[bedrock]"
-```
 
 ### PDFs fail to process
 
 PDF processing requires either:
 - A Mistral API key (for OCR) set via `MISTRAL_API_KEY` in your `.env`, or
-- The PDF must contain extractable text (processed via `pdfplumber` without OCR).
-
-If you see OCR-related errors and don't have a Mistral key, try text-based PDFs or set `MISTRAL_API_KEY`.
 
 ### `No documents discovered for this run`
 
 Check that:
 - The `input_raw` directory exists and contains supported file types.
-- File extensions are recognized (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.pptx`, `.html`, `.json`, `.txt`, `.md`).
+- Recognized file extensions are: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`.
 - The path is correct (relative paths are resolved from the current working directory).
 
 ### LLM calls are slow or rate-limited
