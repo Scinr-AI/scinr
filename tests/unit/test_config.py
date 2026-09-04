@@ -283,7 +283,7 @@ class TestMistralOcrConfig:
         )
         assert cfg.mistral_ocr_safe_max_pages == 900
         assert cfg.mistral_ocr_safe_max_bytes == 45 * 1024 * 1024
-        assert cfg.mistral_ocr_max_retries == 3
+        assert cfg.mistral_ocr_max_retries == 15
         assert cfg.mistral_ocr_retry_backoff_seconds == 2.0
         assert cfg.mistral_ocr_chunk_concurrency == 1
         assert cfg.mistral_ocr_error_strategy == "fail_fast"
@@ -430,3 +430,57 @@ class TestFullDocstringConfig:
             neo4j_password=_DUMMY_PASS,
         )
         assert cfg.full_docstring is True
+
+
+class TestConsolidationMaxInputTokensConfig:
+    """Tests for the consolidation_max_input_tokens default — see
+    structure_consolidation.py's sliding-window batching redesign, which
+    relies on this ceiling always being a concrete int by default (not
+    None), to size its batches.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_consolidation_max_input_tokens_env(self, monkeypatch):
+        monkeypatch.delenv("CONSOLIDATION_MAX_INPUT_TOKENS", raising=False)
+
+    def test_scinr_config_dataclass_default_is_65536(self):
+        """The bare ScinrConfig dataclass default (not going through
+        configure()) is 65536, not None.
+        """
+        cfg = ScinrConfig()
+        assert cfg.consolidation_max_input_tokens == 65536
+
+    def test_configure_resolves_to_65536_without_explicit_arg_or_env(self):
+        """configure() with neither the kwarg nor the env var set resolves
+        consolidation_max_input_tokens to 65536 (not None).
+        """
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.consolidation_max_input_tokens == 65536
+
+    def test_explicit_arg_override_is_respected(self):
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+            consolidation_max_input_tokens=50000,
+        )
+        assert cfg.consolidation_max_input_tokens == 50000
+
+    def test_env_var_is_respected_when_no_explicit_arg(self, monkeypatch):
+        monkeypatch.setenv("CONSOLIDATION_MAX_INPUT_TOKENS", "20000")
+        llm = _make_mock_llm()
+        cfg = configure(
+            llm=llm,
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.consolidation_max_input_tokens == 20000

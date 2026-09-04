@@ -45,7 +45,15 @@ You receive three types of input:
 3. <active_hierarchy>: A compact representation of the currently open
    structural path at the start of this batch (the "rightmost spine").
    Use this to correctly assign parent_id for orphaned nodes whose
-   parent is not visible in the current batch."""
+   parent is not visible in the current batch.
+
+You may also receive an optional fourth input:
+
+4. <extraction_mode>: Present only when this batch is processed in
+   isolation from the rest of the document (fast/parallel mode). Its
+   content explains how to adjust the ambiguous-role fallback in that
+   case. Absent entirely in the normal sequential path — do not assume
+   any particular extraction mode when this tag is not present."""
 
 
 def build_extraction_prompt(theme_section: str) -> str:

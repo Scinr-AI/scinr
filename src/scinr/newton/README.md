@@ -77,6 +77,9 @@ configure(
 | `extraction_batch_size` | `int \| None` | `EXTRACTION_BATCH_SIZE` | `1` | Pages processed per extraction chunk (sliding window step). |
 | `llm_concurrency` | `int \| None` | `LLM_CONCURRENCY` | `4` | Max concurrent LLM calls (asyncio semaphore size). |
 | `neo4j_concurrency` | `int \| None` | `NEO4J_CONCURRENCY` | `10` | Max concurrent Neo4j session writes during annotation and entity extraction. |
+| `consolidation_token_safety_margin` | `float \| None` | `CONSOLIDATION_TOKEN_SAFETY_MARGIN` | `0.75` | Fraction of `max_tokens` used as the output-token ceiling for the Stage 1 `fast_extraction` consolidation LLM call, when `consolidation_max_output_tokens` is unset. |
+| `consolidation_max_output_tokens` | `int \| None` | `CONSOLIDATION_MAX_OUTPUT_TOKENS` | `None` | Explicit output-token ceiling for the consolidation call's decisions array. Derived from `max_tokens * consolidation_token_safety_margin` when unset. |
+| `consolidation_max_input_tokens` | `int \| None` | `CONSOLIDATION_MAX_INPUT_TOKENS` | `65536` | Input-token ceiling governing the batch size of the consolidation call's sliding-window algorithm: `all_chunks` is processed in contiguous batches (each batch's backward buffer is only the immediately preceding batch) kept under this ceiling, instead of sending the full document pool in one call. Passing `None` explicitly (bypassing `configure()`) skips the ceiling check as a defensive fallback only. |
 | `log_level` | `str` | — | `"INFO"` | Logging level string. |
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
@@ -121,6 +124,7 @@ print(result.success, result.total_duration_seconds)
 | `replaces` | `str \| None` | `None` | `document_name` of an existing document superseded by newly ingested content. Verified in Neo4j before stages run. Mutually exclusive with `update_mode`. |
 | `parallel_docs` | `int` | `1` | Maximum documents processed concurrently across all stages, including tabular. Must be ≥ 1. |
 | `on_partial_failure` | `Literal["abort", "continue", "warn"]` | `"abort"` | Behaviour when a stage returns `success=False`. `"abort"`: stop immediately. `"continue"`: proceed. `"warn"`: log warning and proceed. |
+| `fast_extraction` | `bool` | `False` | Opt-in: runs Stage 1 extraction chunks in parallel with a deferred, single-call consolidation step instead of the default sequential per-chunk loop. Raises `ValueError` if `True` while `"extraction"` is not in `stages`. See [Performance Tuning](../../../docs/user-guides/performance-tuning.md#fast-extraction-fast_extraction) for the full trade-off. |
 | `tabular_extensions` | `set[str] \| None` | `None` | File extensions treated as tabular. Defaults to `{'.csv', '.xlsx', '.xls'}`. |
 | `tabular_delimiter` | `str \| None` | `None` | CSV field delimiter forwarded to the tabular agent. Uses agent default when `None`. |
 
@@ -136,7 +140,7 @@ All stage functions are async and importable from `scinr.newton`:
 
 #### `run_preprocess(input_raw, output_dir=None, context_instructions=None)`
 
-**Stage 0.** Converts raw source files in `input_raw` to intermediate JSON using the registered converters. When `output_dir` is `None`, intermediate documents are returned in memory only. Returns `tuple[StageResult, list[IntermediateDocument]]`.
+**Stage 0.** Converts raw source files in `input_raw` to intermediate JSON using the registered converters. When `output_dir` is `None`, intermediate documents are returned in memory only. Returns `tuple[StageResult, list[IntermediateDocument]]`. With `parallel_docs > 1`, conversions run with real parallelism — dispatched to a worker thread for sync converters or awaited natively for async converters (e.g. `PdfConverter`) — instead of blocking the event loop.
 
 #### `run_extraction(input_folder=None, output_folder=None, intermediate_documents=None, parallel_docs=1)`
 

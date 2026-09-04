@@ -418,6 +418,31 @@ Each document unit is bounded by this semaphore for its entire duration across a
 
 > **Default is 5**, not 1. The pipeline processes up to 5 documents concurrently by default.
 
+### `fast_extraction` — Parallel Stage 1 Extraction (opt-in)
+
+**Type:** `bool`  **Default:** `False`
+
+Controls whether Stage 1 extraction runs its sliding-window chunks sequentially
+(default) or in parallel with a deferred, single-call consolidation step. Resolved
+once per `run_pipeline()` call and passed explicitly through every layer down to
+Stage 1 — never read from global config — so that concurrent `run_pipeline()` calls
+with different values never interfere with each other.
+
+```python
+# Opt into parallel Stage 1 extraction
+result = await run_pipeline(
+    input_raw="./raw_docs",
+    stages=["preprocess", "extraction", "ingestion"],
+    fast_extraction=True,
+)
+```
+
+Raises `ValueError` if `fast_extraction=True` is passed while `"extraction"` is not
+included in `stages` — the flag has no effect without Stage 1 running.
+
+See [Performance Tuning: Fast Extraction](performance-tuning.md#fast-extraction-fast_extraction)
+for the full trade-off and risk explanation before enabling this in production.
+
 ### `on_partial_failure` — Error Handling Strategy
 
 **Type:** `Literal["abort", "continue", "warn"]`  **Default:** `"warn"`

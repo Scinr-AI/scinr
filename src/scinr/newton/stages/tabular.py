@@ -9,6 +9,7 @@ import logging
 import time
 from pathlib import Path
 
+from scinr.newton.config import get_config
 from scinr.newton.ingest.config import get_async_driver, get_driver
 from scinr.newton.ingest.schema import setup_schema
 from scinr.newton.results import DocumentResult, StageResult
@@ -127,8 +128,8 @@ async def run_tabular_pipeline(
     
         await ensure_theme_structure_once(async_driver, theme_registry)
         logger.info("Setup of theme and catalog complete")
-
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             logger.info("Verifying previous documents")
             if update_mode:
                 result = session.run(

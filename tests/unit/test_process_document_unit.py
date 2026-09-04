@@ -66,6 +66,7 @@ def _base_kwargs(**overrides: object) -> dict:
         model_class=None,
         only_unannotated=False,
         only_unextracted=False,
+        fast_extraction=False,
         on_partial_failure="abort",
     )
     kwargs.update(overrides)
@@ -152,7 +153,7 @@ class TestFullSuccessRawFile:
         assert result.stage_results["entity_extraction"] == DocumentResult("doc1", 2, 0, [])
 
         mock_convert_one.assert_awaited_once()
-        mock_extract_one_intermediate.assert_awaited_once_with(intermediate_doc, None)
+        mock_extract_one_intermediate.assert_awaited_once_with(intermediate_doc, None, fast_extraction=False)
         mock_extract_one_file.assert_not_called()
         mock_ingest_one.assert_awaited_once_with(extracted_doc, kwargs["sync_driver"], False, 1)
         mock_ingest_one_from_path.assert_not_called()

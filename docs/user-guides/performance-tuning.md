@@ -174,21 +174,80 @@ configure(extraction_batch_size=1)  # Default: 1 page per chunk
 | Very long documents (100+ pages) | 2-3 | Reduces call count significantly |
 | Documents with complex tables | 1 | Tables need focused context; grouping may lose detail |
 
+### Fast Extraction (`fast_extraction`)
+
+**Default:** `False`  **Passed to:** `run_pipeline(fast_extraction=...)` — a per-call
+`run_pipeline()` argument, not a `configure()` setting or environment variable
+(see [Running the Pipeline](running-pipeline.md#fast_extraction) for why).
+
+By default, Stage 1 extraction processes chunks **sequentially**: each chunk's LLM
+call sees the deterministic `active_hierarchy` built from every chunk processed so
+far, and the growing document tree is merged one chunk at a time
+(`compact_extraction()`). When `fast_extraction=True`, all chunks are extracted **in
+parallel** instead — each chunk is extracted independently, with cross-chunk
+hierarchy resolution deferred to a single post-extraction consolidation LLM call
+that decides every "orphan" node's true parent from the full cross-chunk node pool.
+
+```python
+result = await run_pipeline(
+    input_raw="files/",
+    stages=["preprocess", "extraction", "ingestion"],
+    fast_extraction=True,  # opt-in: parallel Stage 1 chunks + consolidation
+)
+```
+
+Two new `configure()` settings tune the consolidation call's token-ceiling
+estimation (used only when `fast_extraction=True`):
+
+```python
+configure(
+    consolidation_token_safety_margin=0.75,     # fraction of max_tokens reserved for output
+    consolidation_max_output_tokens=None,       # explicit override; derived from the margin above if unset
+    consolidation_max_input_tokens=None,        # explicit input-size ceiling; skipped (no check) if unset
+)
+```
+
+#### Trade-offs
+
+| Aspect | `fast_extraction=False` (default) | `fast_extraction=True` |
+| :--- | :--- | :--- |
+| Stage 1 wall-clock time | Sequential — each chunk waits for the previous one | Parallel — can reduce wall-clock time substantially for multi-chunk documents |
+| Hierarchy resolution | Incremental, deterministic, per-chunk (`compact_extraction()`) | Deferred to one consolidation LLM call across the whole document |
+| Failure blast radius | A bad chunk only affects that chunk's own nodes | A degenerate or partially-failed consolidation response affects every orphan's placement at once |
+| Risk profile | Safe, well-tested legacy behavior | Concentrates hierarchy-correctness risk into one LLM call — recommended only after validating output quality against representative documents |
+
+**Risk note:** When `True`, Stage 1 extraction runs chunks in parallel and defers
+cross-chunk hierarchy resolution to a single post-extraction consolidation LLM call
+instead of incremental deterministic prefix-matching. This can reduce Stage 1
+wall-clock time substantially for multi-chunk documents, but concentrates
+hierarchy-correctness risk into one LLM call — a degenerate or partially-failed
+consolidation response has a larger blast radius than the default per-chunk
+behavior. Recommended only after validating output quality against representative
+documents. Default: `False` (safe, unchanged legacy behavior).
+
+**Checkpoint artifact note:** While the Map phase runs, a `map-checkpoint-{doc_name}.json`
+sibling file is written next to the eventual `extract-{doc_name}.json` output. It is
+deleted automatically once consolidation succeeds, but if the consolidation call fails
+(or the process crashes) after the Map phase completes, that checkpoint file may be
+left behind in the output directory. This is currently a manual-recovery artifact
+only — there is no automatic resume logic in this version, so a leftover checkpoint
+file can simply be deleted once you've re-run extraction for that document.
+
 ### Normalization Batch Size (`normalization_batch_size`)
 
-**Default:** `5`  **Env var:** `NORMALIZATION_BATCH_SIZE`
+**Default:** `3`  **Env var:** `NORMALIZATION_BATCH_SIZE`
 
 The number of normalization entries grouped per LLM call in the tabular pipeline. Each call sends multiple table entries to the LLM for structural normalization.
 
 ```python
-configure(normalization_batch_size=5)  # Default: 5 entries per call
+configure(normalization_batch_size=3)  # Default: 3 entries per call
 ```
 
 #### Trade-offs
 
 | Value | Pros | Cons |
 | :--- | :--- | :--- |
-| `3-5` (default) | Balanced quality and cost | Moderate number of calls |
+| `3` (default) | Balanced quality and cost | Moderate number of calls |
 | `10-15` | Fewer calls, lower cost | Larger context per call |
 | `15-20` | Maximum cost savings | Risk of context overflow |
 | `20+` | Fewest calls | May exceed model context window |
@@ -376,7 +435,7 @@ configure(
     neo4j_concurrency=5,         # Light Neo4j load
     neo4j_sync_concurrency=5,    # Light sync load
     extraction_batch_size=1,     # Maximum quality
-    normalization_batch_size=5,  # Default
+    normalization_batch_size=3,  # Default
     prompt_caching_enabled=True, # Still useful for small batches
 )
 
@@ -480,7 +539,7 @@ configure(
     neo4j_concurrency=30,        # Max Neo4j throughput
     neo4j_sync_concurrency=25,   # Max sync throughput
     extraction_batch_size=1,     # Smaller batches = faster per call
-    normalization_batch_size=5,  # Default batch size
+    normalization_batch_size=3,  # Default batch size
     mistral_ocr_chunk_concurrency=4,  # Parallel OCR
     mistral_ocr_error_strategy="best_effort",  # Don't wait on failures
 )

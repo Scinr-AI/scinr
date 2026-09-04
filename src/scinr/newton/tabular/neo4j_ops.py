@@ -13,17 +13,18 @@ from typing import TYPE_CHECKING, Any
 from neo4j import AsyncDriver
 from pydantic import BaseModel
 
+from scinr.newton.config import get_config
 from scinr.newton.entity_extraction.schema_composer import _to_snake_case
 from scinr.newton.tabular.normalization.detector import (
     extract_source_values_from_dict,
     get_normalization_specs,
     instance_has_normalizable_fields,
 )
+from scinr.newton.tabular.normalization.engine import NormalizationEngine
 from scinr.newton.tabular.normalization.models import NormalizationEntry
 from scinr.newton.tabular.reader import row_to_markdown
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.uid import make_uid
-from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
 if TYPE_CHECKING:
     from scinr.newton.annotation.models import AnnotationDecision
@@ -87,9 +88,10 @@ async def write_tabular_subgraph(
     # Step 2: delete existing subgraph if update_mode
     if update_mode:
         await delete_tabular_subgraph(driver, doc_path, resolved_version, sheet_index)
-
+    
+    cfg = get_config()
     # Step 3: create Table StructureNode and link to Document
-    async with driver.session() as session:
+    async with driver.session(database=cfg.neo4j_database) as session:
         tx = await session.begin_transaction()
         try:
             await tx.run(
@@ -179,7 +181,6 @@ async def write_tabular_subgraph(
             primary_cls = None
 
     # Step 7: process rows — bifurcate based on normalization
-    from scinr.newton.config import get_config
 
     cfg = get_config()
     has_normalization = (
@@ -290,7 +291,6 @@ async def _write_tabular_with_normalization(
        d. Write to Neo4j in batches
     4. Write any remaining rows (normalization failures) with None
     """
-    from scinr.newton.config import get_config
     from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
     cfg = get_config()
@@ -617,7 +617,8 @@ async def _write_row_batch(
             )
 
     # One transaction: create Row nodes + InfoUnits + HAS_MODEL_DECISION links (UNWIND)
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         tx = await session.begin_transaction()
         try:
             await tx.run(
@@ -695,7 +696,6 @@ async def _write_row_batch(
 
         # ── Phase 2: Normalization hook (inline, for standard path) ────────────
         if primary_cls is not None:
-            from scinr.newton.config import get_config
             from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
             cfg = get_config()
@@ -1390,8 +1390,8 @@ async def _write_raw_row_extraction(
         for k, v in row_dict.items()
         if k and v
     }
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         # Idempotency: delete stale ExtractionResult only.
         # :Entity nodes are global singletons — never deleted here.
         await session.run(
@@ -1428,7 +1428,8 @@ async def _write_raw_row_extraction(
         # UID mirrors triple pipeline: keyed only on normalized value → global singleton
         entity_uid = make_uid("entity", normalized)
         try:
-            async with driver.session() as session:
+            cfg = get_config()
+            async with driver.session(database=cfg.neo4j_database) as session:
                 # Capture loop variables for the lambda closure
                 _query = f"""
                     MERGE (e:Entity {{uid: $uid}})
@@ -1479,8 +1480,8 @@ async def delete_tabular_subgraph(
     """
     table_node_id = f"table_{sheet_index + 1}"
     table_composite_id = f"{doc_path}::{resolved_version}::{table_node_id}"
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         tx = await session.begin_transaction()
         try:
             # 1. ModelInstance children under ExtractionResults on Rows

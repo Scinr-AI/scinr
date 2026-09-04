@@ -370,6 +370,12 @@ def _discover_document_names_dir_units(document_names_dir: str) -> list[Document
         except Exception as exc:
             logger.warning("Could not read document_name from '%s': %s", f, exc)
             continue
+        if not isinstance(data, dict):
+            logger.warning(
+                "Could not read document_name from '%s': expected a JSON object, "
+                "got %s — skipping.", f, type(data).__name__,
+            )
+            continue
         name = data.get("document_name")
         if not name or name in seen:
             continue

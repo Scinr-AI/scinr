@@ -36,8 +36,12 @@ Fulltext indexes (semantic search):
 """
 
 import logging
+import re
 
 from neo4j import Driver
+
+from scinr.newton.config import get_config
+from scinr.newton.exceptions import ConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -190,30 +194,35 @@ def setup_schema(driver: Driver) -> None:
     # ------------------------------------------------------------------
     # Best-effort Neo4j minimum version check (>= 4.4 required)
     # ------------------------------------------------------------------
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         try:
-            result = session.run(
+            record = session.run(
                 "CALL dbms.components() YIELD versions RETURN versions[0] AS version"
-            )
-            record = result.single()
+            ).single()
             if record:
-                version_str = record["version"]
+                version_str = str(record["version"])
                 parts = version_str.split(".")
                 major, minor = int(parts[0]), int(parts[1])
                 if (major, minor) < (4, 4):
-                    from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
-                        f"scinr-ingest requires Neo4j >= 4.4. "
-                        f"Please upgrade your Neo4j instance."
+                        "scinr-ingest requires Neo4j >= 4.4. "
+                        "Please upgrade your Neo4j instance."
                     )
+            else:
+                # Empty result (por ejemplo, Aura / formato no estándar).
+                # Best-effort: no bloqueamos la conexión.
+                logger.warning(
+                    "Could not determine Neo4j version (empty result); skipping compatibility check."
+                )
         except ConfigurationError:
             raise
-        except Exception:
-            pass  # version check is best-effort; proceed if query fails
+        except Exception as exc:
+            logger.warning("Could not verify Neo4j version: %s", exc)
 
     # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
-    with driver.session() as session:
+    with driver.session(database=cfg.neo4j_database) as session:
         try:
             session.execute_write(lambda tx: tx.run(
                 "DROP CONSTRAINT constraint_document_name IF EXISTS"
@@ -222,7 +231,7 @@ def setup_schema(driver: Driver) -> None:
         except Exception as exc:
             logger.warning("Could not drop constraint_document_name: %s", exc)
 
-    with driver.session() as session:
+    with driver.session(database=cfg.neo4j_database) as session:
         for name, cypher in _UNIQUE_CONSTRAINTS:
             logger.info("Ensuring unique constraint: %s", name)
             session.execute_write(lambda tx, q=cypher: tx.run(q))

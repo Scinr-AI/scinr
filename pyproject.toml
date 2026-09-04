@@ -1,6 +1,6 @@
 [project]
 name = "scinr"
-version = "0.3.3"
+version = "0.3.6"
 description = "AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,7 @@ dependencies = [
     "Pillow>=10.3",
     "pdfplumber>=0.11",
     "pypdf>=5.0",  # PDF splitting
+    "tiktoken>=0.13",  # token-count estimation for consolidation batching (o200k_base approximation)
 ]
 
 [project.optional-dependencies]

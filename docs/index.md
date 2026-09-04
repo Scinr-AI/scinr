@@ -1,56 +1,83 @@
 # scinr
 
-> **AI-Powered Document Knowledge Library for Life Sciences**
+> **AI-powered knowledge extraction for life sciences**
 
-`scinr` (`scinr.newton`) is a Python library that transforms unstructured and structured life sciences documents into queryable, connected knowledge graphs in **Neo4j** and optional document stores in **MongoDB**.
+`scinr` (`scinr.newton`) is a Python library for turning life sciences documents and tabular data into structured, queryable knowledge.
 
-It provides an async 6-stage pipeline that converts raw files into structured, annotated, and graph-connected domain entities — all driven by LLMs and Pydantic extraction models.
+For unstructured documents, `scinr` extracts domain entities and relationships and stores them as connected knowledge graphs in **Neo4j**, with optional document storage in **MongoDB**.
+
+It uses LLMs and Pydantic models to extract structured, domain-specific information from scientific content.
 
 ---
 
 ## Key Features
 
-* **6-Stage Async Pipeline** — Preprocess, extract, ingest, annotate, entity-extract, and normalize tabular data in a single orchestrated flow.
-* **Multi-Format Ingestion** — Supports `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`, `.json`, `.html`, and `.txt`.
-* **Tabular Pipeline with LLM Normalization** — Auto-detection, structural normalization, and LLM-powered entity extraction for scientific spreadsheets.
-* **Pydantic Extraction Models** — Define structured schemas for scientific target entities (e.g., compound synthesis, clinical trials, assays) with automatic graph annotations.
-* **Neo4j Knowledge Graph Output** — Automatically map extracted entities and triples into Neo4j subgraphs with document provenance.
-* **Optional MongoDB Storage** — Persist raw files, converted pages, and binary assets via GridFS.
-* **Agent-Ready Documentation** — Native support for [llms.txt](https://github.com/Scinr-AI/scinr/blob/main/llms.txt) and [llms-full.txt](https://github.com/Scinr-AI/scinr/blob/main/llms-full.txt) context windows for AI agents.
+* **5-stage document pipeline** — Preprocess, extract structure, ingest, annotate, and extract domain entities from unstructured documents.
+
+* **Tabular data pipeline** — Normalize scientific spreadsheets and extract structured entities from tabular data.
+
+* **Multi-format ingestion** — Supports .pdf, .docx, .xlsx, and .csv. Support for .pptx, .json, .xml, .html, and .txt is planned in the roadmap.
+
+* **Pydantic extraction models** — Define structured schemas for domain entities such as compounds, clinical trials, and assays.
+
+* **Neo4j knowledge graphs** — Store extracted entities and relationships with document provenance.
+
+* **Optional MongoDB storage** — Store raw files, converted documents, and binary assets using MongoDB/GridFS. Support for other database are planned in the roadmap.
+
+* **LLM-ready documentation** — Provides `llms.txt` and `llms-full.txt` files for AI coding agents and other LLM-based tools.
 
 ---
 
-## Pipeline Overview
+## Pipelines
 
-The ingestion pipeline processes documents through six stages:
+### Unstructured Documents
 
+Unstructured documents go through five stages:
+
+```text
+Raw Documents
+(.pdf, .docx, .pptx, .json, .html, .txt, ...)
+        │
+        ▼
+1. Preprocess
+   Convert files to a common representation
+        │
+        ▼
+2. Extraction
+   Parse sections, structure, and hierarchy
+        │
+        ▼
+3. Ingestion
+   Store document structure and provenance in Neo4j
+        │
+        ▼
+4. Annotation
+   Identify relevant content and prepare it for extraction
+        │
+        ▼
+5. Entity Extraction
+   Extract domain entities and relationships
+        │
+        ▼
+Knowledge Graph
 ```
-Raw Documents (.pdf, .docx, .pptx, .xlsx, .csv, .json, .html, .txt)
-                     │
-                     ▼
-        ┌─────────────────────────┐
-        │ 1. Preprocess           │  Format converters → JSON / Markdown
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ 2. Extraction           │  Section chunking & hierarchy parsing
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ 3. Ingestion            │  Document & structure nodes → Neo4j
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ 4. Annotation           │  LLM relevance filtering & schema prep
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ 5. Entity Extraction    │  Pydantic extraction → graph subgraphs
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ 6. Tabular              │  Spreadsheet normalization & extraction
-        └─────────────────────────┘
+
+### Tabular Data
+
+Tabular data follows a separate pipeline designed for scientific spreadsheets and other structured data:
+
+```text
+Tabular Data
+(.xlsx, .csv, ...)
+        │
+        ▼
+LLM Entity Extraction
+        │
+        ▼
+Normalization
+        │
+        ▼
+Structured Knowledge
 ```
 
 ---
@@ -59,21 +86,26 @@ Raw Documents (.pdf, .docx, .pptx, .xlsx, .csv, .json, .html, .txt)
 
 ```python
 import asyncio
+
 from scinr.newton import configure, run_pipeline
+from langchain_aws import ChatBedrockConverse # Or any langchain adapter. 
 
 async def main():
-    # 1. Configure backend connections
+    llm = ChatBedrockConverse(...)
+
     configure(
+        llm=llm,
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="password",
+        mistral_api_key="", # Needed por pdfs OCR
     )
 
-    # 2. Run the end-to-end ingestion pipeline
     result = await run_pipeline(input_raw="./raw_documents")
 
     print(f"Success: {result.success}")
     print(f"Duration: {result.total_duration_seconds:.2f}s")
+
 
 asyncio.run(main())
 ```
@@ -82,14 +114,18 @@ asyncio.run(main())
 
 ## How It Works
 
-1. **Configure** — Set up backends (Neo4j, MongoDB, LLM) via `configure()` or environment variables.
-2. **Run the Pipeline** — Call `run_pipeline()` with your input directory. The pipeline handles conversion, extraction, ingestion, annotation, and entity extraction automatically.
-3. **Query the Graph** — Explore extracted entities and their relationships in Neo4j.
+1. **Configure** — Set up Neo4j, MongoDB, and LLM providers using `configure()` or environment variables.
+
+2. **Run the pipeline** — Call `run_pipeline()` with your input directory. `scinr` handles document conversion, structure extraction, ingestion, annotation, and entity extraction.
+
+3. **Query the knowledge graph** — Explore extracted entities and relationships in Neo4j.
 
 ---
 
 ## Documentation
 
 * **[Getting Started](getting-started.md)** — Installation, prerequisites, and your first ingestion run.
-* **[Configuration](configuration.md)** — Complete reference for `configure()`, environment variables, prompt families, and all settings.
-* **[Architecture](architecture.md)** — Detailed pipeline stages, data flow, and system design.
+
+* **[Configuration](configuration.md)** — `configure()`, environment variables, LLM settings, and prompts.
+
+* **[Architecture](architecture.md)** — Pipeline stages, data flow, and system design.
