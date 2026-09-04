@@ -110,9 +110,9 @@ class VariationLink(ExtractionModel):
 ### Resulting Neo4j Graph
 
 ```
-(:LabeledEntity:VariationCode {value:"Q.I.a.1"})
+(:LabeledEntity {label:"VariationCode", value:"Q.I.a.1"})
   -[:HAS_CHILD_VARIATION]->
-(:LabeledEntity:VariationCode {value:"Q.I.a.1(a)"})
+(:LabeledEntity {label:"VariationCode", value:"Q.I.a.1(a)"})
 ```
 
 Both entities share the same label (`VariationCode`) but have different values. The relationship connects them directionally.
@@ -163,13 +163,13 @@ class DrugInteraction(ExtractionModel):
 ### Resulting Neo4j Graph
 
 ```
-(:LabeledEntity:Drug {value:"Warfarin"})
+(:LabeledEntity {label:"Drug", value:"Warfarin"})
   -[:INTERACTS_WITH]->
-(:LabeledEntity:Drug {value:"Amiodarone"})
+(:LabeledEntity {label:"Drug", value:"Amiodarone"})
 
-(:LabeledEntity:Drug {value:"Warfarin"})
+(:LabeledEntity {label:"Drug", value:"Warfarin"})
   -[:HAS_MECHANISM]->
-(:LabeledEntity:Mechanism {value:"CYP2C9 inhibition"})
+(:LabeledEntity {label:"Mechanism", value:"CYP2C9 inhibition"})
 ```
 
 Note: `severity` has no `entity_label`, so it becomes a scalar property on the `:ModelInstance` node — no entity node is created for it.
@@ -212,9 +212,9 @@ class DocumentReference(ExtractionModel):
 ### Resulting Neo4j Graph
 
 ```
-(:ModelInstance:DocumentReference {reference_id:"REF-001"})
+(:ModelInstance {model_class:"DocumentReference", reference_id:"REF-001"})
   -[:SUPPORTS_VARIATION]->
-(:ModelInstance:VariationModel {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"VariationModel", variation_code:"Q.I.a.1"})
 ```
 
 The source is the `DocumentReference` model instance. The target is a `VariationModel` model instance, identified by its `instance_key` field (`variation_code`).
@@ -234,6 +234,8 @@ Step 2 (VariationModel extracted from its own section):
                    description:"...", procedure_type:"IA"})
   └─ shell merged with real data — same uid, all fields populated
 ```
+
+> For the exact UID-hashing algorithm (SHA-256 over Unicode-normalized `instance_key` field values), the precise `MERGE ... ON CREATE ... ON MATCH` Cypher pattern, and a real example of this deduplication observed in a live graph (`CTDSectionSpec`), see [Cross-Section `:ModelInstance` Linking via `instance_key`](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) in the Neo4j Graph Model guide.
 
 ### Rules
 
@@ -310,17 +312,17 @@ class ConditionGroup(ExtractionModel):
 ### Resulting Neo4j Graph
 
 ```
-(:ModelInstance:ConditionGroup {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"ConditionGroup", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_id:"1"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_id:"1"})
 
-(:ModelInstance:ConditionGroup {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"ConditionGroup", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_id:"2"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_id:"2"})
 
-(:ModelInstance:ConditionGroup {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"ConditionGroup", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_id:"A"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_id:"A"})
 ```
 
 One `ConditionGroup` produces three `:HAS_CONDITION` edges to three different `ConditionModel` shell nodes.
@@ -406,14 +408,14 @@ class VariationRecord(ExtractionModel):
 
 ```
 Level 1 (entity_label):
-  (:ModelInstance:VariationRecord)-[:REFERENCES]->(:LabeledEntity:ProcedureType {value:"IA"})
+  (:ModelInstance {model_class:"VariationRecord"})-[:REFERENCES]->(:LabeledEntity {label:"ProcedureType", value:"IA"})
 
 Level 3 (instance_relationships):
-  (:ModelInstance:VariationRecord)-[:HAS_PROCEDURE_TYPE]->(:ModelInstance:ProcedureTypeModel {procedure_type:"IA"})
+  (:ModelInstance {model_class:"VariationRecord"})-[:HAS_PROCEDURE_TYPE]->(:ModelInstance {model_class:"ProcedureTypeModel", procedure_type:"IA"})
 ```
 
 The same field value ("IA") produces:
-1. A `:LabeledEntity:ProcedureType` node (globally deduplicated — all "IA" values across all documents point to the same node)
+1. A `:LabeledEntity` node with `label:"ProcedureType"` (globally deduplicated — all "IA" values across all documents point to the same node)
 2. A `:HAS_PROCEDURE_TYPE` edge from the `VariationRecord` instance to a `ProcedureTypeModel` instance
 
 ### When to Use
@@ -500,9 +502,9 @@ class IngredientPair(ExtractionModel):
 **Graph:**
 
 ```
-(:LabeledEntity:Substance {value:"Metformin"})
+(:LabeledEntity {label:"Substance", value:"Metformin"})
   -[:HAS_EXCIPIENT]->
-(:LabeledEntity:Substance {value:"Microcrystalline cellulose"})
+(:LabeledEntity {label:"Substance", value:"Microcrystalline cellulose"})
 ```
 
 ---
@@ -544,9 +546,9 @@ class SupportingDocument(ExtractionModel):
 **Graph:**
 
 ```
-(:ModelInstance:SupportingDocument {doc_title:"Stability Study"})
+(:ModelInstance {model_class:"SupportingDocument", doc_title:"Stability Study"})
   -[:SUPPORTS_VARIATION]->
-(:ModelInstance:VariationModel {variation_code:"B.II.b.1"})
+(:ModelInstance {model_class:"VariationModel", variation_code:"B.II.b.1"})
 ```
 
 ---
@@ -591,17 +593,17 @@ class VariationWithConditions(ExtractionModel):
 **Graph:**
 
 ```
-(:ModelInstance:VariationWithConditions {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"VariationWithConditions", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_number:"1"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_number:"1"})
 
-(:ModelInstance:VariationWithConditions {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"VariationWithConditions", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_number:"2"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_number:"2"})
 
-(:ModelInstance:VariationWithConditions {variation_code:"Q.I.a.1"})
+(:ModelInstance {model_class:"VariationWithConditions", variation_code:"Q.I.a.1"})
   -[:HAS_CONDITION]->
-(:ModelInstance:ConditionModel {variation_code:"Q.I.a.1", condition_number:"3"})
+(:ModelInstance {model_class:"ConditionModel", variation_code:"Q.I.a.1", condition_number:"3"})
 ```
 
 ---
@@ -637,8 +639,8 @@ class ProcedureRecord(ExtractionModel):
 **Graph:**
 
 ```
-Level 1: (:ModelInstance:ProcedureRecord)-[:REFERENCES]->(:LabeledEntity:ProcedureType {value:"IA"})
-Level 3: (:ModelInstance:ProcedureRecord)-[:HAS_PROCEDURE_TYPE]->(:ModelInstance:ProcedureTypeModel {procedure_type:"IA"})
+Level 1: (:ModelInstance {model_class:"ProcedureRecord"})-[:REFERENCES]->(:LabeledEntity {label:"ProcedureType", value:"IA"})
+Level 3: (:ModelInstance {model_class:"ProcedureRecord"})-[:HAS_PROCEDURE_TYPE]->(:ModelInstance {model_class:"ProcedureTypeModel", procedure_type:"IA"})
 ```
 
 ---
@@ -716,16 +718,16 @@ class SubstanceRoute(ExtractionModel):
 
 ```
 Entity level (field_relationships):
-(:LabeledEntity:Substance {value:"Metformin"})
+(:LabeledEntity {label:"Substance", value:"Metformin"})
   -[:ADMINISTERED_VIA]->
-(:LabeledEntity:Route {value:"oral"})
+(:LabeledEntity {label:"Route", value:"oral"})
 
 Instance level (instance_relationships):
-(:ModelInstance:SubstanceRoute)-[:HAS_DOSAGE]->(:ModelInstance:DosageModel {substance_name:"Metformin"})
+(:ModelInstance {model_class:"SubstanceRoute"})-[:HAS_DOSAGE]->(:ModelInstance {model_class:"DosageModel", substance_name:"Metformin"})
 
 Multi-hop query:
-(:LabeledEntity:Substance)-[:ADMINISTERED_VIA]->(:LabeledEntity:Route)
-(:ModelInstance:SubstanceRoute)-[:HAS_DOSAGE]->(:ModelInstance:DosageModel)
+(:LabeledEntity {label:"Substance"})-[:ADMINISTERED_VIA]->(:LabeledEntity {label:"Route"})
+(:ModelInstance {model_class:"SubstanceRoute"})-[:HAS_DOSAGE]->(:ModelInstance {model_class:"DosageModel"})
 ```
 
 ---
@@ -751,9 +753,9 @@ Multi-hop query:
 ```cypher
 -- List all field_relationships (LabeledEntity → LabeledEntity)
 MATCH (a:LabeledEntity)-[r]->(b:LabeledEntity)
-RETURN labels(a) AS source,
+RETURN a.label AS source,
        type(r) AS relationship,
-       labels(b) AS target,
+       b.label AS target,
        count(r) AS count
 ORDER BY count DESC;
 ```
@@ -780,27 +782,37 @@ RETURN a.model_class AS source,
        a.variation_code AS code,
        type(r) AS relationship,
        labels(b) AS target_labels,
-       b.model_class AS target_model
+       coalesce(b.model_class, b.label) AS target_identifier
 LIMIT 20;
 ```
 
 ### Verify Shell Nodes (Unresolved Targets)
 
+Shell nodes only have their `instance_key` fields populated, so they have far fewer
+properties than a real, fully-extracted instance of the same `model_class`. This
+heuristic is domain-agnostic — it does not assume any specific field (like a
+`description` field) exists on the model, since not every model defines one:
+
 ```cypher
--- Find shell nodes that have not been merged with real data
+-- Find shell nodes: instances with far fewer properties than the average for their model_class
+-- (a genuine shell node only has its instance_key fields populated)
 MATCH (m:ModelInstance)
-WHERE m.description IS NULL
-  AND m.model_class IS NOT NULL
-RETURN m.model_class AS model,
-       count(m) AS shell_count;
+WITH m.model_class AS model, avg(size(keys(m))) AS avgProps
+MATCH (m2:ModelInstance {model_class: model})
+WITH model, avgProps, m2, size(keys(m2)) AS propCount
+WHERE propCount < avgProps * 0.5
+RETURN model, count(*) AS likely_shell_count
+ORDER BY likely_shell_count DESC;
 ```
 
 ### Visualize a Relationship Chain
 
+The `:REFERENCES` edge created by `entity_label` always points **from** a
+`:ModelInstance` **to** a `:LabeledEntity` — never the reverse:
+
 ```cypher
--- Visualize the full chain from entity to instance to instance
-MATCH path = (e:LabeledEntity)-[*1..3]->(m:ModelInstance)
-WHERE e.label = 'VariationCode'
+-- Visualize the REFERENCES edge from a ModelInstance to a LabeledEntity
+MATCH path = (m:ModelInstance)-[:REFERENCES]->(e:LabeledEntity {label: 'VariationCode'})
 RETURN path
 LIMIT 20;
 ```
@@ -810,6 +822,6 @@ LIMIT 20;
 ## See Also
 
 - **[Custom Models](custom-models.md)** — Defining Pydantic extraction schemas for domain-specific entities.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the overall graph model and node types.
+- **[Neo4j Graph Storage](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — Understanding the overall graph model, node types, and how `instance_key` deduplicates `:ModelInstance` nodes across sections with real examples from a live graph.
 - **[Running the Pipeline](running-pipeline.md)** — Orchestrating the full ingestion pipeline.
 - **[Architecture](../architecture.md)** — Detailed pipeline stages and data flow.

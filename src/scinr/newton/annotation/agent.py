@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from scinr.newton.config import get_llm_semaphore
+from scinr.newton.config import get_config, get_llm_semaphore
 
 logger = logging.getLogger(__name__)
 
@@ -207,9 +207,9 @@ async def run_annotation_agent(
     from scinr.newton.exceptions import PreconditionError
     from scinr.newton.ingest.config import get_async_driver
     from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
-
+    cfg = get_config()
     driver = get_async_driver()
-    async with driver.session() as _session:
+    async with driver.session(database=cfg.neo4j_database) as _session:
         _result = await _session.run(
             "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
             name=document_name,

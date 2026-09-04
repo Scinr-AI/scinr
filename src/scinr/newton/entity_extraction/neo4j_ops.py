@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from neo4j import AsyncDriver
 
+from scinr.newton.config import get_config
 from scinr.newton.entity_extraction.state import ExtractionTarget
 
 log = logging.getLogger(__name__)
@@ -103,8 +104,8 @@ async def fetch_extraction_targets(
            info_units
     ORDER BY n.appearance_order
     """
-
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         try:
             result = await session.run(query, doc_name=document_name)
             rows = await result.data()
@@ -146,7 +147,8 @@ async def mark_info_units_extracted_async(driver: AsyncDriver, node_full_id: str
     InfoUnits where ``extracted IS NULL``.
     """
     timestamp = datetime.now(UTC).isoformat()
-    async with driver.session() as session:
+    cfg = get_config()
+    async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(
             """
             MATCH (n:StructureNode {id: $nid})-[:HAS_INFO_UNIT]->(iu:InfoUnit)

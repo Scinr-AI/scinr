@@ -104,6 +104,7 @@ class ScinrConfig:
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = ""
     neo4j_password: str = ""
+    neo4j_database: str = ""
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None
     enabled_user_themes: list[str] | None = None
@@ -188,6 +189,7 @@ def configure(
     neo4j_uri: str | None = None,
     neo4j_user: str | None = None,
     neo4j_password: str | None = None,
+    neo4j_database: str | None = None,
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None,
     enabled_user_themes: list[str] | None = None,
@@ -376,7 +378,7 @@ def configure(
     resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
     resolved_neo4j_user = neo4j_user or os.getenv("NEO4J_USER")
     resolved_neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD")
-
+    resolved_neo4j_database = neo4j_database or os.getenv("NEO4J_DATABASE")
     # Parse NEO4J_AUTH fallback ("user/password")
     if not resolved_neo4j_user or not resolved_neo4j_password:
         auth_raw = os.getenv("NEO4J_AUTH")
@@ -532,7 +534,7 @@ def configure(
     resolved_normalization_enabled = (
         normalization_enabled
         if normalization_enabled is not None
-        else os.getenv("NORMALIZATION_ENABLED", "false").lower() == "true"
+        else os.getenv("NORMALIZATION_ENABLED", "true").lower() == "true"
     )
     resolved_normalization_batch_size = (
         normalization_batch_size
@@ -559,6 +561,7 @@ def configure(
         neo4j_uri=resolved_neo4j_uri,
         neo4j_user=resolved_neo4j_user,
         neo4j_password=resolved_neo4j_password,
+        neo4j_database=resolved_neo4j_database,
         enabled_base_themes=enabled_base_themes,
         enabled_user_themes=enabled_user_themes,
         extra_models_paths=resolved_extra_models_paths,

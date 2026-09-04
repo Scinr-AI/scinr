@@ -57,6 +57,8 @@ Tabular data often contains messy, inconsistent, or composite values in a single
 | **Deduplicated** | Identical source values across rows trigger only one LLM call |
 | **Batched** | Multiple unique entries of the same target type share a single LLM call |
 
+> **Note:** normalization alone does not create graph links or deduplication. It only produces a clean, structured value. Cross-document/cross-row linking still requires the normalized sub-model to declare its own `entity_label` and/or `instance_key` fields — exactly as any other `:ModelInstance`. See [Normalized Models (Tabular Pipeline)](neo4j-graph.md#normalized-models-tabular-pipeline) in the Neo4j Graph Model guide for the full mechanism and why this distinction matters for linking across datasets.
+
 ---
 
 ## 2. How Normalization Works (Mechanical Flow)
@@ -135,7 +137,7 @@ The **unique key** is constructed as `{target_type.__name__}:{md5_hash}` where t
 
 #### Phase 3: Batching (group by target type)
 
-Entries are grouped by `target_type.__name__` because the LLM structured output call requires a homogeneous target type. Within each group, entries are batched by `normalization_batch_size` (default: 5). Duplicate entries (same unique key from different rows) are deduplicated — only unique keys proceed to the LLM.
+Entries are grouped by `target_type.__name__` because the LLM structured output call requires a homogeneous target type. Within each group, entries are batched by `normalization_batch_size` (default: 3). Duplicate entries (same unique key from different rows) are deduplicated — only unique keys proceed to the LLM.
 
 ```python
 # engine.py — simplified
@@ -344,7 +346,7 @@ configure(
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
 | `normalization_enabled` | `NORMALIZATION_ENABLED` | `false` | Enable/disable the normalization engine |
-| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` | Max entries per LLM batch call |
+| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `3` | Max entries per LLM batch call |
 | `normalization_llm` | — | Falls back to main `llm` | Dedicated LLM instance for normalization calls |
 
 ### Parameter resolution order
@@ -1200,5 +1202,5 @@ Row 4 (PharmaCorp Inc, same address) shares the same `NormalizedAddress` node as
 - **[Advanced Model Design Patterns](model-patterns.md)** — The dual-field pattern, entity labels, instance keys, and more.
 - **[Custom Models](custom-models.md)** — Basic model definition and field descriptions.
 - **[Tabular Pipeline](tabular-pipeline.md)** — How the tabular pipeline processes CSV/XLSX files.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and node types.
+- **[Neo4j Graph Storage](neo4j-graph.md#normalized-models-tabular-pipeline)** — See how a normalized sub-model is written to the graph as a real `:ModelInstance` node, and why normalization by itself doesn't create cross-dataset links.
 - **[Architecture](../architecture.md)** — Detailed pipeline stage walkthrough.

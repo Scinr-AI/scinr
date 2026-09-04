@@ -126,10 +126,13 @@ its **composite key** for `ModelInstance` deduplication. The engine combines all
 Every model that is referenced as a `target_model` in an `instance_relationships`
 declaration **must** mark its key fields with `instance_key: True`.
 
+> **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Cross-Section `:ModelInstance` Linking via `instance_key`](../../../../docs/user-guides/neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) shows this exact mechanism (UID hashing, shell-node lifecycle) against a real, populated graph example (`CTDSectionSpec`).
+
 ### LabeledEntity
 
 Any field annotated with `json_schema_extra={"entity_label": "SomeLabel"}` becomes a
-**global singleton node** in Neo4j of type `:LabeledEntity:SomeLabel`. The graph engine
+**global singleton node** in Neo4j with the base label `:LabeledEntity` and a `label`
+property set to `SomeLabel`. The graph engine
 deduplicates by normalised value, so the same entity mentioned in different documents
 resolves to the same node and can be traversed across the entire graph.
 
@@ -729,14 +732,14 @@ class Fee(ExtractionModel):
 The `entity_label` value in `json_schema_extra` becomes the Neo4j node label:
 
 ```
-(:LabeledEntity:Substance {value: "ibuprofen"})
-(:LabeledEntity:Facility  {value: "Almirall S.A."})
-(:LabeledEntity:CASNumber {value: "15687-27-1"})
+(:LabeledEntity {label: "Substance", value: "ibuprofen"})
+(:LabeledEntity {label: "Facility",  value: "Almirall S.A."})
+(:LabeledEntity {label: "CASNumber", value: "15687-27-1"})
 ```
 
 The graph engine deduplicates by `(label, normalised_value)`. Two extraction results from
-different documents that mention the same substance will share one `:LabeledEntity:Substance`
-node, enabling cross-document graph queries.
+different documents that mention the same substance will share one `:LabeledEntity` node
+(with `label: "Substance"`), enabling cross-document graph queries.
 
 **Use `entity_label` for:**
 - Named real-world entities that may recur across documents (substances, facilities, codes).

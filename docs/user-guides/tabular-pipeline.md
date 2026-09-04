@@ -553,10 +553,13 @@ The tabular pipeline writes the following nodes and relationships to Neo4j:
                                 └── [:HAS_STRUCTURE] ──► (:StructureNode:Row)
                                                             ├── [:HAS_INFO_UNIT] ──► (:InfoUnit)
                                                             ├── [:HAS_MODEL_DECISION] ──► (:ModelDecision)
-                                                            └── [:HAS_MODEL_INSTANCE] ──► (:ModelInstance:ProductRecord)
+                                                            └── [:HAS_MODEL_INSTANCE] ──► (:ModelInstance {model_class: "ProductRecord"})
                                                                                               ├── [:HAS_LABELED_ENTITY] ──► (:LabeledEntity)
-                                                                                              └── (field properties from model data)
+                                                                                              ├── (field properties from model data)
+                                                                                              └── [:HAS_<NORMALIZED_FIELD>] ──► (:ModelInstance {model_class: "NormalizedXxx", ...})
 ```
+
+> A field marked `normalization_model: True` produces its own child `:ModelInstance` node (linked via `[:HAS_<FIELDNAME>]`) — never a flattened/embedded property on the parent row's node.
 
 ### 9.2 Node Types
 
@@ -566,8 +569,8 @@ The tabular pipeline writes the following nodes and relationships to Neo4j:
 | Table | `:StructureNode:Table` | `write_tabular` | One per sheet. Contains sheet metadata (column/row count, theme). |
 | Row | `:StructureNode:Row` | `write_tabular` | One per data row. Contains row data as InfoUnit Markdown. |
 | ModelDecision | `:ModelDecision` | `write_annotation` | The LLM's model selection decision for the table. |
-| ModelInstance | `:ModelInstance:{ModelName}` | `write_extraction_subgraph` | One per row. Contains all model field values as properties. |
-| LabeledEntity | `:LabeledEntity:{Label}` | `write_extraction_subgraph` | One per `entity_label` field value. Globally deduplicated. |
+| ModelInstance | `:ModelInstance` (with `model_class: "{ModelName}"`) | `write_extraction_subgraph` | One per row. Contains all model field values as properties. |
+| LabeledEntity | `:LabeledEntity` (with `label: "{Label}"`) | `write_extraction_subgraph` | One per `entity_label` field value. Globally deduplicated. |
 | InfoUnit | `:InfoUnit` | `write_tabular` | Markdown table representation of a single row. |
 
 ### 9.3 Relationships
@@ -590,6 +593,8 @@ Fields with `field_relationships` or `instance_relationships` in their `json_sch
 
 - **`field_relationships`:** Connects two `:LabeledEntity` nodes within the same model instance (sibling fields with `entity_label`).
 - **`instance_relationships`:** Connects `:ModelInstance` nodes across rows or documents via `join_via` key matching.
+
+> **Note:** without an `instance_key` declared on the target model, the `:ModelInstance` nodes created by `instance_relationships` are permanent "shell" nodes that never merge with the real, fully-extracted instance — they stay separate and unresolved. See [Cross-Section ModelInstance Linking via instance_key](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for the full mechanism.
 
 These work identically to the unstructured pipeline — the tabular pipeline uses the same entity extraction subgraph writer.
 
@@ -808,7 +813,8 @@ The `NormalizationEngine` caches results by source-value hash. Datasets with man
 - **[Running the Pipeline](running-pipeline.md)** — Full reference for `run_pipeline()`, including `stages=["tabular"]` and tabular options.
 - **[Configuration](../configuration.md)** — All `configure()` parameters, including `normalization_enabled`, `normalization_batch_size`, and `normalization_llm`.
 - **[Custom Models](custom-models.md)** — Defining extraction models with `normalization_model` fields for tabular use.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding `:ModelInstance`, `:LabeledEntity`, and relationship types in the graph.
+- **[Neo4j Graph Storage — Normalized Models](neo4j-graph.md#normalized-models-tabular-pipeline)** — How a normalized field is written to the graph as a separate, linked `:ModelInstance` node (never an embedded property).
+- **[Neo4j Graph Storage — instance_key linking](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — Why `instance_relationships` targets need `instance_key` on the target model to actually merge into one node instead of staying permanent unresolved shells.
 - **[Architecture](../architecture.md)** — Detailed walkthrough of each pipeline stage, including the tabular LangGraph workflow.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.
 - **[Tabular API](../api/stages.md)** — Auto-generated docstring for `run_tabular_pipeline()`.

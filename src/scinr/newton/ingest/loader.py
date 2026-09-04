@@ -27,6 +27,7 @@ from pathlib import Path
 
 from neo4j.exceptions import ConstraintError
 
+from scinr.newton.config import get_config
 from scinr.newton.exceptions import IngestionError
 from scinr.newton.ingest.config import get_driver
 from scinr.newton.ingest.nodes import (
@@ -127,7 +128,8 @@ def resolve_batch_version_sync(driver, all_paths: list[str], update_mode: bool) 
         True → return the current latest version (no increment).
         False → return the next version (increment).
     """
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         return _resolve_batch_version(session, all_paths, update_mode)
 
 
@@ -199,7 +201,8 @@ def load_file(
     if shared_version is not None:
         resolved_version = shared_version
     else:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             if update_mode:
                 resolved_version = get_current_latest_version(session, doc_path) or 1
             else:
@@ -213,7 +216,8 @@ def load_file(
     )
 
     def _do_insert() -> None:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             with session.begin_transaction() as tx:
                 try:
                     insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
@@ -278,8 +282,8 @@ def load_files(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
-
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
@@ -351,7 +355,8 @@ def _load_document_object(
     if shared_version is not None:
         resolved_version = shared_version
     else:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             if update_mode:
                 resolved_version = get_current_latest_version(session, doc_path) or 1
             else:
@@ -365,7 +370,8 @@ def _load_document_object(
     )
 
     def _do_insert() -> None:
-        with driver.session() as session:
+        cfg = get_config()
+        with driver.session(database=cfg.neo4j_database) as session:
             with session.begin_transaction() as tx:
                 try:
                     insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
@@ -527,8 +533,8 @@ def load_documents(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [doc.doc_path if doc.doc_path else doc.document_name for doc in documents]
     all_paths = _extract_all_paths(leaf_doc_paths)
-
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
@@ -607,8 +613,8 @@ def load_folder(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in json_files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
-
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         shared_version = _resolve_batch_version(session, all_paths, update_mode)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
