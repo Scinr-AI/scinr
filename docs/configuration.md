@@ -30,10 +30,6 @@ All environment variables are optional unless otherwise noted. They are read at 
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MODEL_ID` | *(required if no `llm` arg)* | Model ID for the primary LLM. For AWS Bedrock, use ARNs such as `us.anthropic.claude-sonnet-4-6`. |
-| `REPAIR_MODEL_ID` | *(falls back to `MODEL_ID`)* | Model ID used for repair and retry LLM calls. Can be a cheaper/faster model (e.g. `us.anthropic.claude-haiku-3`). |
-| `AWS_DEFAULT_REGION` | `us-east-1` | AWS region for Bedrock calls. |
-| `MAX_TOKENS` | `65536` | Maximum tokens for Bedrock LLM calls. |
 | `LLM_CONCURRENCY` | `4` | Maximum number of concurrent LLM calls. |
 
 ### Neo4j
@@ -43,7 +39,7 @@ All environment variables are optional unless otherwise noted. They are read at 
 | `NEO4J_URI` | `bolt://localhost:7687` | Bolt URI for the Neo4j instance. |
 | `NEO4J_USER` | *(required)* | Neo4j database username. **Note:** previous versions used `NEO4J_USERNAME` — this was renamed to `NEO4J_USER`. |
 | `NEO4J_PASSWORD` | *(required)* | Neo4j user password. |
-| `NEO4J_AUTH` | *(fallback "user/password")* | Alternative authentication format as a single `user/password` string. Used if `NEO4J_USER` and `NEO4J_PASSWORD` are not both set. |
+| `NEO4J_DATABASE` | *(required)* | Neo4j database name |
 | `NEO4J_CONCURRENCY` | `10` | Maximum async Neo4j concurrency. |
 | `NEO4J_SYNC_CONCURRENCY` | `8` | Maximum sync Neo4j concurrency. |
 
@@ -78,19 +74,20 @@ All environment variables are optional unless otherwise noted. They are read at 
 | `EXTRACTION_BATCH_SIZE` | `1` | Number of pages per extraction chunk. |
 | `PROMPT_FAMILY` | `generic` | Prompt template family: `generic`, `claude`, or `gpt_reasoning`. |
 | `SCINR_EXTRA_MODELS_PATHS` | `""` (empty) | Colon-separated list of extra model package paths. |
+| `FULL_DOCSTRING` | `true` | Saves the full docstring from the models. On False, it only saves the first line before a jumpline. |
 
 ### Normalization
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `NORMALIZATION_ENABLED` | `false` | Enable tabular data normalization via LLM. |
+| `NORMALIZATION_ENABLED` | `true` | Enable tabular data normalization via LLM. |
 | `NORMALIZATION_BATCH_SIZE` | `5` | Batch size for normalization LLM calls. |
 
 ---
 
 ## Programmatic Configuration
 
-The `configure()` function is the primary way to set up scinr at runtime. It accepts keyword arguments organized by category. All parameters are optional — omitting a parameter falls back to the environment variable or hard-coded default.
+The `configure()` function is the primary way to set up scinr at runtime. It accepts keyword arguments organized by category. All parameters are optional — omitting a parameter falls back to the environment variable or hard-coded default. It includes all the parameters previously mentioned. 
 
 ```python
 from scinr.newton import configure
@@ -105,11 +102,7 @@ from scinr.newton import configure
 
 ### Neo4j Parameters
 
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `neo4j_uri` | `str \| None` | Bolt URI for the Neo4j instance (e.g. `bolt://localhost:7687`). |
-| `neo4j_user` | `str \| None` | Neo4j username. |
-| `neo4j_password` | `str \| None` | Neo4j password. |
+Same as the mentioned previously, but in lowercase.
 
 ### Models / Themes Parameters
 
@@ -123,12 +116,6 @@ from scinr.newton import configure
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
-| `storage_backend` | `Literal["none", "mongodb", "custom"] \| None` | Storage backend type. `none` = no persistence, `mongodb` = MongoDB, `custom` = user-provided storage. |
-| `mongodb_uri` | `str \| None` | MongoDB connection string. |
-| `mongodb_database` | `str \| None` | MongoDB database name. |
-| `mongodb_raw_files_collection` | `str \| None` | Collection for raw file metadata. |
-| `mongodb_pages_collection` | `str \| None` | Collection for converted pages. |
-| `mongodb_gridfs_bucket` | `str \| None` | GridFS bucket for binary storage. |
 | `custom_storage` | `tuple \| None` | Custom storage backend tuple (driver, connection). |
 
 ### Converter Parameters
@@ -139,26 +126,11 @@ from scinr.newton import configure
 
 ### PDF / Mistral OCR Parameters
 
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `mistral_api_key` | `str \| None` | Mistral API key for PDF OCR. |
-| `mistral_ocr_safe_max_pages` | `int \| None` | Max pages before OCR is required. |
-| `mistral_ocr_safe_max_bytes` | `int \| None` | Max file size (bytes) before OCR is required. |
-| `mistral_ocr_max_retries` | `int \| None` | OCR retry count. Retry uses exponential backoff capped at 5 minutes between retries. |
-| `mistral_ocr_retry_backoff_seconds` | `float \| None` | Retry backoff in seconds. |
-| `mistral_ocr_chunk_concurrency` | `int \| None` | Concurrent OCR chunk processing. |
-| `mistral_ocr_error_strategy` | `Literal["fail_fast", "best_effort"] \| None` | OCR error handling strategy. |
+Same as previously mentioned.
 
 ### Pipeline Parameters
 
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `prompt_caching_enabled` | `bool \| None` | Enable prompt caching (Bedrock). |
-| `full_docstring` | `bool \| None` | Use the full class docstring (vs. only its first line) when building the model catalog description for LLM prompts (annotation stage) and Neo4j `CatalogModel.description`. |
-| `extraction_batch_size` | `int \| None` | Pages per extraction chunk. |
-| `llm_concurrency` | `int \| None` | Maximum concurrent LLM calls. |
-| `neo4j_concurrency` | `int \| None` | Maximum async Neo4j concurrency. |
-| `neo4j_sync_concurrency` | `int \| None` | Maximum sync Neo4j concurrency. |
+Same as previouly mentioned
 
 ### Logging Parameters
 
@@ -190,20 +162,23 @@ The simplest approach: set environment variables and call `configure()` to let s
 
 ```bash
 # .env file
-MODEL_ID=us.anthropic.claude-sonnet-4-6
+NEO4J
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
+
 MISTRAL_API_KEY=your_mistral_key
 ```
 
 ```python
 import asyncio
 from scinr.newton import configure, run_pipeline
-
+from langchain_aws import ChatBedrockConverse
 async def main():
     # configure() reads .env automatically — no arguments needed
-    configure()
+    llm = ChatBedrockConverse(...)
+    configure(llm=llm)
 
     result = await run_pipeline(input_raw="./raw_docs")
     print(f"Pipeline: {'success' if result.success else 'failed'}")
@@ -219,7 +194,8 @@ Complete programmatic configuration for a production Bedrock deployment.
 
 ```python
 from scinr.newton import configure
-
+from langchain_aws import ChatBedrockConverse
+llm = ChatBedrockConverse(...)
 configure(
     # LLM — AWS Bedrock
     llm=None,  # let scinr auto-create from MODEL_ID env var
@@ -243,7 +219,7 @@ configure(
     prompt_caching_enabled=True,
     extraction_batch_size=1,
     llm_concurrency=4,
-    prompt_family="claude",
+    prompt_family="claude", # If using a Claude Model (Best tested performance). Generic for any other model (Kimi K2.5 tested good performance)
 
     # Logging
     log_level="INFO",
@@ -285,45 +261,13 @@ configure(
 )
 ```
 
-### Custom LLM Client
-
-Bring your own LLM client instance (e.g., a custom wrapper or non-Bedrock provider).
-
-```python
-from scinr.newton import configure
-
-# Construct your own LLM client
-my_llm = build_my_custom_llm()
-
-configure(
-    llm=my_llm,
-    repair_llm=my_llm,  # reuse same client for repairs
-    neo4j_uri="bolt://localhost:7687",
-    neo4j_user="neo4j",
-    neo4j_password="password",
-    prompt_family="generic",
-)
-```
-
 ---
 
 ## Using a `.env` File
 
-scinr reads standard `.env` files. Copy the provided example and fill in your values:
-
-```bash
-# Copy the template
-cp .env.example .env
-
-# Edit with your values
-# $EDITOR .env
-```
+scinr reads standard `.env` files. You can copy the provided example from the repository and fill in your values.
 
 The `.env.example` file is provided in the project root and contains all available settings with helpful comments. Key notes:
-
-- **`NEO4J_USER`** — previous versions used `NEO4J_USERNAME`. The variable was renamed. If you have an old `.env`, update it.
-- **`LLM_CONCURRENCY`** — previously named `BEDROCK_CONCURRENCY`. The variable was renamed for provider-agnostic naming.
-- Values in `.env` are overridden by any explicit arguments to `configure()`.
 
 ---
 

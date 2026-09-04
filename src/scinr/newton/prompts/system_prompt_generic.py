@@ -251,6 +251,10 @@ A table begins in <previous_page> and continues in CURRENT_PAGE.
   NO  → section (if top-level) or freeform_block (if nested).
 → If level ambiguity persists, use <previous_page> hierarchy to resolve.
 → If still ambiguous, assign the higher-level role (section over subsection or freeform_block).
+→ EXCEPTION: if <extraction_mode> is present and reads "fast", invert this fallback — prefer
+  the lower-level role (subsection or freeform_block) instead of section, since a chunk
+  processed in isolation cannot reliably confirm a new top-level section and a wrong SECTION
+  classification is permanent.
 
 **Failure 8 — Orphaned subsections (parent extracted in a previous chunk):**
 CURRENT_PAGE contains only subsections whose parent was extracted in a previous chunk.

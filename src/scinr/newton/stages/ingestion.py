@@ -8,6 +8,7 @@ import logging
 import time
 from pathlib import Path
 
+from scinr.newton.config import get_config
 from scinr.newton.ingest.config import get_driver
 from scinr.newton.ingest.loader import load_documents, load_files, load_folder
 from scinr.newton.ingest.schema import setup_schema
@@ -152,7 +153,8 @@ def preflight_check_replaces(driver, replaces_name: str) -> dict:
     SystemExit
         If the document is not found or if the match is ambiguous.
     """
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         result = session.run(
             """
             MATCH (d:Document {name: $name, latest: true})
@@ -198,8 +200,8 @@ def apply_replacement(driver, replaces_name: str, new_root_doc_names: list[str])
     if not new_root_doc_names:
         logger.warning("apply_replacement: no new root documents found; skipping.")
         return
-
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         # Find the new root documents (those just ingested with no IS_COMPOSED_OF parent)
         result = session.run(
             """
@@ -217,8 +219,8 @@ def apply_replacement(driver, replaces_name: str, new_root_doc_names: list[str])
             new_root_doc_names,
         )
         return
-
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         for new_root in new_roots:
             session.run(
                 """

@@ -1,15 +1,19 @@
 # scinr.newton Architecture
 
-`scinr.newton` is an **async-first Python library** that processes life sciences documents through a **6-stage modular pipeline**, producing a structured knowledge graph stored in Neo4j with optional binary/auxiliary storage in MongoDB.
+`scinr.newton` is an **async-first Python library** for transforming life sciences documents and tabular data into structured, queryable knowledge stored in Neo4j, with optional binary and auxiliary storage in MongoDB.
 
-The pipeline operates via **two parallel tracks**:
+The architecture provides **two independent ingestion pipelines** that write to the same knowledge graph:
 
-- **Unstructured pipeline** (Stages 0–4): handles PDF, DOCX, PPTX, HTML, XML, TXT files through format conversion, LLM-powered structural extraction, graph ingestion, annotation, and entity extraction.
-- **Tabular pipeline** (Stage 5): handles CSV, XLSX, XLS files through a dedicated path that bypasses Stages 0–4 entirely, using LLM-driven column mapping and direct graph writes.
+* **Unstructured document pipeline** — A 5-stage pipeline for supported document formats: PDF, DOCX, and PPTX. It handles preprocessing, structural extraction, graph ingestion, annotation, and domain entity extraction.
 
-Both tracks converge into the **same Neo4j knowledge graph**, sharing node labels, relationship types, and schema constraints.
+* **Tabular data pipeline** — A dedicated pipeline for CSV, XLSX, and XLS data. It bypasses the document pipeline and uses structural normalization, LLM-driven mapping, and entity extraction to write structured knowledge directly to the graph.
+
+Both pipelines produce compatible entities and relationships in the **same Neo4j knowledge graph**, sharing graph conventions, node labels, relationship types, and schema constraints.
+
+Support for additional formats such as JSON, HTML, and TXT is planned for the roadmap.
 
 ---
+
 
 ## Table of Contents
 
@@ -37,8 +41,8 @@ Both tracks converge into the **same Neo4j knowledge graph**, sharing node label
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │                  Raw Documents                    │
-                    │  .pdf .docx .pptx .xlsx .csv .json .html .xml    │
+                    │                  Raw Documents                   │
+                    │  .pdf .docx .xlsx .xls .csv                      │
                     └───────────────┬──────────────────────────────────┘
                                     │
           ┌─────────────────────────┼─────────────────────────┐
@@ -118,21 +122,14 @@ Each file format has a dedicated converter inheriting from `BaseConverter` (abst
 |---|---|---|---|
 | `PdfConverter` | `converters/pdf.py` | `.pdf` | `pdfplumber`, Mistral OCR API |
 | `DocxConverter` | `converters/docx.py` | `.docx` | `python-docx` |
-| `PptxConverter` | `converters/pptx.py` | `.pptx` | `python-pptx` |
 | `XlsxConverter` | `converters/xlsx.py` | `.xlsx`, `.xls` | `openpyxl`, `pandas` |
 | `CsvConverter` | `converters/csv.py` | `.csv` | `pandas` |
-| `HtmlConverter` | `converters/html.py` | `.html`, `.htm` | `BeautifulSoup` |
-| `TextConverter` | `converters/text.py` | `.txt`, `.md`, `.rst` | stdlib |
-| `ApiJsonConverter` | `converters/api_json.py` | `.json` | stdlib |
-| `ApiXmlConverter` | `converters/api_xml.py` | `.xml` | stdlib |
 
 Converters are registered in `converters/registry.py` via a lazy-loaded extension-to-class map. Custom converters can be injected at runtime via `configure(extra_converters={...})` — the `apply_converter_overrides()` function handles both new extensions and built-in overrides.
 
 **PDF Conversion Strategy:**
 
-The `PdfConverter` uses a two-tier approach:
-1. **pdfplumber** for native (text-extractable) PDFs — extracts text, tables, images, and page dimensions.
-2. **Mistral OCR API** for scanned PDFs — chunks large PDFs by page count (`mistral_ocr_safe_max_pages`, default 900) and file size (`mistral_ocr_safe_max_bytes`, default 45 MiB), sends each chunk to the Mistral OCR endpoint, and reassembles the result. The `pdf_splitter.py` module handles structural PDF partitioning.
+The `PdfConverter` uses Mistal OCR Api. It chunks large PDFs by page count (`mistral_ocr_safe_max_pages`, default 900) and file size (`mistral_ocr_safe_max_bytes`, default 45 MiB), sends each chunk to the Mistral OCR endpoint, and reassembles the result. The `pdf_splitter.py` module handles structural PDF partitioning.
 
 Error strategy for Mistral OCR is configurable: `fail_fast` (default, aborts the entire document on any chunk failure) or `best_effort` (skips failed chunks and continues).
 
@@ -400,7 +397,6 @@ The populated Pydantic instance is converted into a Neo4j subgraph with three le
 (:ExtractionResult) -[:USES_COMPLEMENTARY_MODEL]-> (:CatalogModel)  [0..*]
 (:ExtractionResult) -[:HAS_<FIELD>]-> (:ModelInstance)              [nested models]
 (:ModelInstance | :ExtractionResult) -[:REFERENCES]-> (:LabeledEntity)
-(:LabeledEntity) -[:REL_TYPE]-> (:LabeledEntity)                    [field_relationships]
 (:ModelInstance) -[:REL_TYPE]-> (:ModelInstance)                    [instance_relationships]
 ```
 
@@ -558,18 +554,18 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
-| `llm` | `MODEL_ID` (Bedrock) | None | LangChain `BaseChatModel` instance |
+| `llm` | — | None | LangChain `BaseChatModel` instance |
 | `repair_llm` | — | Falls back to `llm` | Secondary LLM for JSON repair |
 | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
-| `neo4j_user` | `NEO4J_USER` / `NEO4J_AUTH` | — | Neo4j username (required) |
-| `neo4j_password` | `NEO4J_PASSWORD` / `NEO4J_AUTH` | — | Neo4j password (required) |
+| `neo4j_user` | `NEO4J_USER` | — | Neo4j username (required) |
+| `neo4j_password` | `NEO4J_PASSWORD` | — | Neo4j password (required) |
+| `neo4j_database` | `NEO4J_DATABASE` | — | Neo4j database name (required) |
 | `storage_backend` | `STORAGE_BACKEND` | `"none"` | `"none"`, `"mongodb"`, or `"custom"` |
 | `llm_concurrency` | `LLM_CONCURRENCY` | 4 | Max concurrent LLM calls |
 | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | 10 | Max concurrent Neo4j async sessions |
 | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches |
 | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | 3 | Pages per extraction chunk |
 | `prompt_family` | `PROMPT_FAMILY` | `"generic"` | Prompt variant family |
-| `prompt_caching_enabled` | `PROMPT_CACHING_ENABLED` | `True` | Bedrock prompt caching |
 | `normalization_enabled` | `NORMALIZATION_ENABLED` | `False` | Enable tabular normalization |
 | `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | 5 | Max entries per normalization batch |
 
@@ -637,13 +633,8 @@ scinr.newton/
 │   ├── pdf.py                  # PdfConverter (pdfplumber + Mistral OCR)
 │   ├── pdf_splitter.py         # Structural PDF partitioning for OCR chunking
 │   ├── docx.py                 # DocxConverter (python-docx)
-│   ├── pptx.py                 # PptxConverter (python-pptx)
 │   ├── xlsx.py                 # XlsxConverter (openpyxl + pandas)
 │   ├── csv.py                  # CsvConverter (pandas)
-│   ├── html.py                 # HtmlConverter (BeautifulSoup)
-│   ├── text.py                 # TextConverter (stdlib)
-│   ├── api_json.py             # ApiJsonConverter (stdlib)
-│   ├── api_xml.py              # ApiXmlConverter (stdlib)
 │   └── config.py               # Converter-specific configuration
 │
 ├── entity_extraction/          # Stage 4: entity extraction
@@ -741,14 +732,6 @@ Data flows between stages through three mechanisms:
 | **Intermediate JSON files** | Stage N → disk → Stage N+1 | `*.json` (0→1), `extract-*.json` (1→2) |
 | **Neo4j graph** | Stage N → graph → Stage N+1 | `:Document`/`:StructureNode` (2→3→4), annotation subgraph (3→4) |
 
-### Pipeline Data Flow (Full Run)
-
-```
-input_raw/                          converter_output_dir/          extraction_output_dir/         Neo4j
-  ├── doc1.pdf ──Stage 0──►  doc1.json ──Stage 1──►  extract-doc1.json ──Stage 2──►  (:Document)
-  ├── doc2.docx ──Stage 0──► doc2.json ──Stage 1──►  extract-doc2.json ──Stage 2──►  (:Document)
-  └── data.csv ──tabular──►  (bypassed)    (bypassed)       (bypassed)   ──Stage 5──►  (:Document)
-```
 
 ### Intermediate Directory Structure
 
@@ -789,22 +772,22 @@ Each stage function can be called independently:
 
 ```python
 # Stage 0 only
-result, docs = await run_preprocess(input_raw="files/", output_dir="data/json/")
+result = await run_pipeline(input_raw="files/", converter_output_dir="data/json/", stages=["preprocess"])
 
 # Stage 1 only (from disk)
-result, docs = await run_extraction(input_folder="data/json/", output_folder="data/extract/")
+result = await run_pipeline(extraction_input_dir="data/json/", extraction_output_dir="data/extract/", stages=["extraction"])
 
 # Stage 2 only (from disk)
-result = await run_ingestion(output_folder="data/extract/")
+result = await run_pipeline(ingestion_input_dir="data/extract/", stages=["ingestion"])
 
 # Stage 3 only (from Neo4j)
-result = await run_annotation(document_name="MyDocument")
+result = await run_pipeline(document_names=["MyDocument"], stages=["annotation"])
 
 # Stage 4 only (from Neo4j)
-result = await run_entity_extraction(document_name="MyDocument")
+result = await run_pipeline(document_names=["MyDocument"], stages=["entity_extraction"])
 
 # Tabular only
-result = await run_tabular_pipeline(input_raw="files/")
+result = await run_pipeline(input_raw="files/", stages=["tabular"])
 ```
 
 ---
@@ -848,7 +831,7 @@ result = await run_tabular_pipeline(input_raw="files/")
 | `HAS_<FIELD>` | ExtractionResult → ModelInstance | Nested model instance |
 | `REFERENCES` | ModelInstance → LabeledEntity | Entity reference |
 | `HAS_ENTITY` | ExtractionResult → Entity | Triple extraction entity |
-| `NORMALIZED_PREDICATE` | Entity → Entity | Triple relationship |
+| 'NORMALIZED_PREDICATE' | Entity → Entity | Custom Triple relationship, it can be any predicate created by the LLM on entity_extraction. |
 
 ### Constraints and Indexes
 
@@ -910,7 +893,7 @@ The prompt system supports three families, each with dedicated prompt files per 
 
 ### Bedrock Prompt Caching
 
-When using `ChatBedrockConverse` with `prompt_caching_enabled=True`, the `make_system_message()` function appends a `cachePoint` block to the system message, reducing token costs by ~90% on repeated calls with the same prompt.
+When using `ChatBedrockConverse` with `prompt_caching_enabled=True`, the `make_system_message()` function appends a `cachePoint` block to the system message, reducing token costs by ~90% on repeated calls with the same prompt. It is not available for all bedrock models. It is available for Claude Model, where we recommend using it to reduce costs.
 
 ---
 

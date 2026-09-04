@@ -127,6 +127,8 @@ WHERE NOT EXISTS {
 DETACH DELETE mi
 ```
 
+> This pass is precisely what reclaims orphaned `:ModelInstance` **shell nodes** — targets created by an `instance_relationships` reference whose actual model was never extracted from any document section. See [Cross-Section `:ModelInstance` Linking via `instance_key`](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for how shells are created and why they are never garbage-collected automatically outside of `delete_document()`.
+
 ### Pass 2: LabeledEntity
 
 Finds `:LabeledEntity` nodes with no incoming relationships at all:
@@ -214,6 +216,7 @@ When `version` is specified, only that version's cascade is deleted. However, sh
 ## See Also
 
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model, node types, and relationships affected by deletion.
+- **[Neo4j Graph Storage — instance_key shells](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — Understand what a `:ModelInstance` "shell" node is and why unreferenced ones only get cleaned up via the garbage-collection pass described below.
 - **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, including the `--update` flag for in-place document updates.
 - **[Deletion API](../api/deletion.md)** — Auto-generated reference for `delete_document()`.
 - **[Results API](../api/results.md)** — `DeletionResult` dataclass reference.

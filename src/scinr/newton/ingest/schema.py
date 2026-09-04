@@ -36,8 +36,11 @@ Fulltext indexes (semantic search):
 """
 
 import logging
+import re
 
 from neo4j import Driver
+
+from scinr.newton.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +193,8 @@ def setup_schema(driver: Driver) -> None:
     # ------------------------------------------------------------------
     # Best-effort Neo4j minimum version check (>= 4.4 required)
     # ------------------------------------------------------------------
-    with driver.session() as session:
+    cfg = get_config()
+    with driver.session(database=cfg.neo4j_database) as session:
         try:
             result = session.run(
                 "CALL dbms.components() YIELD versions RETURN versions[0] AS version"
@@ -204,16 +208,19 @@ def setup_schema(driver: Driver) -> None:
                     from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
-                        f"scinr-ingest requires Neo4j >= 4.4. "
-                        f"Please upgrade your Neo4j instance."
+                        "scinr-ingest requires Neo4j >= 4.4. "
+                        "Please upgrade your Neo4j instance."
                     )
-        except ConfigurationError:
-            raise
-        except Exception:
-            pass  # version check is best-effort; proceed if query fails
+            else:
+                # Formato desconocido (por ejemplo, Aura: 27-aura).
+                # No bloqueamos la conexión.
+                logger.warning(
+                    "Could not parse Neo4j version %r; skipping compatibility check.",
+                    version_str,
+                )
 
     # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
-    with driver.session() as session:
+    with driver.session(database=cfg.neo4j_database) as session:
         try:
             session.execute_write(lambda tx: tx.run(
                 "DROP CONSTRAINT constraint_document_name IF EXISTS"
@@ -222,7 +229,7 @@ def setup_schema(driver: Driver) -> None:
         except Exception as exc:
             logger.warning("Could not drop constraint_document_name: %s", exc)
 
-    with driver.session() as session:
+    with driver.session(database=cfg.neo4j_database) as session:
         for name, cypher in _UNIQUE_CONSTRAINTS:
             logger.info("Ensuring unique constraint: %s", name)
             session.execute_write(lambda tx, q=cypher: tx.run(q))

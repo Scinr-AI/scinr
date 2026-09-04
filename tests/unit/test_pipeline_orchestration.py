@@ -176,7 +176,7 @@ def mock_unit_stage_fns(monkeypatch):
     import scinr.newton.ingest.loader as ingest_loader_mod
     import scinr.newton.stages.extraction as extraction_mod
 
-    async def _default_extract_one_file(json_file, output_path, input_folder):
+    async def _default_extract_one_file(json_file, output_path, input_folder, fast_extraction=False):
         doc = MagicMock(name=f"Document({json_file.stem})")
         doc.document_name = json_file.stem
         return doc
@@ -1019,11 +1019,11 @@ class TestAnnotationEntityExtractionConcurrency:
 
     Deliberately does NOT reuse the `mock_infra` fixture: `mock_infra`'s
     `fake_async_driver` is a plain `MagicMock()`, which cannot be used as an
-    async context manager (`async with driver.session() as _session:` would
+    async context manager (`async with driver.session(database=cfg.neo4j_database) as _session:` would
     raise) — that has never mattered for the *other* tests in this file
     because they all patch `run_annotation`/`run_entity_extraction` at the
     `stages.py` level via `mock_stages`, so the real agent code (and its
-    real `async with driver.session()` precondition checks) is never
+    real `async with driver.session(database=cfg.neo4j_database)` precondition checks) is never
     reached. This test intentionally leaves `run_annotation`/
     `run_entity_extraction` REAL (per `TestCatalogMemoization`'s mocking
     philosophy above) to exercise that exact code path, so it needs its own
