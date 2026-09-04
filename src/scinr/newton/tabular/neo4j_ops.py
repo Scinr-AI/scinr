@@ -181,7 +181,6 @@ async def write_tabular_subgraph(
             primary_cls = None
 
     # Step 7: process rows — bifurcate based on normalization
-    from scinr.newton.config import get_config
 
     cfg = get_config()
     has_normalization = (
@@ -292,7 +291,6 @@ async def _write_tabular_with_normalization(
        d. Write to Neo4j in batches
     4. Write any remaining rows (normalization failures) with None
     """
-    from scinr.newton.config import get_config
     from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
     cfg = get_config()
@@ -698,7 +696,6 @@ async def _write_row_batch(
 
         # ── Phase 2: Normalization hook (inline, for standard path) ────────────
         if primary_cls is not None:
-            from scinr.newton.config import get_config
             from scinr.newton.tabular.normalization.engine import NormalizationEngine
 
             cfg = get_config()

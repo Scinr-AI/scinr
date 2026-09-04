@@ -1,6 +1,6 @@
 [project]
 name = "scinr"
-version = "0.3.4"
+version = "0.3.6"
 description = "AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -41,6 +41,7 @@ import re
 from neo4j import Driver
 
 from scinr.newton.config import get_config
+from scinr.newton.exceptions import ConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -196,28 +197,29 @@ def setup_schema(driver: Driver) -> None:
     cfg = get_config()
     with driver.session(database=cfg.neo4j_database) as session:
         try:
-            result = session.run(
+            record = session.run(
                 "CALL dbms.components() YIELD versions RETURN versions[0] AS version"
-            )
-            record = result.single()
+            ).single()
             if record:
-                version_str = record["version"]
+                version_str = str(record["version"])
                 parts = version_str.split(".")
                 major, minor = int(parts[0]), int(parts[1])
                 if (major, minor) < (4, 4):
-                    from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
                         "scinr-ingest requires Neo4j >= 4.4. "
                         "Please upgrade your Neo4j instance."
                     )
             else:
-                # Formato desconocido (por ejemplo, Aura: 27-aura).
-                # No bloqueamos la conexión.
+                # Empty result (por ejemplo, Aura / formato no estándar).
+                # Best-effort: no bloqueamos la conexión.
                 logger.warning(
-                    "Could not parse Neo4j version %r; skipping compatibility check.",
-                    version_str,
+                    "Could not determine Neo4j version (empty result); skipping compatibility check."
                 )
+        except ConfigurationError:
+            raise
+        except Exception as exc:
+            logger.warning("Could not verify Neo4j version: %s", exc)
 
     # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
     with driver.session(database=cfg.neo4j_database) as session:

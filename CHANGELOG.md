@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.4] - 2026-09-04
+## [0.3.6] - 2026-09-04
+
+### Fixed
+- Removed redundant function-local `get_config` imports in `newton.tabular.neo4j_ops` that shadowed the module-level import and caused `UnboundLocalError` on every tabular sheet write (fixes CSV/XLSX ingestion writing zero rows).
+
+## [0.3.5] - 2026-09-04
 
 ### Added
 - **`fast_extraction` mode** (opt-in) in `run_pipeline()`: pass `fast_extraction=True` to run Stage 1 (extraction) chunks in parallel and defer cross-chunk hierarchy resolution to a single post-extraction consolidation LLM call instead of incremental per-chunk prefix matching. This can substantially reduce Stage 1 wall-clock time for multi-chunk documents. The flag is resolved once per call and passed explicitly down to Stage 1 — never read from global config — so concurrent `run_pipeline()` calls with different values never interfere. Default remains `False` (unchanged legacy behavior); raises `ValueError` if `True` while `"extraction"` is not in `stages`. (#14)
