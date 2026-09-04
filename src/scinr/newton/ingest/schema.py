@@ -36,6 +36,7 @@ Fulltext indexes (semantic search):
 """
 
 import logging
+import re
 
 from neo4j import Driver
 
@@ -207,13 +208,16 @@ def setup_schema(driver: Driver) -> None:
                     from scinr.newton.exceptions import ConfigurationError
                     raise ConfigurationError(
                         f"Neo4j {version_str} is not supported. "
-                        f"scinr-ingest requires Neo4j >= 4.4. "
-                        f"Please upgrade your Neo4j instance."
+                        "scinr-ingest requires Neo4j >= 4.4. "
+                        "Please upgrade your Neo4j instance."
                     )
-        except ConfigurationError:
-            raise
-        except Exception:
-            pass  # version check is best-effort; proceed if query fails
+            else:
+                # Formato desconocido (por ejemplo, Aura: 27-aura).
+                # No bloqueamos la conexión.
+                logger.warning(
+                    "Could not parse Neo4j version %r; skipping compatibility check.",
+                    version_str,
+                )
 
     # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
     with driver.session(database=cfg.neo4j_database) as session:

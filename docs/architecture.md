@@ -144,6 +144,8 @@ Every converter produces an `IntermediateDocument` (Pydantic model) with:
 
 **Concurrency:** Documents are processed with bounded parallelism via `parallel_docs` parameter (default: 1 for sequential processing, matching pre-existing behavior).
 
+The actual per-file conversion is dispatched via `_run_convert()`: synchronous converters (docx, pptx, xlsx, csv, html, text) run on `asyncio.to_thread()`, while async converters (`PdfConverter`, whose conversion is genuine network I/O against the Mistral OCR API) are awaited natively on the event loop — so the concurrency `parallel_docs` schedules translates into real parallel progress instead of blocking the loop.
+
 **Storage Integration:**
 
 When `storage_backend` is configured (not `"none"`), Stage 0 stores:

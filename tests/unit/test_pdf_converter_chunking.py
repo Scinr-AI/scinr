@@ -2,12 +2,15 @@
 tests/unit/test_pdf_converter_chunking.py — Unit tests for PdfConverter chunking,
 retry, and configurable error-strategy behaviour.
 
-All httpx.post calls are mocked — no real network access, no real API key.
+All httpx.AsyncClient.post calls are mocked — no real network access, no
+real API key. PdfConverter.convert() is a native coroutine (is_async =
+True), so every test in this module is an `async def` awaiting it directly.
 """
 from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pypdf import PdfWriter
@@ -77,16 +80,18 @@ def _side_effect_from(responses: list):
 
 
 class TestNoSplitBehaviour:
-    def test_small_pdf_single_call_and_correct_mapping(self, tmp_path, mocker):
+    async def test_small_pdf_single_call_and_correct_mapping(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=2)
-        mock_post = mocker.patch("httpx.post", return_value=_ok_response(2))
+        mock_post = mocker.patch(
+            "httpx.AsyncClient.post", new_callable=AsyncMock, return_value=_ok_response(2)
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
             safe_max_pages=900,
             safe_max_bytes=45 * 1024 * 1024,
         )
-        doc = converter.convert(source)
+        doc = await converter.convert(source)
 
         assert mock_post.call_count == 1
         assert [p.index for p in doc.pages] == [0, 1]
@@ -94,11 +99,15 @@ class TestNoSplitBehaviour:
         assert doc.pages[1].markdown == "page-1"
         assert doc.missing_page_ranges is None
 
-    def test_small_pdf_http_error_message_is_identical_to_legacy_format(self, tmp_path, mocker):
+    async def test_small_pdf_http_error_message_is_identical_to_legacy_format(self, tmp_path, mocker):
         """No 'chunk X/Y' prefix must leak into the error message when the
         document did not need splitting."""
         source = _write_pdf(tmp_path, num_pages=2)
-        mocker.patch("httpx.post", return_value=_FakeResponse(400, text="bad request"))
+        mocker.patch(
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            return_value=_FakeResponse(400, text="bad request"),
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
@@ -106,11 +115,11 @@ class TestNoSplitBehaviour:
             safe_max_bytes=45 * 1024 * 1024,
         )
         with pytest.raises(ConversionError) as exc_info:
-            converter.convert(source)
+            await converter.convert(source)
 
         assert str(exc_info.value) == "Mistral OCR API returned HTTP 400: bad request"
 
-    def test_map_page_index_offset_defaults_to_zero(self):
+    async def test_map_page_index_offset_defaults_to_zero(self):
         """_map_page(page_data) without index_offset preserves the raw index —
         explicit backward-compatibility check on the method signature."""
         converter = PdfConverter(api_key="dummy-test-key")
@@ -124,11 +133,12 @@ class TestNoSplitBehaviour:
 
 
 class TestChunkingAndReassembly:
-    def test_three_chunks_reassembled_with_continuous_index(self, tmp_path, mocker):
+    async def test_three_chunks_reassembled_with_continuous_index(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=5)
         # max_pages=2 over 5 pages -> chunks of sizes [2, 2, 1]
         mock_post = mocker.patch(
-            "httpx.post",
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
             side_effect=_side_effect_from(
                 [_ok_response(2), _ok_response(2), _ok_response(1)]
             ),
@@ -140,7 +150,7 @@ class TestChunkingAndReassembly:
             safe_max_bytes=10_000_000,
             error_strategy="fail_fast",
         )
-        doc = converter.convert(source)
+        doc = await converter.convert(source)
 
         assert mock_post.call_count == 3
         assert [p.index for p in doc.pages] == [0, 1, 2, 3, 4]
@@ -153,12 +163,13 @@ class TestChunkingAndReassembly:
 
 
 class TestFailFastStrategy:
-    def test_fail_fast_raises_and_skips_remaining_chunks(self, tmp_path, mocker):
+    async def test_fail_fast_raises_and_skips_remaining_chunks(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=5)
-        # chunk1 success, chunk2: 3x HTTP 503 (exhausts default max_retries=3),
+        # chunk1 success, chunk2: 3x HTTP 503 (exhausts default max_retries=15),
         # chunk3 must never be requested.
         mock_post = mocker.patch(
-            "httpx.post",
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
             side_effect=_side_effect_from(
                 [
                     _ok_response(2),
@@ -168,7 +179,9 @@ class TestFailFastStrategy:
                 ]
             ),
         )
-        mocker.patch("scinr.newton.converters.pdf.time.sleep", return_value=None)
+        mocker.patch(
+            "scinr.newton.converters.pdf.asyncio.sleep", new_callable=AsyncMock, return_value=None
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
@@ -177,7 +190,7 @@ class TestFailFastStrategy:
             error_strategy="fail_fast",
         )
         with pytest.raises(ConversionError) as exc_info:
-            converter.convert(source)
+            await converter.convert(source)
 
         message = str(exc_info.value)
         assert "[2, 4)" in message
@@ -193,10 +206,11 @@ class TestFailFastStrategy:
 
 
 class TestBestEffortStrategy:
-    def test_best_effort_skips_failed_chunk_and_continues(self, tmp_path, mocker):
+    async def test_best_effort_skips_failed_chunk_and_continues(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=5)
         mock_post = mocker.patch(
-            "httpx.post",
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
             side_effect=_side_effect_from(
                 [
                     _ok_response(2),
@@ -207,7 +221,9 @@ class TestBestEffortStrategy:
                 ]
             ),
         )
-        mocker.patch("scinr.newton.converters.pdf.time.sleep", return_value=None)
+        mocker.patch(
+            "scinr.newton.converters.pdf.asyncio.sleep", new_callable=AsyncMock, return_value=None
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
@@ -215,7 +231,7 @@ class TestBestEffortStrategy:
             safe_max_bytes=10_000_000,
             error_strategy="best_effort",
         )
-        doc = converter.convert(source)
+        doc = await converter.convert(source)
 
         # chunk1 (pages 0-1) + chunk3 (page 4, remapped with offset -> index 4)
         assert [p.index for p in doc.pages] == [0, 1, 4]
@@ -230,15 +246,18 @@ class TestBestEffortStrategy:
 
 
 class TestNonRetryableError:
-    def test_http_400_does_not_retry(self, tmp_path, mocker):
+    async def test_http_400_does_not_retry(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=5)
         mock_post = mocker.patch(
-            "httpx.post",
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
             side_effect=_side_effect_from(
                 [_FakeResponse(400, text="bad request")]
             ),
         )
-        mocker.patch("scinr.newton.converters.pdf.time.sleep", return_value=None)
+        mocker.patch(
+            "scinr.newton.converters.pdf.asyncio.sleep", new_callable=AsyncMock, return_value=None
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
@@ -247,7 +266,7 @@ class TestNonRetryableError:
             error_strategy="fail_fast",
         )
         with pytest.raises(ConversionError):
-            converter.convert(source)
+            await converter.convert(source)
 
         assert mock_post.call_count == 1
 
@@ -258,10 +277,11 @@ class TestNonRetryableError:
 
 
 class TestTransientRecovery:
-    def test_recovers_after_two_transient_failures(self, tmp_path, mocker):
+    async def test_recovers_after_two_transient_failures(self, tmp_path, mocker):
         source = _write_pdf(tmp_path, num_pages=2)
         mock_post = mocker.patch(
-            "httpx.post",
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
             side_effect=_side_effect_from(
                 [
                     _FakeResponse(503, text="unavailable"),
@@ -270,7 +290,9 @@ class TestTransientRecovery:
                 ]
             ),
         )
-        mocker.patch("scinr.newton.converters.pdf.time.sleep", return_value=None)
+        mocker.patch(
+            "scinr.newton.converters.pdf.asyncio.sleep", new_callable=AsyncMock, return_value=None
+        )
 
         converter = PdfConverter(
             api_key="dummy-test-key",
@@ -278,7 +300,7 @@ class TestTransientRecovery:
             safe_max_bytes=45 * 1024 * 1024,
             max_retries=3,
         )
-        doc = converter.convert(source)
+        doc = await converter.convert(source)
 
         assert mock_post.call_count == 3
         assert [p.index for p in doc.pages] == [0, 1]
@@ -291,22 +313,22 @@ class TestTransientRecovery:
 
 
 class TestInvalidErrorStrategyOverride:
-    def test_invalid_error_strategy_constructor_override_raises(self, tmp_path, mocker):
+    async def test_invalid_error_strategy_constructor_override_raises(self, tmp_path, mocker):
         """An invalid error_strategy passed explicitly to the PdfConverter
         constructor must be treated as a hard configuration error
         (ConversionError), consistent with configure()'s ConfigurationError
         for the same invalid value — not a silent warning+fallback to
         'fail_fast'."""
         source = _write_pdf(tmp_path, num_pages=2)
-        # httpx.post must never be called — the error is raised before any
-        # network I/O, while resolving limits.
-        mock_post = mocker.patch("httpx.post")
+        # httpx.AsyncClient.post must never be called — the error is raised
+        # before any network I/O, while resolving limits.
+        mock_post = mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock)
 
         converter = PdfConverter(
             api_key="dummy-test-key",
             error_strategy="not_a_real_strategy",
         )
         with pytest.raises(ConversionError, match="mistral_ocr_error_strategy|error_strategy"):
-            converter.convert(source)
+            await converter.convert(source)
 
         assert mock_post.call_count == 0

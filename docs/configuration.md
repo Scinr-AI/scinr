@@ -61,7 +61,7 @@ All environment variables are optional unless otherwise noted. They are read at 
 | `MISTRAL_API_KEY` | `None` | Mistral API key for PDF OCR extraction. Required to process PDF files. |
 | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` | Maximum number of pages before OCR becomes mandatory. |
 | `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` (45 MiB) | Maximum file size in bytes before OCR is required. |
-| `MISTRAL_OCR_MAX_RETRIES` | `3` | Number of retry attempts for OCR failures. |
+| `MISTRAL_OCR_MAX_RETRIES` | `15` | Number of retry attempts for OCR failures. Retry uses exponential backoff capped at 5 minutes between retries. |
 | `MISTRAL_OCR_RETRY_BACKOFF_SECONDS` | `2.0` | Base backoff in seconds between retries. |
 | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` | Maximum concurrent OCR chunk processing. |
 | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` | Error handling: `fail_fast` (abort on first error) or `best_effort` (continue and collect what is possible). |
@@ -212,7 +212,7 @@ configure(
     mistral_api_key="your_mistral_key",
     mistral_ocr_safe_max_pages=900,
     mistral_ocr_safe_max_bytes=47185920,
-    mistral_ocr_max_retries=3,
+    mistral_ocr_max_retries=15,
     mistral_ocr_error_strategy="best_effort",
 
     # Pipeline
@@ -351,7 +351,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
 | **OCR Max Pages** | `mistral_ocr_safe_max_pages` | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` |
 | **OCR Max Bytes** | `mistral_ocr_safe_max_bytes` | `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` |
-| **OCR Max Retries** | `mistral_ocr_max_retries` | `MISTRAL_OCR_MAX_RETRIES` | `3` |
+| **OCR Max Retries** | `mistral_ocr_max_retries` | `MISTRAL_OCR_MAX_RETRIES` | `15` |
 | **OCR Backoff** | `mistral_ocr_retry_backoff_seconds` | `MISTRAL_OCR_RETRY_BACKOFF_SECONDS` | `2.0` |
 | **OCR Concurrency** | `mistral_ocr_chunk_concurrency` | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` |
 | **OCR Error Strategy** | `mistral_ocr_error_strategy` | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` |

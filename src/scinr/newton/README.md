@@ -136,7 +136,7 @@ All stage functions are async and importable from `scinr.newton`:
 
 #### `run_preprocess(input_raw, output_dir=None, context_instructions=None)`
 
-**Stage 0.** Converts raw source files in `input_raw` to intermediate JSON using the registered converters. When `output_dir` is `None`, intermediate documents are returned in memory only. Returns `tuple[StageResult, list[IntermediateDocument]]`.
+**Stage 0.** Converts raw source files in `input_raw` to intermediate JSON using the registered converters. When `output_dir` is `None`, intermediate documents are returned in memory only. Returns `tuple[StageResult, list[IntermediateDocument]]`. With `parallel_docs > 1`, conversions run with real parallelism — dispatched to a worker thread for sync converters or awaited natively for async converters (e.g. `PdfConverter`) — instead of blocking the event loop.
 
 #### `run_extraction(input_folder=None, output_folder=None, intermediate_documents=None, parallel_docs=1)`
 
