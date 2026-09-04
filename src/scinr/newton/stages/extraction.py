@@ -15,6 +15,13 @@ from typing import TYPE_CHECKING
 from scinr.newton.config import get_config, get_llm, get_llm_semaphore
 from scinr.newton.extraction.compact_extraction import compact_extraction, get_active_hierarchy
 from scinr.newton.extraction.extraction import ExtractionMaxRetriesError, extract_chunk
+from scinr.newton.extraction.structure_consolidation import (
+    assemble_tree,
+    consolidate_structure,
+    delete_map_checkpoint,
+    namespace_node_ids,
+    write_map_checkpoint,
+)
 from scinr.newton.models.document_structure import Document
 from scinr.newton.results import DocumentResult, StageResult
 
@@ -24,8 +31,115 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _run_chunk_extraction(
+    document: Document,
+    chunks: list[tuple[str, list[str]]],
+    page_indices: list[int],
+    page_ids_by_index: dict[int, str],
+    batch_size: int,
+    output_file: Path | None,
+    llm,
+    fast_extraction: bool,
+) -> Document:
+    """Runs the legacy sequential or fast-extraction parallel chunk-processing
+    loop against *document*, writing intermediate/final output when
+    *output_file* is set, and returns the mutated *document*.
+    """
+    if not fast_extraction:
+        # ── Legacy sequential path (fast_extraction=False, always the
+        # default) — unchanged. Do not modify a single line in this branch. ──
+        for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
+            active_hierarchy = get_active_hierarchy(document)
+            curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
+            curr_page_ids = [
+                page_ids_by_index[page_indices[curr_start_idx + i]]
+                for i in range(len(curr_pages))
+                if page_indices[curr_start_idx + i] in page_ids_by_index
+            ] or None
+
+            try:
+                async with get_llm_semaphore():
+                    nodes = await extract_chunk(
+                        prev_page=prev_page,
+                        curr_pages=curr_pages,
+                        active_hierarchy=active_hierarchy,
+                        llm=llm,
+                        curr_page_ids=curr_page_ids,
+                        user_context=document.context_instructions or "",
+                    )
+            except ExtractionMaxRetriesError:
+                logger.warning(
+                    "Chunk %d/%d: all extraction attempts failed — skipping chunk.",
+                    chunk_idx + 1, len(chunks),
+                )
+                continue
+
+            document = compact_extraction(document, nodes)
+
+            # Intermediate crash-safe write if output requested
+            if output_file:
+                output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+    else:
+        # ── fast_extraction=True: parallel chunk extraction + consolidation ──
+        async def _extract_one_chunk_fast(
+            chunk_idx: int, prev_page: str, curr_pages: list[str], curr_page_ids: list[str] | None
+        ) -> list:
+            try:
+                async with get_llm_semaphore():
+                    return await extract_chunk(
+                        prev_page=prev_page,
+                        curr_pages=curr_pages,
+                        active_hierarchy="",
+                        defer_hierarchy=True,
+                        llm=llm,
+                        curr_page_ids=curr_page_ids,
+                        user_context=document.context_instructions or "",
+                    )
+            except ExtractionMaxRetriesError:
+                logger.warning(
+                    "Chunk %d/%d: all extraction attempts failed — skipping chunk.",
+                    chunk_idx + 1, len(chunks),
+                )
+                return []
+
+        chunk_first_abs_page_idx: list[int] = []
+        tasks = []
+        for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
+            curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
+            curr_page_ids = [
+                page_ids_by_index[page_indices[curr_start_idx + i]]
+                for i in range(len(curr_pages))
+                if page_indices[curr_start_idx + i] in page_ids_by_index
+            ] or None
+            chunk_first_abs_page_idx.append(page_indices[curr_start_idx])
+            tasks.append(_extract_one_chunk_fast(chunk_idx, prev_page, curr_pages, curr_page_ids))
+
+        all_chunks_nodes = await asyncio.gather(*tasks)
+
+        for nodes, first_abs_page_idx in zip(all_chunks_nodes, chunk_first_abs_page_idx):
+            namespace_node_ids(nodes, first_abs_page_idx)
+
+        checkpoint_path: Path | None = None
+        if output_file:
+            checkpoint_path = output_file.with_name(f"map-checkpoint-{document.document_name}.json")
+            write_map_checkpoint(checkpoint_path, list(all_chunks_nodes))
+
+        decisions = await consolidate_structure(list(all_chunks_nodes), llm=llm)
+        document.document_structure = assemble_tree(list(all_chunks_nodes), decisions)
+
+        if checkpoint_path is not None:
+            delete_map_checkpoint(checkpoint_path)
+
+    # Final write if output requested
+    if output_file:
+        output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("Written: %s", output_file)
+
+    return document
+
+
 async def extract_one_intermediate(
-    doc: IntermediateDocument, output_path: Path | None
+    doc: IntermediateDocument, output_path: Path | None, fast_extraction: bool = False
 ) -> Document | None:
     """Process a single IntermediateDocument already in memory.
 
@@ -45,6 +159,12 @@ async def extract_one_intermediate(
     output_path:
         Base output directory for this stage, or None to keep the result
         in-memory only.
+    fast_extraction:
+        When ``False`` (default), uses the legacy sequential per-chunk
+        extraction loop (unchanged). When ``True``, extracts all chunks in
+        parallel with cross-chunk hierarchy resolution deferred to a single
+        post-extraction consolidation LLM call. See ``run_pipeline()``'s
+        docstring for the full tradeoff explanation.
 
     Returns
     -------
@@ -103,50 +223,16 @@ async def extract_one_intermediate(
     else:
         output_file = None
 
-    for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
-        active_hierarchy = get_active_hierarchy(document)
-        curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
-        curr_page_ids = [
-            page_ids_by_index[page_indices[curr_start_idx + i]]
-            for i in range(len(curr_pages))
-            if page_indices[curr_start_idx + i] in page_ids_by_index
-        ] or None
-
-        try:
-            async with get_llm_semaphore():
-                nodes = await extract_chunk(
-                    prev_page=prev_page,
-                    curr_pages=curr_pages,
-                    active_hierarchy=active_hierarchy,
-                    llm=llm,
-                    curr_page_ids=curr_page_ids,
-                    user_context=document.context_instructions or "",
-                )
-        except ExtractionMaxRetriesError:
-            logger.warning(
-                "Chunk %d/%d: all extraction attempts failed — skipping chunk.",
-                chunk_idx + 1, len(chunks),
-            )
-            continue
-
-        document = compact_extraction(document, nodes)
-
-        # Intermediate crash-safe write if output requested
-        if output_file:
-            output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-
-    # Final write if output requested
-    if output_file:
-        output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-        logger.info("Written: %s", output_file)
-
-    return document
+    return await _run_chunk_extraction(
+        document, chunks, page_indices, page_ids_by_index, batch_size, output_file, llm, fast_extraction,
+    )
 
 
 async def extract_one_file(
     json_file: Path,
     output_path: Path | None,
     input_folder: Path | None,
+    fast_extraction: bool = False,
 ) -> Document | None:
     """Process a single Stage 0 JSON intermediate file from disk.
 
@@ -169,6 +255,12 @@ async def extract_one_file(
     input_folder:
         The root input folder, used to compute the relative subdirectory
         structure to mirror under output_path. May be None.
+    fast_extraction:
+        When ``False`` (default), uses the legacy sequential per-chunk
+        extraction loop (unchanged). When ``True``, extracts all chunks in
+        parallel with cross-chunk hierarchy resolution deferred to a single
+        post-extraction consolidation LLM call. See ``run_pipeline()``'s
+        docstring for the full tradeoff explanation.
 
     Returns
     -------
@@ -232,42 +324,9 @@ async def extract_one_file(
     else:
         output_file = None
 
-    for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
-        active_hierarchy = get_active_hierarchy(document)
-        curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
-        curr_page_ids = [
-            page_ids_by_index[page_indices[curr_start_idx + i]]
-            for i in range(len(curr_pages))
-            if page_indices[curr_start_idx + i] in page_ids_by_index
-        ] or None
-
-        try:
-            async with get_llm_semaphore():
-                nodes = await extract_chunk(
-                    prev_page=prev_page,
-                    curr_pages=curr_pages,
-                    active_hierarchy=active_hierarchy,
-                    llm=llm,
-                    curr_page_ids=curr_page_ids,
-                    user_context=document.context_instructions or "",
-                )
-        except ExtractionMaxRetriesError:
-            logger.warning(
-                "  Chunk %d/%d: all extraction attempts failed — skipping chunk.",
-                chunk_idx + 1, len(chunks),
-            )
-            continue
-
-        document = compact_extraction(document, nodes)
-
-        if output_file:
-            output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-
-    if output_file:
-        output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
-        logger.info("  Written: %s", output_file)
-
-    return document
+    return await _run_chunk_extraction(
+        document, chunks, page_indices, page_ids_by_index, batch_size, output_file, llm, fast_extraction,
+    )
 
 
 async def run_extraction(
@@ -283,6 +342,12 @@ async def run_extraction(
     If *output_folder* is given, the extracted Document JSON is also written to
     disk (mirroring subdirectory structure). If not, documents only exist in
     memory.
+
+    Note: this older batch entry point always calls ``extract_one_intermediate()``/
+    ``extract_one_file()`` with ``fast_extraction=False`` — the ``fast_extraction``
+    flag is only reachable via ``run_pipeline()``'s per-document-unit engine
+    (``_process_document_unit()``). This is a deliberate scope boundary, not
+    an oversight.
 
     Parameters
     ----------

@@ -144,11 +144,50 @@ def reset_extraction_cache() -> None:
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 
+_DEFERRED_HIERARCHY_NOTE = "(none)"
+"""Sentinel substituted for `<active_hierarchy>`'s content when `defer_hierarchy=True`.
+
+Deliberately reuses the same `"(none)"` sentinel `get_active_hierarchy()` already
+returns for an empty tree, rather than a novel placeholder, so every existing
+prompt rule that already handles `"(none)"` correctly (not just the ORPHANED
+branch) applies uniformly — no new/undefined state is introduced anywhere in
+the prompt.
+"""
+
+_FAST_EXTRACTION_MODE_NOTE = (
+    "<extraction_mode>\n"
+    "fast — this chunk is processed in isolation, without visibility into the "
+    "real document hierarchy beyond the current batch of pages. Because of "
+    "this, when heading-level ambiguity cannot be resolved using "
+    "<previous_page> alone, prefer the lower-level role (subsection or "
+    "freeform_block) over section. A continuation misclassified as a new "
+    "top-level section here becomes permanent and cannot be corrected by a "
+    "later consolidation step.\n"
+    "</extraction_mode>"
+)
+"""`<extraction_mode>` block injected into the human message when `defer_hierarchy=True`.
+
+Counteracts the extraction prompt's own ambiguous-role fallback, which — absent
+this note — defaults to the higher-level role (section) whenever heading-level
+ambiguity cannot be resolved from `<previous_page>` alone. That default is safe
+in the legacy sequential path (a wrong SECTION can still be corrected by later
+chunks with full context) but is actively harmful under `fast_extraction=True`:
+each chunk is processed in isolation with no downstream visibility into the
+real hierarchy, structure_consolidation.py never re-examines nodes already
+classified as SECTION/APPENDIX (they are top-level roles by definition), so a
+continuation-of-an-open-section wrongly promoted to SECTION here is a permanent,
+unrecoverable error. This note only appears when `defer_hierarchy=True` — the
+legacy path's human message is left byte-for-byte unchanged.
+"""
+
+
 def _build_human_message(
     prev_page: str,
     curr_pages: list[str],
     active_hierarchy: str,
     user_context: str = "",
+    *,
+    defer_hierarchy: bool = False,
 ) -> str:
     """Builds the human message for the extraction LLM call.
 
@@ -159,17 +198,32 @@ def _build_human_message(
         user_context: Optional free-text context supplied by the caller (e.g. document
             description, domain hints). When non-empty it is prepended as a
             ``<user_context>`` XML block before the rest of the message.
+        defer_hierarchy: When ``True``, the ``<active_hierarchy>`` block content is
+            replaced with the ``"(none)"`` sentinel instead of *active_hierarchy*
+            (which is ignored in this mode — callers may pass ``""``). Used by the
+            ``fast_extraction=True`` parallel-chunk path, where cross-chunk hierarchy
+            resolution is deferred to a separate consolidation step. Defaults to
+            ``False`` (unchanged behavior — the real *active_hierarchy* is always used).
+            When ``True``, an additional ``<extraction_mode>`` block (see
+            ``_FAST_EXTRACTION_MODE_NOTE``) is also inserted immediately before the
+            ``<active_hierarchy>`` block, telling the model to prefer the lower-level
+            role on unresolved heading-level ambiguity. When ``False``, no
+            ``<extraction_mode>`` block is added at all — the legacy message is
+            byte-for-byte unchanged.
     """
     prefix = f"<user_context>\n{user_context}\n</user_context>\n\n" if user_context else ""
     pages_xml = "\n\n".join(
         f"<page_{i + 1}>\n{page}\n</page_{i + 1}>"
         for i, page in enumerate(curr_pages)
     )
+    hierarchy_content = _DEFERRED_HIERARCHY_NOTE if defer_hierarchy else active_hierarchy
+    extraction_mode_block = f"{_FAST_EXTRACTION_MODE_NOTE}\n\n" if defer_hierarchy else ""
     return (
         f"{prefix}"
         f"<previous_page>\n{prev_page}\n</previous_page>\n\n"
         f"{pages_xml}\n\n"
-        f"<active_hierarchy>\n{active_hierarchy}\n</active_hierarchy>"
+        f"{extraction_mode_block}"
+        f"<active_hierarchy>\n{hierarchy_content}\n</active_hierarchy>"
     )
 
 
@@ -202,6 +256,8 @@ async def extract_chunk(
     llm: Any | None = None,
     curr_page_ids: list[str] | None = None,
     user_context: str = "",
+    *,
+    defer_hierarchy: bool = False,
 ) -> list[StructureNode]:
     """
     Extract structured nodes from one sliding-window chunk.
@@ -222,6 +278,16 @@ async def extract_chunk(
             domain hints). When non-empty, prepended as a ``<user_context>`` XML block at
             the top of every HumanMessage sent to the LLM in both Phase 1 and Phase 2.
             Defaults to ``""`` (no block added).
+        defer_hierarchy: When ``True``, both Phase 1 and Phase 2 human messages replace
+            the ``<active_hierarchy>`` block with the ``"(none)"`` sentinel instead
+            of *active_hierarchy* (which is ignored — callers may pass ``active_hierarchy=""``).
+            Used by the ``fast_extraction=True`` parallel-chunk path. An
+            ``<extraction_mode>`` block is also inserted before ``<active_hierarchy>``
+            in this mode, instructing the model to prefer the lower-level role
+            (subsection/freeform_block) over section when heading-level ambiguity
+            cannot be resolved from ``<previous_page>`` alone — see
+            ``_FAST_EXTRACTION_MODE_NOTE``. Defaults to ``False`` (unchanged behavior;
+            no ``<extraction_mode>`` block is added).
 
     Returns:
         Merged, parsed nodes for this chunk.
@@ -235,7 +301,9 @@ async def extract_chunk(
     structured_llm = llm.with_structured_output(_get_extraction_output_class(), include_raw=True)
 
     # ── Phase 1: full context ──────────────────────────────────────────────────
-    human_text_p1 = _build_human_message(prev_page, curr_pages, active_hierarchy, user_context)
+    human_text_p1 = _build_human_message(
+        prev_page, curr_pages, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
+    )
     messages_p1 = [
         make_system_message(_get_extraction_prompt()),
         HumanMessage(content=human_text_p1),
@@ -274,7 +342,9 @@ async def extract_chunk(
 
     structured_llm_p2 = llm.with_structured_output(_get_extraction_output_class(), include_raw=True)
 
-    human_text_p2 = _build_human_message("", curr_pages, active_hierarchy, user_context)
+    human_text_p2 = _build_human_message(
+        "", curr_pages, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
+    )
     messages_p2 = [
         make_system_message(_get_extraction_prompt()),
         HumanMessage(content=human_text_p2),
