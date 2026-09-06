@@ -740,6 +740,41 @@ async def main():
 asyncio.run(main())
 ```
 
+### 7. Multi-Tenant Ingestion with Job Tracking
+
+Stamp every `:Document` node created by a run with the owning tenant, the user who launched it, and a per-run job id — then use the job id to roll the whole run back if something goes wrong.
+
+```python
+import asyncio
+import uuid
+from scinr.newton import configure, run_pipeline, delete_document
+
+async def main():
+    configure(
+        neo4j_uri="bolt://localhost:7687",
+        neo4j_user="neo4j",
+        neo4j_password="your_password",
+    )
+
+    job_id = f"ingest-{uuid.uuid4()}"
+
+    result = await run_pipeline(
+        input_raw="./raw_docs",
+        tenant_id="acme-corp",
+        created_by_user_id="user-42",
+        job_id=job_id,
+    )
+
+    if not result.success:
+        # Roll back everything this run wrote — every path, every version.
+        deletion = await delete_document(job_id=job_id)
+        print(f"Rolled back job {job_id}: {deletion.documents_deleted} documents removed")
+
+asyncio.run(main())
+```
+
+The three values land on the leaf `:Document` nodes, their ancestor folder-parent nodes, and any tabular documents. They are also written into the `extract-*.json` files if the extraction stage persists them, so a later ingestion-only run can pick them up (or override them — see [the parameter reference](#tenant_id-created_by_user_id-job_id-provenance-metadata)). See [Document Deletion](document-deletion.md) for querying and deleting by these fields.
+
 ---
 
 ## PipelineResult Inspection

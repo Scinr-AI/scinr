@@ -22,6 +22,8 @@ It uses LLMs and Pydantic models to extract structured, domain-specific informat
 
 * **Neo4j knowledge graphs** — Store extracted entities and relationships with document provenance.
 
+* **Multi-tenant provenance** — Stamp every ingested `:Document` with a `tenant_id`, `created_by_user_id`, and `job_id`, and delete a whole ingestion run in one call with `delete_document(job_id=...)`.
+
 * **Optional MongoDB storage** — Store raw files, converted documents, and binary assets using MongoDB/GridFS. Support for other database are planned in the roadmap.
 
 * **LLM-ready documentation** — Provides `llms.txt` and `llms-full.txt` files for AI coding agents and other LLM-based tools.
