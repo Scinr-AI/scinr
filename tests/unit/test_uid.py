@@ -5,7 +5,7 @@ Imports directly from the submodule to avoid triggering the CLI import chain.
 """
 from __future__ import annotations
 
-from scinr.newton.utils.uid import make_instance_uid, make_uid
+from scinr.newton.utils.uid import make_instance_uid, make_uid, normalize_key
 
 
 class TestMakeUid:
@@ -111,3 +111,29 @@ class TestMakeInstanceUid:
         uid = make_instance_uid("SomeModel", {"id": "abc"})
         assert len(uid) == 16
         assert all(c in "0123456789abcdef" for c in uid)
+
+
+class TestNormalizeKey:
+    def test_lowercases_and_strips(self):
+        assert normalize_key("  Q.I.A.1(A) ") == "q.i.a.1(a)"
+
+    def test_strips_accents(self):
+        assert normalize_key("Málaga") == "malaga"
+
+    def test_collapses_whitespace(self):
+        assert normalize_key("a   b\tc") == "a b c"
+
+    def test_matches_ingestion_derived_uids(self):
+        """normalize_key + make_instance_uid rebuild the exact UID ingestion wrote.
+
+        Reference values captured from a real graph (``Country`` model, single
+        ``country_code`` instance_key field).
+        """
+        cases = {
+            "BE": "7b4a882dd40ee96a",
+            "CY": "45e17767b9e17199",
+            "AT": "66c69574a64fdd95",
+        }
+        for raw, expected in cases.items():
+            uid = make_instance_uid("Country", {"country_code": normalize_key(raw)})
+            assert uid == expected

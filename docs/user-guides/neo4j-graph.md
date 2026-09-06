@@ -386,6 +386,12 @@ Unlike `--update` re-ingestion, deletion is **irreversible** — there is no und
 
 ## Query Patterns
 
+!!! tip "Prefer Python?"
+    The [Graph Navigation](graph-navigation.md) module wraps these patterns in
+    typed, `async` methods — list root documents, walk the structure tree, pull
+    a document's model instances, filter by class and properties, and more — so
+    you rarely need to write Cypher by hand.
+
 ### Find All Documents
 
 List all ingested documents, ordered by most recent first:

@@ -105,6 +105,8 @@ class ScinrConfig:
     neo4j_user: str = ""
     neo4j_password: str = ""
     neo4j_database: str = ""
+    # Graph navigation
+    graph_backend: str = "neo4j"  # "neo4j"  (pluggable; more engines later)
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None
     enabled_user_themes: list[str] | None = None
@@ -190,6 +192,8 @@ def configure(
     neo4j_user: str | None = None,
     neo4j_password: str | None = None,
     neo4j_database: str | None = None,
+    # Graph navigation
+    graph_backend: Literal["neo4j"] | None = None,
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None,
     enabled_user_themes: list[str] | None = None,
@@ -243,6 +247,9 @@ def configure(
         neo4j_uri: Neo4j connection URI. Env: `NEO4J_URI`. Default: `bolt://localhost:7687`.
         neo4j_user: Neo4j username. Env: `NEO4J_USER`.
         neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`.
+        graph_backend: Backend for the read-only graph-navigation API
+            (`scinr.newton.navigation`). `'neo4j'` (default). Env: `GRAPH_BACKEND`.
+            Validated like `storage_backend`; reserved for future engines.
         enabled_base_themes: Whitelist of built-in theme paths to activate (`ThemePath` values).
         enabled_user_themes: Whitelist of user theme paths to activate.
         extra_models_paths: Filesystem paths to scan for additional user-defined theme models.
@@ -400,6 +407,14 @@ def configure(
             "  - Set NEO4J_PASSWORD=your_password in your .env file\n"
             "  - Pass neo4j_password='...' to configure()\n"
             "  - Set NEO4J_AUTH=neo4j/password in your .env file"
+        )
+
+    # ── Graph navigation ──────────────────────────────────────────────────────
+    resolved_graph_backend = graph_backend or os.getenv("GRAPH_BACKEND", "neo4j")
+    if resolved_graph_backend not in ("neo4j",):
+        raise ConfigurationError(
+            f"Unknown graph_backend: {resolved_graph_backend!r}. "
+            f"Valid values: 'neo4j'."
         )
 
     # ── Storage ───────────────────────────────────────────────────────────────
@@ -562,6 +577,7 @@ def configure(
         neo4j_user=resolved_neo4j_user,
         neo4j_password=resolved_neo4j_password,
         neo4j_database=resolved_neo4j_database,
+        graph_backend=resolved_graph_backend,
         enabled_base_themes=enabled_base_themes,
         enabled_user_themes=enabled_user_themes,
         extra_models_paths=resolved_extra_models_paths,
@@ -635,8 +651,10 @@ def configure(
         pass  # annotation module may not be initialized yet
 
     log.debug(
-        "scinr-ingest configured: storage=%s, llm_concurrency=%d, neo4j_concurrency=%d",
+        "scinr-ingest configured: storage=%s, graph_backend=%s, llm_concurrency=%d, "
+        "neo4j_concurrency=%d",
         resolved_storage_backend,
+        resolved_graph_backend,
         resolved_concurrency,
         resolved_neo4j_concurrency,
     )

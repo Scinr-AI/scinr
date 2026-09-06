@@ -8,12 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.7] - 2026-09-06
 
 ### Added
+- **`scinr.newton.navigation` — read-only graph navigation API.** A new, fully
+  `async`, engine-abstracted module for exploring the knowledge graph without
+  writing Cypher by hand. `get_graph_navigator()` / the `graph_navigator()`
+  async context manager return a `GraphNavigator` with ~90 typed methods:
+  list root documents (no incoming `IS_COMPOSED_OF`), walk folder / structure
+  trees to a given `depth`, pull the `StructureNode`s / `InfoUnit`s /
+  `ModelInstance`s of a document or node, filter model instances by
+  `model_class` and properties with classic operators (`Eq`, `Ne`, `Gt`, `Gte`,
+  `Lt`, `Lte`, `In`, `NotIn`, `Contains`, `StartsWith`, `EndsWith`, `Regex`,
+  `IsNull`, `IsNotNull`), jump from a model instance back to its owning
+  `StructureNode`(s) / `Document`(s) / `ExtractionResult`(s), traverse annotation
+  decisions (incl. a `get_document_model_profile` roll-up), entities and triples,
+  introspect the catalogue (`get_catalog_graph`) and schema, and run generic
+  `neighbors` / `shortest_path` / `subgraph` queries. Return types are
+  engine-neutral Pydantic models. Nothing in the module mutates the graph.
+- **Pluggable graph backend.** New `graph_backend` config field (env
+  `GRAPH_BACKEND`, default `"neo4j"`), validated like `storage_backend`. The
+  navigation layer is a `GraphNavigator` ABC plus a concrete
+  `Neo4jGraphNavigator`; other engines can be added without touching call sites.
+- **`GraphNavigator.execute_raw()` / `execute_raw_one()`** — an optional,
+  non-portable escape hatch for engine-native read queries, with a `dialect=`
+  fail-fast guard and a write-keyword rejection guard (`CREATE`, `MERGE`, `SET`,
+  `DELETE`, `REMOVE`, `DROP`, `FOREACH`, `LOAD CSV`,
+  `CALL { … } IN TRANSACTIONS`); the statement runs in a READ transaction. The
+  base ABC raises `UnsupportedOperationError`.
+- **`scinr.newton.navigation.pages`** — source-text bridge: resolves the verbatim
+  converted markdown pages behind a structure node / info unit / document via the
+  storage abstraction.
+- New exceptions `NavigationError`, `GraphConnectionError`,
+  `UnsupportedOperationError` (all under `ScinrError`), exported from
+  `scinr.newton`.
+- New `scinr.newton.utils.uid.normalize_key()` — the exact normalisation
+  (`NFKD` → strip accents → lower-case → collapse whitespace) that ingestion
+  applies to `instance_key` / entity values before hashing them into a UID;
+  `entity_extraction.graph_mapper` now reuses it. `get_model_instance_by_key()`
+  applies it so a raw key value resolves straight to the deterministic node UID.
+- New docs: **Graph Navigation** user guide and **Navigation API** reference.
+
 - **Provenance metadata on `:Document` nodes.** `run_pipeline()` accepts three new optional string parameters — `tenant_id`, `created_by_user_id`, and `job_id` — that are written verbatim onto every `:Document` node the run creates: leaf documents, ancestor folder-parent nodes, and tabular documents alike. Each property is always `SET` (stored as `null` when omitted), mirroring `context_instructions`. The values are also stamped onto the `Document` model, so they are serialized into any `extract-*.json` produced by the extraction stage; a value passed to a later ingestion-only `run_pipeline()` call overrides the baked-in one, while omitting it leaves the baked-in value untouched. Threaded through `run_extraction`-adjacent helpers (`extract_one_file`/`extract_one_intermediate`), the loader (`load_file`/`load_files`/`load_folder`/`load_documents`/`ingest_one`/`ingest_one_from_path`), `run_ingestion()`, and `run_tabular_pipeline()`/`run_tabular_agent()`. Not threaded through the standalone `preprocess` stage — supply the values on the `run_pipeline()` call that performs extraction and/or ingestion.
 - New `:Document` indexes on `tenant_id`, `created_by_user_id`, and `job_id` (created by `setup_schema()`).
 - `delete_document(job_id=...)` — bulk deletion selector. Exactly one of `path` or `job_id` must now be provided (`ValueError` otherwise). `job_id` deletes every `:Document` whose `job_id` matches, across all paths and versions of that ingestion run.
 - `delete_document(..., tenant_id=..., created_by_user_id=...)` — optional extra AND-filters applied on top of either selector. A filter left as `None` means "do not filter on this property" (not "the property must be null"). `version` is still accepted as an extra filter in `job_id` mode. The selection `WHERE` clause is assembled at call time from only the filters actually supplied — a plain equality conjunction, so Neo4j uses the per-property `:Document` indexes (notably `idx_document_job_id`) instead of a full label scan.
 
 ### Changed
+- `configure()` accepts a new `graph_backend=` parameter (default `"neo4j"`); the startup debug log line now reports it alongside `storage`.
 - `DeletionResult` gained `job_id`, `tenant_id`, and `created_by_user_id` echo fields; `path` is now `str | None` (it is `None` for a `job_id`-selected deletion).
 
 ## [0.3.6] - 2026-09-04

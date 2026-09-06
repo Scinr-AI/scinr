@@ -3,6 +3,35 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
+
+
+def normalize_key(value: str) -> str:
+    """Normalise a string the way the ingestion pipeline does before hashing.
+
+    Steps: Unicode NFKD, drop combining marks (accents), collapse whitespace to
+    single spaces, strip, lower-case. This is the exact transform
+    ``entity_extraction/graph_mapper._normalize`` applies to ``instance_key``
+    field values and ``LabeledEntity`` values before they are hashed into a
+    deterministic UID, so callers that want to rebuild a ``ModelInstance`` UID
+    from raw key values must run their inputs through this first.
+
+    Args:
+        value: Any string (a raw instance-key field value, an entity value…).
+
+    Returns:
+        The normalised string.
+
+    Examples:
+        >>> normalize_key("  Q.I.A.1(a) ")
+        'q.i.a.1(a)'
+        >>> normalize_key("Ib(A)") == normalize_key("ÍB(a)".replace("Í", "I"))
+        True
+    """
+    nfkd = unicodedata.normalize("NFKD", value)
+    stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", stripped).strip().lower()
 
 
 def make_uid(*parts: str) -> str:

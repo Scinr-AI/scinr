@@ -51,6 +51,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Global entity deduplication** — `LabeledEntity` singletons keyed by `(label, normalized_value)` enable cross-document dedup in the graph
 - **Cross-document model linking** — `instance_relationships` create typed edges between `ModelInstance` nodes across different document sections; forward-reference shell nodes are merged when the target model is later extracted
 - **Versioning & folder hierarchy** — full document version chain in Neo4j; folder structure mirrored as `IS_COMPOSED_OF` relationships
+- **Read-back navigation API** — `scinr.newton.navigation`: a read-only, `async`, engine-abstracted layer of ~90 typed methods over the graph (documents, structure nodes, model instances, entities, schema introspection) — no Cypher required. See the [Graph Navigation guide](https://scinr-ai.github.io/scinr/user-guides/graph-navigation/)
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `--parallel-docs N` for concurrent document handling at every stage
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs

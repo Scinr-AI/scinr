@@ -57,6 +57,7 @@ from scinr.newton.config import get_config
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.uid import make_instance_uid as _make_instance_uid
 from scinr.newton.utils.uid import make_uid as _make_uid
+from scinr.newton.utils.uid import normalize_key as _normalize
 
 log = logging.getLogger(__name__)
 
@@ -65,12 +66,9 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-
-def _normalize(value: str) -> str:
-    """Lowercase, strip accents, collapse whitespace."""
-    nfkd = unicodedata.normalize("NFKD", value)
-    stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
-    return re.sub(r"\s+", " ", stripped).strip().lower()
+# ``_normalize`` (lower-case, strip accents, collapse whitespace) is the shared
+# ``scinr.newton.utils.uid.normalize_key`` — the navigation layer reuses the
+# exact same transform to rebuild ModelInstance UIDs from raw key values.
 
 
 def _to_rel_name(field_name: str) -> str:
