@@ -13,6 +13,7 @@ Welcome to the `scinr.newton` API reference. All API documentation is auto-gener
 - [Deletion](deletion.md): ``delete_document()`` — permanent document removal with cascade and garbage collection.
 - [Converters](converters.md): Document format converters.
 - [Storage](storage.md): Storage backends.
+- [Navigation](navigation.md): Read-only, engine-abstracted graph traversal — documents, structure nodes, model instances, entities.
 - [Utilities](utilities.md): Theme registry, LLM factory, and utilities.
 
 ## User Guides

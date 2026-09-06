@@ -76,6 +76,7 @@ nav:
       - Normalization: user-guides/normalization.md
       - Tabular Pipeline: user-guides/tabular-pipeline.md
       - Neo4j Graph Storage: user-guides/neo4j-graph.md
+      - Graph Navigation: user-guides/graph-navigation.md
       - Document Deletion: user-guides/document-deletion.md
       - Storage Backends: user-guides/storage-backends.md
       - Performance Tuning: user-guides/performance-tuning.md
@@ -87,6 +88,7 @@ nav:
       - Normalization: api/normalization.md
       - Converters: api/converters.md
       - Storage: api/storage.md
+      - Navigation: api/navigation.md
       - Utilities: api/utilities.md
       - Exceptions: api/exceptions.md
       - Deletion (delete_document): api/deletion.md

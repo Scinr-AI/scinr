@@ -22,6 +22,9 @@ async def run_tabular_agent(
     resolved_version: int,
     update_mode: bool = False,
     raw_file_id: str = "",
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """Run the full tabular pipeline for one CSV or XLSX file.
 
@@ -39,6 +42,9 @@ async def run_tabular_agent(
     resolved_version : Pre-computed batch version.
     update_mode : If True, existing Table/Row subgraph is wiped before re-inserting.
     raw_file_id : MongoDB ObjectId string for the stored raw file, or "" when no storage backend is configured.
+    tenant_id, created_by_user_id, job_id : Optional caller-supplied provenance
+        metadata written verbatim onto the leaf :Document node and every ancestor
+        folder-parent node (always SET; null when omitted).
     """
     from scinr.newton.ingest.nodes import (
         handle_versioning,
@@ -54,7 +60,14 @@ async def run_tabular_agent(
             try:
                 if "/" in doc_path:
                     folder_path = doc_path.rsplit("/", 1)[0]
-                    insert_folder_document_hierarchy(tx, folder_path, resolved_version)
+                    insert_folder_document_hierarchy(
+                        tx,
+                        folder_path,
+                        resolved_version,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
+                    )
                 insert_document(
                     tx,
                     document_name,
@@ -63,6 +76,9 @@ async def run_tabular_agent(
                     raw_file_id,
                     is_folder=False,
                     context_instructions=None,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
                 )
                 handle_versioning(tx, doc_path, resolved_version)
                 link_leaf_to_folder(tx, doc_path, resolved_version)

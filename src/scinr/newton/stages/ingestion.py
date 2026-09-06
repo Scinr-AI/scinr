@@ -22,6 +22,9 @@ async def run_ingestion(
     files: list[Path] | None = None,
     documents: list | None = None,
     update_mode: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> StageResult:
     """Load extracted documents into Neo4j.
 
@@ -43,6 +46,9 @@ async def run_ingestion(
     update_mode:
         If True, wipe existing structure of the latest version and re-insert
         without creating a new version.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata written onto every
+        :Document node created by this stage (see ``ingest.loader.load_file``).
 
     Returns
     -------
@@ -68,7 +74,14 @@ async def run_ingestion(
 
         if documents is not None:
             # In-memory mode
-            doc_names = load_documents(documents, driver, update_mode=update_mode)
+            doc_names = load_documents(
+                documents,
+                driver,
+                update_mode=update_mode,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             for doc in documents:
                 success = doc.document_name in doc_names
                 doc_results.append(DocumentResult(
@@ -78,7 +91,14 @@ async def run_ingestion(
                     errors=[] if success else [f"Failed to ingest '{doc.document_name}'"],
                 ))
         elif files is not None:
-            doc_names = load_files(files, driver, update_mode=update_mode)
+            doc_names = load_files(
+                files,
+                driver,
+                update_mode=update_mode,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             for path in files:
                 doc_name = path.stem.removeprefix("extract-")
                 success = doc_name in doc_names
@@ -101,7 +121,14 @@ async def run_ingestion(
                     f"No 'extract-*.json' files found in '{output_folder}'. "
                     f"Run run_extraction() first."
                 )
-            doc_names = load_folder(output_path, driver, update_mode=update_mode)
+            doc_names = load_folder(
+                output_path,
+                driver,
+                update_mode=update_mode,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             for path in extract_files:
                 doc_name = path.stem.removeprefix("extract-")
                 success = doc_name in doc_names

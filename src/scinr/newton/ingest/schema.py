@@ -24,6 +24,9 @@ Regular indexes (query performance):
     :Document(name)
     :Document(latest)
     :Document(path)
+    :Document(tenant_id)
+    :Document(created_by_user_id)
+    :Document(job_id)
     :StructureNode(role)
     :StructureNode(source_page_ids)
     :LabeledEntity(label)
@@ -132,6 +135,21 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "idx_document_path",
         "CREATE INDEX idx_document_path IF NOT EXISTS "
         "FOR (d:Document) ON (d.path)",
+    ),
+    (
+        "idx_document_tenant_id",
+        "CREATE INDEX idx_document_tenant_id IF NOT EXISTS "
+        "FOR (d:Document) ON (d.tenant_id)",
+    ),
+    (
+        "idx_document_created_by_user_id",
+        "CREATE INDEX idx_document_created_by_user_id IF NOT EXISTS "
+        "FOR (d:Document) ON (d.created_by_user_id)",
+    ),
+    (
+        "idx_document_job_id",
+        "CREATE INDEX idx_document_job_id IF NOT EXISTS "
+        "FOR (d:Document) ON (d.job_id)",
     ),
     (
         "idx_structure_node_role",

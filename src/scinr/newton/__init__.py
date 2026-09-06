@@ -11,13 +11,21 @@ from scinr.newton.exceptions import (
     ConfigurationError,
     ConversionError,
     ExtractionError,
+    GraphConnectionError,
     IngestionError,
     ModelError,
+    NavigationError,
     PreconditionError,
     ScinrError,
     StorageError,
+    UnsupportedOperationError,
 )
 from scinr.newton.ingest.deletion import delete_document
+from scinr.newton.navigation import (
+    GraphNavigator,
+    get_graph_navigator,
+    graph_navigator,
+)
 from scinr.newton.pipeline import run_pipeline
 from scinr.newton.results import (
     DeletionResult,
@@ -52,6 +60,9 @@ __all__ = [
     "ModelError",
     "StorageError",
     "ConversionError",
+    "NavigationError",
+    "GraphConnectionError",
+    "UnsupportedOperationError",
     # Result dataclasses
     "DocumentResult",
     "StageResult",
@@ -68,6 +79,10 @@ __all__ = [
     "run_tabular_pipeline",
     # Document deletion
     "delete_document",
+    # Graph navigation (read-only)
+    "get_graph_navigator",
+    "graph_navigator",
+    "GraphNavigator",
     # Normalization
     "NormalizationEngine",
     # Version

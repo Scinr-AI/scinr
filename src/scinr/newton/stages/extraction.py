@@ -139,7 +139,12 @@ async def _run_chunk_extraction(
 
 
 async def extract_one_intermediate(
-    doc: IntermediateDocument, output_path: Path | None, fast_extraction: bool = False
+    doc: IntermediateDocument,
+    output_path: Path | None,
+    fast_extraction: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> Document | None:
     """Process a single IntermediateDocument already in memory.
 
@@ -165,6 +170,10 @@ async def extract_one_intermediate(
         parallel with cross-chunk hierarchy resolution deferred to a single
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata. Stamped onto the
+        produced Document so it is serialized into the ``extract-*.json``
+        written here and later persisted on the :Document node at ingestion.
 
     Returns
     -------
@@ -209,6 +218,9 @@ async def extract_one_intermediate(
         doc_path=doc_path,
         raw_file_id=doc.raw_file_id or "",
         context_instructions=context_instructions,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
     llm = get_llm()
 
@@ -233,6 +245,9 @@ async def extract_one_file(
     output_path: Path | None,
     input_folder: Path | None,
     fast_extraction: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> Document | None:
     """Process a single Stage 0 JSON intermediate file from disk.
 
@@ -261,6 +276,10 @@ async def extract_one_file(
         parallel with cross-chunk hierarchy resolution deferred to a single
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata. Stamped onto the
+        produced Document so it is serialized into the ``extract-*.json``
+        written here and later persisted on the :Document node at ingestion.
 
     Returns
     -------
@@ -305,6 +324,9 @@ async def extract_one_file(
         doc_path=doc_path,
         raw_file_id=raw.get("raw_file_id") or "",
         context_instructions=context_instructions,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
     llm = get_llm()
 

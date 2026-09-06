@@ -24,7 +24,10 @@ Represents the original input file or folder that was ingested into the system. 
   version: 1,
   load_date: 2024-01-15T10:30:00,
   latest: true,
-  is_folder: false
+  is_folder: false,
+  tenant_id: "acme-corp",
+  created_by_user_id: "user-42",
+  job_id: "ingest-2026-09-06-a"
 })
 ```
 
@@ -36,6 +39,11 @@ Represents the original input file or folder that was ingested into the system. 
 | `load_date` | DateTime | Timestamp when the document was first ingested. |
 | `latest` | Boolean | Indicates if this is the latest version of the document. |
 | `is_folder` | Boolean | Indicates if this node represents a folder (true) vs a file (false). |
+| `raw_file_id` | String | Storage-backend id of the stored raw file (empty for folders / when no storage backend is configured). |
+| `context_instructions` | String \| null | Free-text ingestion context passed via `run_pipeline(context_instructions=...)`; `null` when not supplied. |
+| `tenant_id` | String \| null | Caller-supplied multi-tenant owner id from `run_pipeline(tenant_id=...)`. Always set (`null` when not supplied). Written on leaf **and** folder-parent nodes. |
+| `created_by_user_id` | String \| null | Caller-supplied id of the user that launched the ingestion, from `run_pipeline(created_by_user_id=...)`. Always set (`null` when not supplied). |
+| `job_id` | String \| null | Caller-supplied ingestion job/run id from `run_pipeline(job_id=...)`. Always set (`null` when not supplied). Usable as a bulk-delete selector — see [Document Deletion](document-deletion.md). |
 
 ---
 
@@ -368,7 +376,7 @@ This preserves the full history of document versions in the graph, allowing quer
 
 When a document needs to be permanently removed from the graph (rather than updated in-place), use `delete_document()`. This function:
 
-- Removes the `:Document` node(s) matching the given `path` (and optionally `version`).
+- Removes the `:Document` node(s) matching the given `path` (and optionally `version`), **or** every `:Document` carrying a given `job_id` (`delete_document(job_id=...)`), optionally narrowed further by `tenant_id` / `created_by_user_id`.
 - Cascade-deletes all connected structure, annotation, and extraction nodes.
 - Runs garbage collection on orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes.
 
@@ -377,6 +385,12 @@ Unlike `--update` re-ingestion, deletion is **irreversible** — there is no und
 ---
 
 ## Query Patterns
+
+!!! tip "Prefer Python?"
+    The [Graph Navigation](graph-navigation.md) module wraps these patterns in
+    typed, `async` methods — list root documents, walk the structure tree, pull
+    a document's model instances, filter by class and properties, and more — so
+    you rarely need to write Cypher by hand.
 
 ### Find All Documents
 

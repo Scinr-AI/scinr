@@ -109,6 +109,10 @@ async def run_pipeline(
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
+    # ── Provenance metadata written onto every :Document node created ─────────
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> PipelineResult:
     """Orchestrate the scinr-ingest pipeline end-to-end.
 
@@ -204,6 +208,21 @@ async def run_pipeline(
 
         tabular_extensions: File extensions to process via tabular pipeline (default: `.csv`, `.xlsx`, `.xls`).
         tabular_delimiter: Delimiter character for CSV tabular files.
+        tenant_id: Optional caller-supplied multi-tenant owner id. When provided, it is
+            written verbatim onto every `:Document` node this run creates — leaf
+            documents, ancestor folder-parent nodes, and tabular documents alike —
+            and is serialized into any `extract-*.json` produced by the extraction
+            stage. Always SET on the node (stored as null when omitted), mirroring
+            `context_instructions`. A value passed here overrides any value already
+            baked into an `extract-*.json` being ingested; omitting it leaves that
+            baked-in value untouched. Not threaded through the standalone
+            `preprocess` stage — supply it on the `run_pipeline()` call that
+            performs extraction and/or ingestion.
+        created_by_user_id: Optional caller-supplied id of the user that launched this
+            ingestion. Same write/override semantics as `tenant_id`.
+        job_id: Optional caller-supplied ingestion job/run id. Same write/override
+            semantics as `tenant_id`. Doubles as a bulk-delete selector for
+            `delete_document(job_id=...)`.
         fast_extraction: Opt-in, resolved once per call and passed explicitly through
             every layer down to Stage 1 — never read from global config, by design,
             so that concurrent `run_pipeline()` calls with different values never
@@ -424,6 +443,9 @@ async def run_pipeline(
             parallel_docs=parallel_docs,
             tabular_extensions=_effective_tabular_extensions,
             tabular_delimiter=tabular_delimiter,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
         stage_results.append(sr)
         pipeline_result_kwargs["tabular"] = sr
@@ -456,6 +478,9 @@ async def run_pipeline(
                 parallel_docs=parallel_docs,
                 tabular_extensions=_effective_tabular_extensions,
                 tabular_delimiter=tabular_delimiter,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
             stage_results.append(sr)
             pipeline_result_kwargs["tabular"] = sr
@@ -554,6 +579,9 @@ async def run_pipeline(
                         raw_file_repo=raw_file_repo,
                         page_repo=page_repo,
                         context_instructions=context_instructions,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
                         update_mode=update_mode,
                         manual=manual,
                         model_class=model_class,
@@ -702,6 +730,9 @@ async def _process_document_unit(
     raw_file_repo,
     page_repo,
     context_instructions: str | None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
     update_mode: bool,
     manual: bool,
     model_class: str | None,
@@ -772,6 +803,13 @@ async def _process_document_unit(
         page_repo: Optional ``PageRepository`` forwarded to ``convert_one()``.
         context_instructions: Free-text context forwarded to ``convert_one()`` and
             ``run_annotation()``.
+        tenant_id: Provenance metadata forwarded to ``extract_one_intermediate()`` /
+            ``extract_one_file()`` (so it is serialized into ``extract-*.json``) and
+            to ``ingest_one()`` / ``ingest_one_from_path()`` (so it wins over any
+            value already baked into an ingested ``extract-*.json``). Ends up on
+            every ``:Document`` node this unit creates.
+        created_by_user_id: Provenance metadata, same forwarding as *tenant_id*.
+        job_id: Provenance metadata, same forwarding as *tenant_id*.
         update_mode: Forwarded to ``ingest_one()`` / ``ingest_one_from_path()``.
         manual: Forwarded to ``run_annotation()``.
         model_class: Forwarded to ``run_annotation()`` (required when *manual* is
@@ -871,12 +909,23 @@ async def _process_document_unit(
                 extraction_out = Path(extraction_output_dir) if extraction_output_dir else None
                 if unit.kind == "raw_file":
                     doc_obj = await extract_one_intermediate(
-                        intermediate_doc, extraction_out, fast_extraction=fast_extraction
+                        intermediate_doc,
+                        extraction_out,
+                        fast_extraction=fast_extraction,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
                     )
                 elif unit.kind == "extraction_json":
                     extraction_in = Path(extraction_input_dir) if extraction_input_dir else None
                     doc_obj = await extract_one_file(
-                        unit.source_path, extraction_out, extraction_in, fast_extraction=fast_extraction
+                        unit.source_path,
+                        extraction_out,
+                        extraction_in,
+                        fast_extraction=fast_extraction,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
                     )
 
                 if doc_obj is None:
@@ -896,10 +945,19 @@ async def _process_document_unit(
                             sync_driver,
                             update_mode,
                             shared_ingest_version,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
                         )
                     else:
                         current_name = await ingest_one(
-                            doc_obj, sync_driver, update_mode, shared_ingest_version
+                            doc_obj,
+                            sync_driver,
+                            update_mode,
+                            shared_ingest_version,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
                         )
                 except Exception as exc:
                     stage_results["ingestion"] = DocumentResult(current_name, 0, 1, [str(exc)])

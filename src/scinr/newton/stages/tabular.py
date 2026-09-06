@@ -24,6 +24,9 @@ async def run_tabular_pipeline(
     parallel_docs: int = 1,
     tabular_extensions: set | None = None,
     tabular_delimiter: str | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> StageResult:
     """Ingest all tabular files (CSV/XLSX/XLS) in *input_raw* directly into Neo4j.
 
@@ -47,6 +50,10 @@ async def run_tabular_pipeline(
     tabular_delimiter:
         Field delimiter for CSV files. When None, uses the default
         delimiter of the tabular agent.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata written verbatim onto
+        every :Document node this pipeline creates (leaf tabular documents and
+        their ancestor folder-parent nodes). Always SET (null when omitted).
 
     Returns
     -------
@@ -194,6 +201,9 @@ async def run_tabular_pipeline(
                             resolved_version=resolved_version,
                             update_mode=update_mode,
                             raw_file_id=raw_file_id,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
                         )
                         if tabular_delimiter is not None:
                             agent_kwargs["delimiter"] = tabular_delimiter

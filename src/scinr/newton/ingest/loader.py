@@ -45,6 +45,29 @@ _DEFAULT_FOLDER = Path("data/output")
 _FILE_GLOB = "extract-*.json"
 
 
+def _apply_metadata_overrides(
+    doc: Document,
+    tenant_id: str | None,
+    created_by_user_id: str | None,
+    job_id: str | None,
+) -> None:
+    """Overlay caller-supplied provenance metadata onto *doc* in place.
+
+    Each field is overridden only when a non-None value is supplied; an
+    omitted (None) argument leaves whatever the Document already carries
+    (e.g. a value baked into an ``extract-*.json`` at extraction time)
+    untouched. The resulting ``doc.tenant_id`` / ``doc.created_by_user_id`` /
+    ``doc.job_id`` are then always written to Neo4j by
+    ``insert_document_graph`` (null when still None).
+    """
+    if tenant_id is not None:
+        doc.tenant_id = tenant_id
+    if created_by_user_id is not None:
+        doc.created_by_user_id = created_by_user_id
+    if job_id is not None:
+        doc.job_id = job_id
+
+
 # ---------------------------------------------------------------------------
 # Private version-resolution helpers
 # ---------------------------------------------------------------------------
@@ -158,6 +181,9 @@ def load_file(
     driver,
     update_mode: bool = False,
     shared_version: int | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """Load a single extracted JSON file into Neo4j.
 
@@ -177,6 +203,10 @@ def load_file(
     shared_version:
         Pre-computed version for batch ingestion. When provided, skips
         the per-document version query.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata. When not None, each
+        overrides the corresponding field already present in the JSON before
+        the :Document node is written. See ``_apply_metadata_overrides``.
 
     Returns
     -------
@@ -188,6 +218,7 @@ def load_file(
 
     logger.info("Loading file: %s", path)
     doc = Document.model_validate_json(path.read_text(encoding="utf-8"))
+    _apply_metadata_overrides(doc, tenant_id, created_by_user_id, job_id)
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
 
     logger.info(
@@ -252,6 +283,9 @@ def load_files(
     files: list[Path],
     driver,
     update_mode: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> list[str]:
     """Load a specific list of extracted JSON files into Neo4j.
 
@@ -267,6 +301,9 @@ def load_files(
         An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata, applied to every document
+        in the batch (see ``load_file``).
 
     Returns
     -------
@@ -293,7 +330,13 @@ def load_files(
     for path in files:
         try:
             doc_name = load_file(
-                path, driver, update_mode=update_mode, shared_version=shared_version
+                path,
+                driver,
+                update_mode=update_mode,
+                shared_version=shared_version,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
             doc_names.append(doc_name)
         except Exception as exc:
@@ -320,6 +363,9 @@ def _load_document_object(
     driver,
     update_mode: bool = False,
     shared_version: int | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """Load a single in-memory Document object into Neo4j.
 
@@ -337,12 +383,17 @@ def _load_document_object(
     shared_version:
         Pre-computed version for batch ingestion. When provided, skips
         the per-document version query.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata. When not None, each
+        overrides the corresponding field already on *doc* before the
+        :Document node is written (see ``_apply_metadata_overrides``).
 
     Returns
     -------
     str
         The document_name of the successfully ingested document.
     """
+    _apply_metadata_overrides(doc, tenant_id, created_by_user_id, job_id)
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
 
     logger.info(
@@ -421,6 +472,9 @@ async def ingest_one(
     driver,
     update_mode: bool = False,
     shared_version: int | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """Async wrapper around _load_document_object() for the future
     per-document orchestration engine (Bloque B, does not exist yet).
@@ -454,7 +508,14 @@ async def ingest_one(
     semaphore = get_neo4j_sync_semaphore()
     async with semaphore:
         return await asyncio.to_thread(
-            _load_document_object, doc, driver, update_mode, shared_version
+            _load_document_object,
+            doc,
+            driver,
+            update_mode,
+            shared_version,
+            tenant_id,
+            created_by_user_id,
+            job_id,
         )
 
 
@@ -463,6 +524,9 @@ async def ingest_one_from_path(
     driver,
     update_mode: bool = False,
     shared_version: int | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """Async wrapper around load_file() for the future per-document
     orchestration engine (Bloque B, does not exist yet).
@@ -496,13 +560,25 @@ async def ingest_one_from_path(
 
     semaphore = get_neo4j_sync_semaphore()
     async with semaphore:
-        return await asyncio.to_thread(load_file, path, driver, update_mode, shared_version)
+        return await asyncio.to_thread(
+            load_file,
+            path,
+            driver,
+            update_mode,
+            shared_version,
+            tenant_id,
+            created_by_user_id,
+            job_id,
+        )
 
 
 def load_documents(
     documents: list[Document],
     driver,
     update_mode: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> list[str]:
     """Load a list of in-memory Document objects into Neo4j.
 
@@ -518,6 +594,9 @@ def load_documents(
         An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata, applied to every document
+        in the batch (see ``load_file``).
 
     Returns
     -------
@@ -544,7 +623,13 @@ def load_documents(
     for doc in documents:
         try:
             doc_name = _load_document_object(
-                doc, driver, update_mode=update_mode, shared_version=shared_version
+                doc,
+                driver,
+                update_mode=update_mode,
+                shared_version=shared_version,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
             doc_names.append(doc_name)
         except Exception as exc:
@@ -570,6 +655,9 @@ def load_folder(
     folder: Path,
     driver,
     update_mode: bool = False,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> list[str]:
     """Load all extracted JSON files in a folder (recursively) into Neo4j.
 
@@ -583,6 +671,9 @@ def load_folder(
         An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
+    tenant_id, created_by_user_id, job_id:
+        Optional caller-supplied provenance metadata, applied to every document
+        in the folder (see ``load_file``).
 
     Returns
     -------
@@ -624,7 +715,13 @@ def load_folder(
     for json_file in json_files:
         try:
             doc_name = load_file(
-                json_file, driver, update_mode=update_mode, shared_version=shared_version
+                json_file,
+                driver,
+                update_mode=update_mode,
+                shared_version=shared_version,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
             doc_names.append(doc_name)
         except Exception as exc:

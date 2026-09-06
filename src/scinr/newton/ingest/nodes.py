@@ -162,11 +162,14 @@ def insert_document(
     raw_file_id: str = "",
     is_folder: bool = False,
     context_instructions: str | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """MERGE a :Document node keyed by (path, version).
 
-    Sets name, path, version, load_date, latest, is_folder, and
-    context_instructions.
+    Sets name, path, version, load_date, latest, is_folder,
+    context_instructions, tenant_id, created_by_user_id, and job_id.
     The 'latest' flag management (setting old version to latest=False and
     creating HAS_NEWER_VERSION) is handled separately by handle_versioning().
 
@@ -178,6 +181,12 @@ def insert_document(
         is_folder: True for folder-parent documents; False for leaf documents.
         context_instructions: Optional free-text user-provided ingestion context. When None, the
             property is stored as null in Neo4j (i.e. effectively absent).
+        tenant_id: Optional caller-supplied multi-tenant owner id. Always written
+            (stored as null when None).
+        created_by_user_id: Optional caller-supplied id of the user that launched the
+            ingestion. Always written (stored as null when None).
+        job_id: Optional caller-supplied ingestion job/run id. Always written
+            (stored as null when None).
     """
     from datetime import datetime
     load_date = datetime.now(UTC).isoformat()
@@ -190,6 +199,9 @@ def insert_document(
             d.is_folder            = $is_folder,
             d.raw_file_id          = $raw_file_id,
             d.context_instructions = $context_instructions,
+            d.tenant_id            = $tenant_id,
+            d.created_by_user_id   = $created_by_user_id,
+            d.job_id               = $job_id,
             d.latest               = true
         """,
         path=doc_path,
@@ -199,6 +211,9 @@ def insert_document(
         is_folder=is_folder,
         raw_file_id=raw_file_id,
         context_instructions=context_instructions,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
     logger.debug("Merged Document node: path=%s version=%s", doc_path, version)
 
@@ -236,6 +251,9 @@ def insert_folder_document_hierarchy(
     tx,
     folder_path: str,
     version: int,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Create all ancestor folder-parent Document nodes for a given path.
 
@@ -255,6 +273,12 @@ def insert_folder_document_hierarchy(
         folder_path: Relative folder path (e.g. "ModuloA/SubModulo"). Use the doc_path's
             parent: e.g. if doc_path="ModuloA/SubModulo/doc", pass "ModuloA/SubModulo".
         version: Integer version number shared across this ingestion run.
+        tenant_id: Optional caller-supplied multi-tenant owner id. Always written on
+            every folder-parent node (stored as null when None).
+        created_by_user_id: Optional caller-supplied id of the user that launched the
+            ingestion. Always written (stored as null when None).
+        job_id: Optional caller-supplied ingestion job/run id. Always written
+            (stored as null when None).
     """
     from datetime import datetime
     load_date = datetime.now(UTC).isoformat()
@@ -267,15 +291,21 @@ def insert_folder_document_hierarchy(
         tx.run(
             """
             MERGE (f:Document {path: $path, version: $version})
-            SET f.name      = $name,
-                f.load_date = $load_date,
-                f.is_folder = true,
-                f.latest    = true
+            SET f.name               = $name,
+                f.load_date          = $load_date,
+                f.is_folder          = true,
+                f.tenant_id          = $tenant_id,
+                f.created_by_user_id = $created_by_user_id,
+                f.job_id             = $job_id,
+                f.latest             = true
             """,
             path=current_path,
             version=version,
             name=folder_name,
             load_date=load_date,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
         logger.debug("Merged folder Document: path=%s version=%s", current_path, version)
 
@@ -545,6 +575,12 @@ def insert_document_graph(
             never derived from ``doc.version``.
         update_mode: If True, existing structure for this version is deleted before
             re-insertion. No new version is created; no HAS_NEWER_VERSION link.
+
+    The caller-supplied provenance metadata (``doc.tenant_id``,
+    ``doc.created_by_user_id``, ``doc.job_id``) is read straight off *doc* and
+    written verbatim onto every :Document node this call creates — the leaf
+    node and every ancestor folder-parent node — always SET (stored as null
+    when the field is None), mirroring ``doc.context_instructions``.
     """
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
 
@@ -564,7 +600,14 @@ def insert_document_graph(
     # 2. Create all ancestor folder-parent nodes (if any)
     if "/" in doc_path:
         folder_path = doc_path.rsplit("/", 1)[0]
-        insert_folder_document_hierarchy(tx, folder_path, resolved_version)
+        insert_folder_document_hierarchy(
+            tx,
+            folder_path,
+            resolved_version,
+            tenant_id=doc.tenant_id,
+            created_by_user_id=doc.created_by_user_id,
+            job_id=doc.job_id,
+        )
 
     # 3. Insert (or update) the leaf Document node itself
     insert_document(
@@ -575,6 +618,9 @@ def insert_document_graph(
         doc.raw_file_id,
         is_folder=False,
         context_instructions=doc.context_instructions,
+        tenant_id=doc.tenant_id,
+        created_by_user_id=doc.created_by_user_id,
+        job_id=doc.job_id,
     )
 
     # 4. Handle versioning (only for normal loads, not updates)

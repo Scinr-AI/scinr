@@ -89,6 +89,11 @@ async def run_pipeline(
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
+
+    # ── Provenance metadata written onto every :Document node created ─────────
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> PipelineResult
 ```
 
@@ -356,6 +361,25 @@ result = await run_pipeline(
 ```
 
 This parameter is forwarded to every document unit processed by the pipeline. It is particularly useful when processing documents from a specific domain where the default prompts need additional context.
+
+### `tenant_id`, `created_by_user_id`, `job_id` — Provenance Metadata
+
+**Type:** `str | None`  **Default:** `None` (each)
+
+Caller-supplied provenance values written verbatim onto **every** `:Document` node the run creates — leaf documents, ancestor folder-parent nodes, and tabular documents alike. Each property is always `SET` (stored as `null` when the parameter is omitted), exactly like `context_instructions`.
+
+```python
+result = await run_pipeline(
+    input_raw="./raw_docs",
+    tenant_id="acme-corp",
+    created_by_user_id="user-42",
+    job_id="ingest-2026-09-06-a",
+)
+```
+
+- The values are also stamped onto the `Document` model, so they are serialized into any `extract-*.json` written by the extraction stage. When you later run an ingestion-only pipeline from that JSON, a value passed to that call **overrides** the baked-in one; omitting it keeps the baked-in value.
+- They are **not** threaded through a standalone `stages=["preprocess"]` run — supply them on the `run_pipeline()` call that performs extraction and/or ingestion.
+- `job_id` doubles as a bulk-delete selector: `delete_document(job_id="ingest-2026-09-06-a")` removes every document from that run. `tenant_id` and `created_by_user_id` can be used as extra delete filters. See [Document Deletion](document-deletion.md).
 
 ### `update_mode` — In-Place Document Update
 
@@ -715,6 +739,41 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### 7. Multi-Tenant Ingestion with Job Tracking
+
+Stamp every `:Document` node created by a run with the owning tenant, the user who launched it, and a per-run job id — then use the job id to roll the whole run back if something goes wrong.
+
+```python
+import asyncio
+import uuid
+from scinr.newton import configure, run_pipeline, delete_document
+
+async def main():
+    configure(
+        neo4j_uri="bolt://localhost:7687",
+        neo4j_user="neo4j",
+        neo4j_password="your_password",
+    )
+
+    job_id = f"ingest-{uuid.uuid4()}"
+
+    result = await run_pipeline(
+        input_raw="./raw_docs",
+        tenant_id="acme-corp",
+        created_by_user_id="user-42",
+        job_id=job_id,
+    )
+
+    if not result.success:
+        # Roll back everything this run wrote — every path, every version.
+        deletion = await delete_document(job_id=job_id)
+        print(f"Rolled back job {job_id}: {deletion.documents_deleted} documents removed")
+
+asyncio.run(main())
+```
+
+The three values land on the leaf `:Document` nodes, their ancestor folder-parent nodes, and any tabular documents. They are also written into the `extract-*.json` files if the extraction stage persists them, so a later ingestion-only run can pick them up (or override them — see [the parameter reference](#tenant_id-created_by_user_id-job_id-provenance-metadata)). See [Document Deletion](document-deletion.md) for querying and deleting by these fields.
 
 ---
 

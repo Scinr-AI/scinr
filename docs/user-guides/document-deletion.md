@@ -6,9 +6,15 @@
 
 ## Introduction
 
-The `delete_document()` function is a standalone synchronous operation that:
+`delete_document()` is exported from the package root:
 
-1. **Locates** the target `:Document` node(s) by `path` (and optionally `version`).
+```python
+from scinr.newton import delete_document, DeletionResult
+```
+
+It is an `async` function — `await` it (or wrap it with `asyncio.run()`). It:
+
+1. **Locates** the target `:Document` node(s) by either `path` (optionally narrowed by `version`) **or** `job_id` — exactly one of the two must be given. `tenant_id` and `created_by_user_id` are optional extra filters on top of either selector.
 2. **Cascade-deletes** the document and every node reachable from it:
    - Folder-parent documents and siblings via `IS_COMPOSED_OF*`
    - All `:StructureNode` descendants via `HAS_STRUCTURE*` / `HAS_CHILD*`
@@ -35,18 +41,24 @@ If you simply need to update content, use the `--update` flag with `run_pipeline
 ## Basic Usage
 
 ```python
+import asyncio
 from scinr.newton import delete_document, configure, DeletionResult
 
-configure(
-    neo4j_uri="bolt://localhost:7687",
-    neo4j_user="neo4j",
-    neo4j_password="password",
-)
+async def main():
+    configure(
+        neo4j_uri="bolt://localhost:7687",
+        neo4j_user="neo4j",
+        neo4j_password="password",
+    )
 
-result = delete_document("/path/to/document.pdf")
-print(f"Found: {result.found}")
-print(f"Documents deleted: {result.documents_deleted}")
+    result = await delete_document("/path/to/document.pdf")
+    print(f"Found: {result.found}")
+    print(f"Documents deleted: {result.documents_deleted}")
+
+asyncio.run(main())
 ```
+
+`delete_document()` is `async` — `await` it from a coroutine, or drive it with `asyncio.run()` as above. The remaining snippets on this page show just the `await delete_document(...)` call for brevity; each assumes it runs inside an `async` function after `configure()`.
 
 The `path` parameter matches the `path` property on `:Document` nodes in Neo4j. This is the file path (relative or absolute) as it was recorded at ingestion time.
 
@@ -58,17 +70,49 @@ By default, `delete_document()` deletes **all versions** of a document matching 
 
 ```python
 # Delete ALL versions of a document
-result = delete_document("/path/to/document.pdf")
+result = await delete_document("/path/to/document.pdf")
 ```
 
 To delete a **specific version**, pass the `version` parameter:
 
 ```python
 # Delete only version 2
-result = delete_document("/path/to/document.pdf", version=2)
+result = await delete_document("/path/to/document.pdf", version=2)
 ```
 
 When `version` is specified, only that version's `:Document` node and its cascade are removed. Other versions of the same document remain untouched.
+
+---
+
+## Selecting by `job_id`
+
+Instead of a `path`, you can delete **every** document produced by a single ingestion run by passing its `job_id` (the value given to `run_pipeline(job_id=...)`):
+
+```python
+# Delete every :Document whose job_id property equals "job-2026-09-06-a",
+# across all paths and versions of that run — plus each one's full cascade.
+result = await delete_document(job_id="job-2026-09-06-a")
+```
+
+Exactly one of `path` or `job_id` must be provided — passing neither, or both, raises `ValueError`. `version` is still accepted alongside `job_id` as an additional filter.
+
+---
+
+## Extra filters: `tenant_id` and `created_by_user_id`
+
+`tenant_id` and `created_by_user_id` are optional keyword filters applied **on top of** either selector (`path` or `job_id`):
+
+```python
+# Only delete this path if it also belongs to tenant "acme"
+result = await delete_document("/path/to/document.pdf", tenant_id="acme")
+
+# Delete a whole job, but only the documents created by one user
+result = await delete_document(job_id="job-123", created_by_user_id="user-42")
+```
+
+A filter left unset (`None`) means **"do not filter on this property"** — it does *not* mean "the property must be null". A document with no `tenant_id` is still matched by `delete_document("/path", tenant_id=None)`.
+
+These values are populated by `run_pipeline(tenant_id=..., created_by_user_id=..., job_id=...)` at ingestion time. `DeletionResult` echoes back whichever selector and filters were used (`result.path`, `result.job_id`, `result.tenant_id`, `result.created_by_user_id`); `result.path` is `None` for a `job_id`-selected deletion.
 
 ---
 
@@ -151,8 +195,11 @@ Each pass runs up to **7 iterations** (`GC_MAX_PASSES = 7`). A pass stops early 
 
 | Field | Type | Description |
 |---|---|---|
-| `path` | `str` | The document `path` that was targeted for deletion. |
+| `path` | `str \| None` | The document `path` that was targeted, or `None` when the deletion was selected by `job_id`. |
 | `version` | `int \| None` | The specific version requested, or `None` if all versions were targeted. |
+| `job_id` | `str \| None` | The `job_id` selector that was targeted, or `None` when selected by `path`. |
+| `tenant_id` | `str \| None` | The `tenant_id` filter applied to the match, or `None` if none was requested. |
+| `created_by_user_id` | `str \| None` | The `created_by_user_id` filter applied to the match, or `None` if none was requested. |
 | `found` | `bool` | `True` if at least one matching `:Document` existed before deletion. When `False`, all counters are `0` and no queries were executed. |
 | `versions_deleted` | `list[int]` | Sorted list of integer versions that matched and were deleted. Empty when `found` is `False`. |
 | `documents_deleted` | `int` | Number of `:Document` nodes deleted (matched documents plus any reached via `IS_COMPOSED_OF*`). |
@@ -170,7 +217,7 @@ Each pass runs up to **7 iterations** (`GC_MAX_PASSES = 7`). A pass stops early 
 ### Example Output
 
 ```python
-result = delete_document("/path/to/document.pdf")
+result = await delete_document("/path/to/document.pdf")
 
 if result.found:
     print(f"Deleted {result.documents_deleted} document(s), "
@@ -179,6 +226,17 @@ if result.found:
           f"and {result.gc_labeled_entity_deleted} labeled entity(s)")
 else:
     print("No document found at that path.")
+```
+
+Bulk-deleting an entire ingestion run and reading back which selector was used:
+
+```python
+result = await delete_document(job_id="ingest-2026-09-06-a")
+
+print(result.path)        # None  — this was a job_id-selected deletion
+print(result.job_id)      # "ingest-2026-09-06-a"
+print(result.versions_deleted)     # e.g. [1, 1, 2] across the matched documents
+print(result.documents_deleted)    # total :Document nodes removed
 ```
 
 ---
@@ -202,6 +260,8 @@ Unlike `--update` re-ingestion (which preserves the `:Document` node and allows 
 If the target document is part of a folder hierarchy (connected via `IS_COMPOSED_OF`), the cascade delete reaches **all** documents connected through that relationship — including folder-parent documents and their siblings. This means deleting a leaf document in a folder hierarchy may also delete the parent folder document and its other children.
 
 If you need to delete only a single document without affecting its folder hierarchy, consider using `--update` re-ingestion instead, or manually manage the folder structure before deletion.
+
+The same cascade applies in `job_id` mode: `delete_document(job_id=...)` seeds the cascade with every `:Document` carrying that `job_id`, then follows `IS_COMPOSED_OF*` to their descendants. In the normal case every document produced by one `run_pipeline()` call shares the `job_id`, so this simply deletes the whole run. The edge case to be aware of is a folder-parent node that was first created by job A and later reused (via `MERGE`) by a document ingested under job B — deleting job A will also remove that job-B leaf through the cascade.
 
 ### Version Isolation
 

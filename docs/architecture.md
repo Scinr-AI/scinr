@@ -561,6 +561,7 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 | `neo4j_password` | `NEO4J_PASSWORD` | — | Neo4j password (required) |
 | `neo4j_database` | `NEO4J_DATABASE` | — | Neo4j database name (required) |
 | `storage_backend` | `STORAGE_BACKEND` | `"none"` | `"none"`, `"mongodb"`, or `"custom"` |
+| `graph_backend` | `GRAPH_BACKEND` | `"neo4j"` | Backend for the read-only navigation API |
 | `llm_concurrency` | `LLM_CONCURRENCY` | 4 | Max concurrent LLM calls |
 | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | 10 | Max concurrent Neo4j async sessions |
 | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches |
@@ -664,6 +665,19 @@ scinr.newton/
 ├── models/                     # Core Pydantic models
 │   ├── document_structure.py   # Document, StructureNode, InfoUnit, DocumentStructure, NodeRole
 │   └── base.py                 # StrictModel base class
+│
+├── navigation/                 # Read-only graph navigation API (pluggable backend)
+│   ├── base.py                 # GraphNavigator ABC (~90 async read methods)
+│   ├── factory.py              # get_graph_navigator(), graph_navigator() ctx manager
+│   ├── models.py               # Engine-neutral Pydantic return types
+│   ├── filters.py              # where= operator objects (Eq, In, Gte, Contains, …)
+│   ├── pages.py                # Source-text bridge (uses the storage abstraction)
+│   └── neo4j/                  # Neo4j (Cypher) backend
+│       ├── navigator.py        # Neo4jGraphNavigator (composed from Group mixins)
+│       ├── _common.py          # _Neo4jRuntime — driver lifecycle + read helpers
+│       ├── _translate.py       # where= operators → Cypher predicates
+│       ├── _safe.py            # identifier validation, depth resolution, read-only guard
+│       └── _documents/_structure/_instances/…  # one mixin per method group
 │
 ├── prompts/                    # System prompt templates
 │   ├── system_prompt.py        # Prompt family dispatcher
@@ -867,6 +881,42 @@ When `storage_backend="mongodb"`:
 - **`PageRepository`** (ABC): `store(document_name, pages, folder_path)` → list of ObjectIds
 
 Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used when `storage_backend="none"`, returning `None` for all operations.
+
+---
+
+## 8b. Graph Navigation Layer
+
+`scinr.newton.navigation` is a **read-only** view over the produced graph,
+abstracted along the same axis as storage.
+
+```
+get_graph_navigator()  ──reads──▶  cfg.graph_backend   (env GRAPH_BACKEND, default "neo4j")
+      │
+      ▼
+GraphNavigator (ABC)   ~90 async, engine-neutral read methods; engine-neutral Pydantic return models
+      │
+      ▼
+Neo4jGraphNavigator    one mixin per method group over a shared _Neo4jRuntime
+      │                (READ transactions + with_neo4j_retry; borrows get_async_driver())
+      ▼
+Neo4j
+```
+
+- **Interface** (`navigation/base.py`): documents & folder hierarchy, structure
+  nodes, info units, annotation decisions, model instances, entities & triples,
+  schema introspection, and generic `neighbors` / `shortest_path` / `subgraph`.
+- **`where=`** filters use engine-neutral operator objects
+  (`Eq`, `In`, `Gte`, `Contains`, …); the backend translates them to parameterised
+  predicates. Values are matched verbatim.
+- **`execute_raw` / `execute_raw_one`** — an optional, non-portable escape hatch:
+  a Cypher string, read-only enforced (write-keyword guard + READ transaction),
+  with a `dialect=` fail-fast guard. The base ABC raises
+  `UnsupportedOperationError`.
+- **Source text** (`navigation/pages.py`) bridges to the storage abstraction to
+  return verbatim converted pages.
+
+See the [Graph Navigation user guide](user-guides/graph-navigation.md) and the
+[Navigation API reference](api/navigation.md).
 
 ---
 

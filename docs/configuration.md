@@ -42,6 +42,7 @@ All environment variables are optional unless otherwise noted. They are read at 
 | `NEO4J_DATABASE` | *(required)* | Neo4j database name |
 | `NEO4J_CONCURRENCY` | `10` | Maximum async Neo4j concurrency. |
 | `NEO4J_SYNC_CONCURRENCY` | `8` | Maximum sync Neo4j concurrency. |
+| `GRAPH_BACKEND` | `neo4j` | Backend for the read-only graph-navigation API (`scinr.newton.navigation`). Validated like `STORAGE_BACKEND`; reserved for future engines. |
 
 ### Storage (MongoDB)
 
@@ -340,6 +341,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Neo4j Auth** | *(derived)* | `NEO4J_AUTH` | Fallback format |
 | **Neo4j Async Concurrency** | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | `10` |
 | **Neo4j Sync Concurrency** | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | `8` |
+| **Graph Navigation Backend** | `graph_backend` | `GRAPH_BACKEND` | `neo4j` |
 | **LLM Concurrency** | `llm_concurrency` | `LLM_CONCURRENCY` | `4` |
 | **Storage Backend** | `storage_backend` | `STORAGE_BACKEND` | `none` |
 | **MongoDB URI** | `mongodb_uri` | `MONGODB_URI` | `mongodb://localhost:27017` |

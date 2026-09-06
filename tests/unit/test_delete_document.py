@@ -11,6 +11,8 @@ tests/unit/test_ingest_one.py and tests/unit/test_pipeline_orchestration.py
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from scinr.newton.ingest import deletion
@@ -135,7 +137,7 @@ class _FakeDriver:
         self.raw_file_ids_error = raw_file_ids_error
         self.cascade_error = cascade_error
 
-    def session(self) -> _FakeSession:
+    def session(self, **kwargs) -> _FakeSession:
         return _FakeSession(self)
 
     def close(self) -> None:
@@ -157,6 +159,17 @@ class _FakeDriver:
 
     def session_run_queries(self) -> list[str]:
         return [query for kind, query, _ in self.calls if kind == "session.run"]
+
+
+@pytest.fixture(autouse=True)
+def _stub_deletion_config(monkeypatch):
+    """delete_document()'s helpers call get_config().neo4j_database to pick the
+    Neo4j database for each session. These unit tests never call configure(),
+    so stub the get_config reference imported into the deletion module with a
+    minimal fake exposing just neo4j_database.
+    """
+    fake_cfg = SimpleNamespace(neo4j_database="neo4j")
+    monkeypatch.setattr(deletion, "get_config", lambda: fake_cfg)
 
 
 @pytest.fixture
@@ -334,7 +347,7 @@ class TestDeleteDocumentNotFound:
         existence_calls = [
             params for kind, query, params in fake_driver.calls if kind == "session.run"
         ]
-        assert existence_calls[0] == {"path": "", "version": None}
+        assert existence_calls[0] == {"path": ""}
 
 
 class TestDeleteDocumentCascade:
@@ -420,7 +433,11 @@ class TestDeleteDocumentCascade:
         assert result.proposed_fields_deleted == 3
         assert result.extraction_results_deleted == 1
 
-    async def test_version_none_passed_through_as_null(self, patch_driver):
+    async def test_version_none_is_omitted_from_the_bound_params(self, patch_driver):
+        """When version is not given, no ``version`` condition/param is emitted
+        (the WHERE stays a plain equality conjunction so the :Document indexes
+        can be used) — only ``path`` is bound.
+        """
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -432,16 +449,20 @@ class TestDeleteDocumentCascade:
         await delete_document("docs/c")  # version defaults to None
 
         existence_calls = [
-            params for kind, query, params in fake_driver.calls if kind == "session.run"
+            (query, params)
+            for kind, query, params in fake_driver.calls
+            if kind == "session.run"
         ]
-        assert existence_calls[0] == {"path": "docs/c", "version": None}
+        assert existence_calls[0][1] == {"path": "docs/c"}
+        assert "$version" not in existence_calls[0][0]
+        assert "IS NULL" not in existence_calls[0][0]
 
         cascade_calls = [
             params
             for kind, query, params in fake_driver.calls
             if kind == "tx.run" and "documents_deleted" in query
         ]
-        assert cascade_calls[0] == {"path": "docs/c", "version": None}
+        assert cascade_calls[0] == {"path": "docs/c"}
 
     async def test_explicit_version_passed_through(self, patch_driver):
         fake_driver = patch_driver(
@@ -906,3 +927,150 @@ class TestDeleteDocumentStorageCleanup:
             if kind == "tx.run" and "documents_deleted" in query
         ]
         assert cascade_calls == []
+
+
+class TestDeleteDocumentSelectorValidation:
+    async def test_neither_path_nor_job_id_raises_value_error(self, patch_driver):
+        patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(ValueError, match="exactly one of 'path' or 'job_id'"):
+            await delete_document()
+
+    async def test_both_path_and_job_id_raises_value_error(self, patch_driver):
+        patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(ValueError, match="exactly one of 'path' or 'job_id'"):
+            await delete_document("docs/a", job_id="job-1")
+
+    async def test_value_error_raised_before_any_neo4j_call(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(ValueError):
+            await delete_document()
+        assert fake_driver.calls == []
+
+
+class TestDeleteDocumentByJobId:
+    async def test_job_id_selector_binds_only_job_id_and_echoes_it(self, patch_driver):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}, {"version": 1}, {"version": 2}],
+                cascade_rows=[
+                    {
+                        "documents_deleted": 3,
+                        "structure_nodes_deleted": 9,
+                        "info_units_deleted": 0,
+                        "model_decisions_deleted": 0,
+                        "proposed_models_deleted": 0,
+                        "proposed_fields_deleted": 0,
+                        "extraction_results_deleted": 0,
+                    }
+                ],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+
+        result = await delete_document(job_id="job-xyz")
+
+        assert result.found is True
+        assert result.path is None
+        assert result.job_id == "job-xyz"
+        assert result.documents_deleted == 3
+        # Only the supplied selector is emitted — no path/version/tenant
+        # conditions, and no `IS NULL` disjunction (so idx_document_job_id
+        # can be used).
+        existence_calls = [
+            (query, params)
+            for kind, query, params in fake_driver.calls
+            if kind == "session.run"
+        ]
+        assert existence_calls[0][1] == {"job_id": "job-xyz"}
+        assert "d.job_id = $job_id" in existence_calls[0][0]
+        assert "IS NULL" not in existence_calls[0][0]
+        cascade_calls = [
+            params
+            for kind, query, params in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert cascade_calls[0] == {"job_id": "job-xyz"}
+
+    async def test_tenant_and_user_filters_are_forwarded_in_path_mode(self, patch_driver):
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+
+        await delete_document(
+            "docs/a",
+            version=1,
+            tenant_id="tenant-7",
+            created_by_user_id="user-42",
+        )
+
+        cascade_calls = [
+            (query, params)
+            for kind, query, params in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        query, params = cascade_calls[0]
+        assert params == {
+            "path": "docs/a",
+            "version": 1,
+            "tenant_id": "tenant-7",
+            "created_by_user_id": "user-42",
+        }
+        # job_id was not supplied → no job_id condition at all
+        assert "job_id" not in query
+        for cond in (
+            "d.path = $path",
+            "d.version = $version",
+            "d.tenant_id = $tenant_id",
+            "d.created_by_user_id = $created_by_user_id",
+        ):
+            assert cond in query
+
+    async def test_job_id_no_match_returns_found_false_and_echoes_selector(self, patch_driver):
+        patch_driver(_FakeDriver(existence_rows=[]))
+
+        result = await delete_document(job_id="missing-job", tenant_id="tenant-1")
+
+        assert result.found is False
+        assert result.path is None
+        assert result.job_id == "missing-job"
+        assert result.tenant_id == "tenant-1"
+        assert result.documents_deleted == 0
+
+
+class TestBuildDocMatch:
+    """Unit tests for deletion._build_doc_match() — the dynamic WHERE builder."""
+
+    def test_only_supplied_filters_become_conditions(self):
+        match, params = deletion._build_doc_match(
+            {"path": None, "version": None, "tenant_id": None,
+             "created_by_user_id": None, "job_id": "j1"}
+        )
+        assert params == {"job_id": "j1"}
+        assert match.strip() == "MATCH (d:Document)\nWHERE d.job_id = $job_id"
+
+    def test_multiple_filters_are_anded_in_fixed_order(self):
+        match, params = deletion._build_doc_match(
+            {"path": "p", "version": 2, "tenant_id": "t",
+             "created_by_user_id": None, "job_id": None}
+        )
+        assert params == {"path": "p", "version": 2, "tenant_id": "t"}
+        assert (
+            "WHERE d.path = $path AND d.version = $version AND d.tenant_id = $tenant_id"
+            in match
+        )
+
+    def test_no_is_null_disjunction_is_ever_emitted(self):
+        match, _ = deletion._build_doc_match({"path": "p"})
+        assert "IS NULL" not in match
+        assert " OR " not in match
+
+    def test_falsy_but_non_none_values_are_kept(self):
+        match, params = deletion._build_doc_match({"path": "", "version": 0})
+        assert params == {"path": "", "version": 0}
+        assert "d.path = $path" in match
+        assert "d.version = $version" in match
