@@ -72,6 +72,38 @@ When `version` is specified, only that version's `:Document` node and its cascad
 
 ---
 
+## Selecting by `job_id`
+
+Instead of a `path`, you can delete **every** document produced by a single ingestion run by passing its `job_id` (the value given to `run_pipeline(job_id=...)`):
+
+```python
+# Delete every :Document whose job_id property equals "job-2026-09-06-a",
+# across all paths and versions of that run — plus each one's full cascade.
+result = delete_document(job_id="job-2026-09-06-a")
+```
+
+Exactly one of `path` or `job_id` must be provided — passing neither, or both, raises `ValueError`. `version` is still accepted alongside `job_id` as an additional filter.
+
+---
+
+## Extra filters: `tenant_id` and `created_by_user_id`
+
+`tenant_id` and `created_by_user_id` are optional keyword filters applied **on top of** either selector (`path` or `job_id`):
+
+```python
+# Only delete this path if it also belongs to tenant "acme"
+result = delete_document("/path/to/document.pdf", tenant_id="acme")
+
+# Delete a whole job, but only the documents created by one user
+result = delete_document(job_id="job-123", created_by_user_id="user-42")
+```
+
+A filter left unset (`None`) means **"do not filter on this property"** — it does *not* mean "the property must be null". A document with no `tenant_id` is still matched by `delete_document("/path", tenant_id=None)`.
+
+These values are populated by `run_pipeline(tenant_id=..., created_by_user_id=..., job_id=...)` at ingestion time. `DeletionResult` echoes back whichever selector and filters were used (`result.path`, `result.job_id`, `result.tenant_id`, `result.created_by_user_id`); `result.path` is `None` for a `job_id`-selected deletion.
+
+---
+
 ## Understanding the Cascade
 
 When you call `delete_document()`, the following nodes are deleted in a single transaction:

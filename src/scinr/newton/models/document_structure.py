@@ -263,6 +263,28 @@ class Document(StrictModel):
             "Used by LLM stages to focus extraction and annotation."
         ),
     )
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Multi-tenant owner id, supplied by the caller at ingestion time and "
+            "persisted verbatim on the :Document node. Never populated by the LLM."
+        ),
+    )
+    created_by_user_id: str | None = Field(
+        default=None,
+        description=(
+            "Id of the user that launched this ingestion, supplied by the caller and "
+            "persisted verbatim on the :Document node. Never populated by the LLM."
+        ),
+    )
+    job_id: str | None = Field(
+        default=None,
+        description=(
+            "Ingestion job/run id this document belongs to, supplied by the caller and "
+            "persisted verbatim on the :Document node. Used as a bulk-delete selector. "
+            "Never populated by the LLM."
+        ),
+    )
     document_structure: list[StructureNode] = Field(
         default_factory=list,
         description=(

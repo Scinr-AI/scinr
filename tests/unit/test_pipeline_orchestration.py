@@ -176,15 +176,19 @@ def mock_unit_stage_fns(monkeypatch):
     import scinr.newton.ingest.loader as ingest_loader_mod
     import scinr.newton.stages.extraction as extraction_mod
 
-    async def _default_extract_one_file(json_file, output_path, input_folder, fast_extraction=False):
+    async def _default_extract_one_file(
+        json_file, output_path, input_folder, fast_extraction=False, **kwargs
+    ):
         doc = MagicMock(name=f"Document({json_file.stem})")
         doc.document_name = json_file.stem
         return doc
 
-    async def _default_ingest_one(doc, driver, update_mode=False, shared_version=None):
+    async def _default_ingest_one(doc, driver, update_mode=False, shared_version=None, **kwargs):
         return doc.document_name
 
-    async def _default_ingest_one_from_path(path, driver, update_mode=False, shared_version=None):
+    async def _default_ingest_one_from_path(
+        path, driver, update_mode=False, shared_version=None, **kwargs
+    ):
         return path.stem
 
     mocks = {

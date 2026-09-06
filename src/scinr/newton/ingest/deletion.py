@@ -17,7 +17,10 @@ it raises, the Neo4j cascade delete never runs.
 
 Public API
 ----------
-    result = await delete_document(path, version=None)  # opens its own driver
+    result = await delete_document(path, version=None)      # by path
+    result = await delete_document(job_id="job-123")        # by ingestion run
+    # optional AND filters in either mode: tenant_id=, created_by_user_id=
+    # opens its own driver
 """
 
 from __future__ import annotations
@@ -40,15 +43,40 @@ GC_MAX_PASSES = 7
 # Cypher queries
 # ---------------------------------------------------------------------------
 
-_EXISTENCE_QUERY = """
-MATCH (d:Document {path: $path})
-WHERE $version IS NULL OR d.version = $version
-RETURN d.version AS version
-"""
+# delete_document() argument names that select :Document nodes, in a fixed
+# order. Each name is also the node property it filters on (equality). The
+# names are a hard-coded whitelist — never user input — so interpolating
+# them into the query string below carries no injection risk.
+_FILTERABLE_FIELDS = ("path", "job_id", "version", "tenant_id", "created_by_user_id")
 
-_RAW_FILE_IDS_QUERY = """
-MATCH (d:Document {path: $path})
-WHERE $version IS NULL OR d.version = $version
+
+def _build_doc_match(filters: dict) -> tuple[str, dict]:
+    """Build the ``MATCH (d:Document) WHERE ...`` selection prefix from only
+    the *filters* values that are actually set (not ``None``), together with
+    the matching parameter dict.
+
+    Emitting a condition **only** for each supplied filter keeps the WHERE a
+    plain conjunction of equality predicates, so Neo4j can use the
+    per-property :Document indexes (notably ``idx_document_job_id``) instead
+    of falling back to a full label scan — which an
+    ``$x IS NULL OR d.x = $x`` disjunction would force.
+
+    ``delete_document()`` guarantees at least one of ``path`` / ``job_id`` is
+    set, so the condition list is never empty.
+    """
+    conditions: list[str] = []
+    params: dict = {}
+    for name in _FILTERABLE_FIELDS:
+        value = filters.get(name)
+        if value is not None:
+            conditions.append(f"d.{name} = ${name}")
+            params[name] = value
+    return f"MATCH (d:Document)\nWHERE {' AND '.join(conditions)}\n", params
+
+
+_EXISTENCE_TAIL = "RETURN d.version AS version\n"
+
+_RAW_FILE_IDS_TAIL = """
 OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd)
 WITH collect(DISTINCT d) + collect(DISTINCT cd) AS nodes
 UNWIND nodes AS n
@@ -57,9 +85,7 @@ WHERE n IS NOT NULL AND n.raw_file_id IS NOT NULL AND n.raw_file_id <> ''
 RETURN DISTINCT n.raw_file_id AS raw_file_id
 """
 
-_CASCADE_DELETE_QUERY = """
-MATCH (d:Document {path: $path})
-WHERE $version IS NULL OR d.version = $version
+_CASCADE_DELETE_TAIL = """
 OPTIONAL MATCH (d)-[r:IS_COMPOSED_OF*]->(cd)
 WITH d, r, collect(DISTINCT cd) + d AS nodes
 UNWIND nodes AS documentNode
@@ -99,7 +125,7 @@ DETACH DELETE mi
 RETURN count(mi) AS borrados
 """
 
-# Cascade-delete counter fields, in the order returned by _CASCADE_DELETE_QUERY.
+# Cascade-delete counter fields, in the order returned by _CASCADE_DELETE_TAIL.
 _CASCADE_COUNTER_FIELDS = (
     "documents_deleted",
     "structure_nodes_deleted",
@@ -116,7 +142,7 @@ _CASCADE_COUNTER_FIELDS = (
 # ---------------------------------------------------------------------------
 
 
-def _run_cascade_delete(driver, path: str, version: int | None) -> dict[str, int]:
+def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
     """Run the cascade delete query in a single write transaction and sum
     the per-row counters returned (the query can yield multiple rows).
 
@@ -124,18 +150,19 @@ def _run_cascade_delete(driver, path: str, version: int | None) -> dict[str, int
     ----------
     driver:
         An open, authenticated Neo4j driver instance.
-    path:
-        Document ``path`` to delete.
-    version:
-        Specific version to delete, or ``None`` to delete all versions.
+    filters:
+        The target-selection parameter dict (``path``, ``version``,
+        ``tenant_id``, ``created_by_user_id``, ``job_id``); only its non-None
+        entries become WHERE conditions via :func:`_build_doc_match`.
     """
     def _do_delete() -> dict[str, int]:
         local_counters = dict.fromkeys(_CASCADE_COUNTER_FIELDS, 0)
         cfg = get_config()
+        match_clause, params = _build_doc_match(filters)
         with driver.session(database=cfg.neo4j_database) as session:
             with session.begin_transaction() as tx:
                 try:
-                    result = tx.run(_CASCADE_DELETE_QUERY, path=path, version=version)
+                    result = tx.run(match_clause + _CASCADE_DELETE_TAIL, **params)
                     for record in result:
                         for field_name in _CASCADE_COUNTER_FIELDS:
                             local_counters[field_name] += record[field_name]
@@ -144,9 +171,8 @@ def _run_cascade_delete(driver, path: str, version: int | None) -> dict[str, int
                     tx.rollback()
                     logger.exception(
                         "delete_document: cascade delete transaction rolled back "
-                        "for path=%r version=%r",
-                        path,
-                        version,
+                        "for filters=%r",
+                        filters,
                     )
                     raise
         return local_counters
@@ -207,7 +233,7 @@ def _run_gc_pass(driver, query: str, label: str) -> tuple[int, int]:
     return total_deleted, passes_run
 
 
-def _fetch_existing_versions(driver, path: str, version: int | None) -> list[int]:
+def _fetch_existing_versions(driver, filters: dict) -> list[int]:
     """Run the read-only existence-check query and return the sorted list of
     matching Document versions.
 
@@ -218,32 +244,38 @@ def _fetch_existing_versions(driver, path: str, version: int | None) -> list[int
     Any ``None`` version values (from legacy/malformed :Document nodes) are
     filtered out defensively before sorting, since Python 3 cannot compare
     ``None`` with ``int`` and would raise TypeError otherwise.
+
+    *filters* is the full target-selection parameter dict (see
+    :func:`_run_cascade_delete`).
     """
 
     def _do_query() -> list[int | None]:
         cfg = get_config()
+        match_clause, params = _build_doc_match(filters)
         with driver.session(database=cfg.neo4j_database) as session:
-            existence_result = session.run(_EXISTENCE_QUERY, path=path, version=version)
+            existence_result = session.run(match_clause + _EXISTENCE_TAIL, **params)
             return [record["version"] for record in existence_result]
 
     raw_versions = with_neo4j_retry_sync(_do_query)
     return sorted(v for v in raw_versions if v is not None)
 
 
-def _fetch_raw_file_ids(driver, path: str, version: int | None) -> list[str]:
+def _fetch_raw_file_ids(driver, filters: dict) -> list[str]:
     """Run the read-only raw_file_ids query and return the distinct list of
     non-empty ``raw_file_id`` values for the target Document(s) and every
     descendant reached via ``IS_COMPOSED_OF*`` — the same scope used by the
     cascade delete query below.
 
     Wrapped in with_neo4j_retry_sync for consistency with the other queries
-    in this module.
+    in this module. *filters* is the full target-selection parameter dict
+    (see :func:`_run_cascade_delete`).
     """
 
     def _do_query() -> list[str]:
         cfg = get_config()
+        match_clause, params = _build_doc_match(filters)
         with driver.session(database=cfg.neo4j_database) as session:
-            result = session.run(_RAW_FILE_IDS_QUERY, path=path, version=version)
+            result = session.run(match_clause + _RAW_FILE_IDS_TAIL, **params)
             return [record["raw_file_id"] for record in result]
 
     return with_neo4j_retry_sync(_do_query)
@@ -290,19 +322,41 @@ async def _delete_storage_for_raw_file_ids(raw_file_ids: list[str]) -> tuple[int
 # ---------------------------------------------------------------------------
 
 
-async def delete_document(path: str, version: int | None = None) -> DeletionResult:
-    """Completely delete a Document node, its entire cascade, and orphans.
+async def delete_document(
+    path: str | None = None,
+    version: int | None = None,
+    *,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
+) -> DeletionResult:
+    """Completely delete Document node(s), their entire cascade, and orphans.
 
     Unlike ``delete_document_content()`` (which only wipes content for
     in-place re-ingestion and keeps the :Document node), this permanently
-    removes the :Document node(s) matching *path* (and, if *version* is
-    given, only that version) along with:
+    removes every :Document node matching the selector below along with:
 
     - Every descendant reached via ``IS_COMPOSED_OF*`` (folder-parent
       Document nodes, sibling documents, etc.).
     - All :StructureNode descendants (``HAS_STRUCTURE`` / ``HAS_CHILD``),
       their :InfoUnit, :ModelDecision, :ProposedModel, :ProposedField, and
       :ExtractionResult children.
+
+    Target selection
+    ----------------
+    Exactly one of *path* or *job_id* must be provided (``ValueError``
+    otherwise):
+
+    - *path*: delete the Document at that ``path`` (all versions, or only
+      *version* when given).
+    - *job_id*: delete every Document whose ``job_id`` property equals this
+      value — across all paths and versions of that ingestion run.
+
+    *tenant_id* and *created_by_user_id*, when given, are additional AND
+    filters applied on top of either selector. A filter left as ``None``
+    means "do not filter on this property" (it does **not** mean "the
+    property must be null"). *version* is also accepted as an extra filter
+    in *job_id* mode.
 
     Before any Neo4j deletion happens, this also deletes the documental
     storage records (raw binary + converted Markdown pages) for every
@@ -324,35 +378,48 @@ async def delete_document(path: str, version: int | None = None) -> DeletionResu
     storage deletion calls are awaited directly since storage repositories
     (Motor-backed) are natively async.
 
-    Parameters
-    ----------
-    path:
-        The ``path`` property of the Document to delete. Required.
-    version:
-        Specific integer version to delete. When ``None`` (default), every
-        version of *path* is deleted (including each one's full cascade).
-
     Returns
     -------
     DeletionResult
-        Structured counts of everything deleted. If no Document matches
-        *path*/*version*, ``found`` is ``False`` and all counters are 0
-        (no storage, delete, or GC queries are executed in that case).
+        Structured counts of everything deleted. If no Document matches the
+        selector, ``found`` is ``False`` and all counters are 0 (no storage,
+        delete, or GC queries are executed in that case).
+
+    Raises
+    ------
+    ValueError
+        If neither or both of *path* and *job_id* are provided.
     """
+    if (path is None) == (job_id is None):
+        raise ValueError(
+            "delete_document requires exactly one of 'path' or 'job_id' "
+            f"(got path={path!r}, job_id={job_id!r})."
+        )
+
+    filters = {
+        "path": path,
+        "version": version,
+        "tenant_id": tenant_id,
+        "created_by_user_id": created_by_user_id,
+        "job_id": job_id,
+    }
+    selector_repr = ", ".join(f"{k}={v!r}" for k, v in filters.items() if v is not None)
+
     driver = get_driver()
     try:
-        versions_found = await asyncio.to_thread(_fetch_existing_versions, driver, path, version)
+        versions_found = await asyncio.to_thread(_fetch_existing_versions, driver, filters)
 
         if not versions_found:
             logger.warning(
-                "delete_document: no Document found for path=%r version=%r; "
-                "nothing to delete.",
-                path,
-                version,
+                "delete_document: no Document found for %s; nothing to delete.",
+                selector_repr,
             )
             return DeletionResult(
                 path=path,
                 version=version,
+                job_id=job_id,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
                 found=False,
                 versions_deleted=[],
                 documents_deleted=0,
@@ -371,27 +438,25 @@ async def delete_document(path: str, version: int | None = None) -> DeletionResu
             )
 
         logger.info(
-            "delete_document: deleting path=%r version=%r (versions found: %s)",
-            path,
-            version,
+            "delete_document: deleting %s (versions found: %s)",
+            selector_repr,
             versions_found,
         )
 
-        raw_file_ids = await asyncio.to_thread(_fetch_raw_file_ids, driver, path, version)
+        raw_file_ids = await asyncio.to_thread(_fetch_raw_file_ids, driver, filters)
         raw_files_deleted, converted_pages_deleted = await _delete_storage_for_raw_file_ids(
             raw_file_ids
         )
 
         logger.info(
-            "delete_document: storage cleanup complete for path=%r version=%r. "
+            "delete_document: storage cleanup complete for %s. "
             "raw_files_deleted=%d converted_pages_deleted=%d",
-            path,
-            version,
+            selector_repr,
             raw_files_deleted,
             converted_pages_deleted,
         )
 
-        cascade_counts = await asyncio.to_thread(_run_cascade_delete, driver, path, version)
+        cascade_counts = await asyncio.to_thread(_run_cascade_delete, driver, filters)
 
         gc_emi_deleted, gc_emi_passes = await asyncio.to_thread(
             _run_gc_pass, driver, _GC_ENTITY_MODEL_INSTANCE_QUERY, "Entity|ModelInstance"
@@ -401,11 +466,10 @@ async def delete_document(path: str, version: int | None = None) -> DeletionResu
         )
 
         logger.info(
-            "delete_document: complete for path=%r version=%r. "
+            "delete_document: complete for %s. "
             "documents_deleted=%d structure_nodes_deleted=%d "
             "gc_entity_model_instance_deleted=%d gc_labeled_entity_deleted=%d",
-            path,
-            version,
+            selector_repr,
             cascade_counts["documents_deleted"],
             cascade_counts["structure_nodes_deleted"],
             gc_emi_deleted,
@@ -415,6 +479,9 @@ async def delete_document(path: str, version: int | None = None) -> DeletionResu
         return DeletionResult(
             path=path,
             version=version,
+            job_id=job_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
             found=True,
             versions_deleted=versions_found,
             documents_deleted=cascade_counts["documents_deleted"],

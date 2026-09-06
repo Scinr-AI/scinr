@@ -153,9 +153,24 @@ class TestFullSuccessRawFile:
         assert result.stage_results["entity_extraction"] == DocumentResult("doc1", 2, 0, [])
 
         mock_convert_one.assert_awaited_once()
-        mock_extract_one_intermediate.assert_awaited_once_with(intermediate_doc, None, fast_extraction=False)
+        mock_extract_one_intermediate.assert_awaited_once_with(
+            intermediate_doc,
+            None,
+            fast_extraction=False,
+            tenant_id=None,
+            created_by_user_id=None,
+            job_id=None,
+        )
         mock_extract_one_file.assert_not_called()
-        mock_ingest_one.assert_awaited_once_with(extracted_doc, kwargs["sync_driver"], False, 1)
+        mock_ingest_one.assert_awaited_once_with(
+            extracted_doc,
+            kwargs["sync_driver"],
+            False,
+            1,
+            tenant_id=None,
+            created_by_user_id=None,
+            job_id=None,
+        )
         mock_ingest_one_from_path.assert_not_called()
         mock_run_annotation.assert_awaited_once()
         mock_run_entity_extraction.assert_awaited_once()

@@ -89,6 +89,11 @@ async def run_pipeline(
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
+
+    # ── Provenance metadata written onto every :Document node created ─────────
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> PipelineResult
 ```
 
@@ -356,6 +361,25 @@ result = await run_pipeline(
 ```
 
 This parameter is forwarded to every document unit processed by the pipeline. It is particularly useful when processing documents from a specific domain where the default prompts need additional context.
+
+### `tenant_id`, `created_by_user_id`, `job_id` — Provenance Metadata
+
+**Type:** `str | None`  **Default:** `None` (each)
+
+Caller-supplied provenance values written verbatim onto **every** `:Document` node the run creates — leaf documents, ancestor folder-parent nodes, and tabular documents alike. Each property is always `SET` (stored as `null` when the parameter is omitted), exactly like `context_instructions`.
+
+```python
+result = await run_pipeline(
+    input_raw="./raw_docs",
+    tenant_id="acme-corp",
+    created_by_user_id="user-42",
+    job_id="ingest-2026-09-06-a",
+)
+```
+
+- The values are also stamped onto the `Document` model, so they are serialized into any `extract-*.json` written by the extraction stage. When you later run an ingestion-only pipeline from that JSON, a value passed to that call **overrides** the baked-in one; omitting it keeps the baked-in value.
+- They are **not** threaded through a standalone `stages=["preprocess"]` run — supply them on the `run_pipeline()` call that performs extraction and/or ingestion.
+- `job_id` doubles as a bulk-delete selector: `delete_document(job_id="ingest-2026-09-06-a")` removes every document from that run. `tenant_id` and `created_by_user_id` can be used as extra delete filters. See [Document Deletion](document-deletion.md).
 
 ### `update_mode` — In-Place Document Update
 

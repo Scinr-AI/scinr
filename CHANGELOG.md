@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-09-06
+
+### Added
+- **Provenance metadata on `:Document` nodes.** `run_pipeline()` accepts three new optional string parameters — `tenant_id`, `created_by_user_id`, and `job_id` — that are written verbatim onto every `:Document` node the run creates: leaf documents, ancestor folder-parent nodes, and tabular documents alike. Each property is always `SET` (stored as `null` when omitted), mirroring `context_instructions`. The values are also stamped onto the `Document` model, so they are serialized into any `extract-*.json` produced by the extraction stage; a value passed to a later ingestion-only `run_pipeline()` call overrides the baked-in one, while omitting it leaves the baked-in value untouched. Threaded through `run_extraction`-adjacent helpers (`extract_one_file`/`extract_one_intermediate`), the loader (`load_file`/`load_files`/`load_folder`/`load_documents`/`ingest_one`/`ingest_one_from_path`), `run_ingestion()`, and `run_tabular_pipeline()`/`run_tabular_agent()`. Not threaded through the standalone `preprocess` stage — supply the values on the `run_pipeline()` call that performs extraction and/or ingestion.
+- New `:Document` indexes on `tenant_id`, `created_by_user_id`, and `job_id` (created by `setup_schema()`).
+- `delete_document(job_id=...)` — bulk deletion selector. Exactly one of `path` or `job_id` must now be provided (`ValueError` otherwise). `job_id` deletes every `:Document` whose `job_id` matches, across all paths and versions of that ingestion run.
+- `delete_document(..., tenant_id=..., created_by_user_id=...)` — optional extra AND-filters applied on top of either selector. A filter left as `None` means "do not filter on this property" (not "the property must be null"). `version` is still accepted as an extra filter in `job_id` mode. The selection `WHERE` clause is assembled at call time from only the filters actually supplied — a plain equality conjunction, so Neo4j uses the per-property `:Document` indexes (notably `idx_document_job_id`) instead of a full label scan.
+
+### Changed
+- `DeletionResult` gained `job_id`, `tenant_id`, and `created_by_user_id` echo fields; `path` is now `str | None` (it is `None` for a `job_id`-selected deletion).
+
 ## [0.3.6] - 2026-09-04
 
 ### Fixed

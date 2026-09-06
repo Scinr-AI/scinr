@@ -86,8 +86,15 @@ class DeletionResult:
     """Result of a delete_document() call — full Document + cascade + GC deletion.
 
     Attributes:
-        path: The Document ``path`` that was targeted for deletion.
+        path: The Document ``path`` that was targeted for deletion, or None when
+            the deletion was selected by ``job_id`` instead.
         version: The specific version requested, or None if all versions were targeted.
+        job_id: The ``job_id`` selector that was targeted, or None when the deletion
+            was selected by ``path`` instead.
+        tenant_id: The ``tenant_id`` filter applied to the match, or None if no such
+            filter was requested.
+        created_by_user_id: The ``created_by_user_id`` filter applied to the match, or
+            None if no such filter was requested.
         found: True if at least one matching Document existed before deletion. When False,
             all counters below are 0 and no delete or GC queries were executed.
         versions_deleted: Sorted list of integer versions that matched and were deleted.
@@ -116,7 +123,7 @@ class DeletionResult:
             pages) deleted from the storage layer for the same raw_file_ids.
     """
 
-    path: str
+    path: str | None
     version: int | None
     found: bool
     versions_deleted: list[int]
@@ -133,3 +140,6 @@ class DeletionResult:
     gc_labeled_entity_passes: int
     raw_files_deleted: int
     converted_pages_deleted: int
+    job_id: str | None = None
+    tenant_id: str | None = None
+    created_by_user_id: str | None = None

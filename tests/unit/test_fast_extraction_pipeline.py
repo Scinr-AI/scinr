@@ -128,7 +128,7 @@ class TestFastExtractionReachesExtractOneFile:
 
         import scinr.newton.stages.extraction as extraction_mod
 
-        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False):
+        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False, **kwargs):
             doc = SimpleNamespace(document_name=json_file.stem)
             return doc
 
@@ -153,7 +153,7 @@ class TestFastExtractionReachesExtractOneFile:
 
         import scinr.newton.stages.extraction as extraction_mod
 
-        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False):
+        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False, **kwargs):
             return SimpleNamespace(document_name=json_file.stem)
 
         mock_extract_one_file = AsyncMock(side_effect=_fake_extract_one_file)
@@ -213,12 +213,12 @@ class TestConcurrentProcessDocumentUnitFastExtractionIsolation:
         tracker = _ConcurrencyTracker(sleep_seconds=0.03)
         captured: list[tuple[str, bool]] = []
 
-        async def _fake_extract_one_intermediate(doc, output_path, fast_extraction=False):
+        async def _fake_extract_one_intermediate(doc, output_path, fast_extraction=False, **kwargs):
             await tracker.track()
             captured.append(("unitA", fast_extraction))
             return SimpleNamespace(document_name="unitA")
 
-        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False):
+        async def _fake_extract_one_file(json_file, output_path, input_folder, fast_extraction=False, **kwargs):
             await tracker.track()
             captured.append(("unitB", fast_extraction))
             return SimpleNamespace(document_name="unitB")
