@@ -33,16 +33,16 @@ RawFileRepository          PageRepository
 ┌─────────────────┐       ┌──────────────────┐
 │ .store()        │       │ .store_page()    │
 │   → raw_file_id │       │   → page_id      │
-│                 │       │                  │
-│ (binary files)  │       │ .get_pages()     │
+│ .delete()       │       │ .get_pages()     │
 │                 │       │   → list[pages]  │
-│                 │       │                  │
+│ (binary files)  │       │ .delete_pages()  │
+│                 │       │   → int          │
 │                 │       │ (markdown pages)  │
 └─────────────────┘       └──────────────────┘
 ```
 
-- **`RawFileRepository`** — stores the original binary file and returns a `raw_file_id`.
-- **`PageRepository`** — stores converted page content (Markdown) linked to a `raw_file_id`, and supports retrieval.
+- **`RawFileRepository`** — stores the original binary file and returns a `raw_file_id`; `delete()` removes it.
+- **`PageRepository`** — stores converted page content (Markdown) linked to a `raw_file_id`, supports retrieval, and `delete_pages()` removes a file's pages.
 
 The pipeline calls `get_storage()` to obtain the configured pair of repositories. All downstream code interacts with the abstract interfaces, keeping the pipeline backend-agnostic.
 
@@ -388,6 +388,11 @@ class RawFileRepository(ABC):
         """Store a raw binary file and return its ID."""
         ...
 
+    @abstractmethod
+    async def delete(self, raw_file_id: str) -> None:
+        """Delete the binary and its metadata. Must be idempotent (no error if missing)."""
+        ...
+
 class PageRepository(ABC):
     @abstractmethod
     async def store_page(
@@ -405,7 +410,14 @@ class PageRepository(ABC):
     async def get_pages(self, raw_file_id: str) -> list[ConvertedPageRecord]:
         """Retrieve all pages for a raw file, ordered by page_index."""
         ...
+
+    @abstractmethod
+    async def delete_pages(self, raw_file_id: str) -> int:
+        """Delete all pages for a raw file; return how many were removed (0 if none)."""
+        ...
 ```
+
+> All four methods are `@abstractmethod` — a custom backend must implement `store` + `delete` on `RawFileRepository` and `store_page` + `get_pages` + `delete_pages` on `PageRepository`, or it cannot be instantiated. `delete` / `delete_pages` are used by `delete_document()` and `update_mode=True` re-ingestion.
 
 ### Implementing a Custom Backend
 
@@ -541,6 +553,7 @@ configure(
 
 - **`custom_storage` expects a tuple of instances**, not a class and kwargs. The tuple is `(RawFileRepository, PageRepository)`.
 - Both repositories must be **async** — all methods use `async def`.
+- Implement **every** abstract method: `store` + `delete` (raw files) and `store_page` + `get_pages` + `delete_pages` (pages). The S3/DynamoDB sketch above omits `delete` / `delete_pages` for brevity — a real implementation must add them (deleting the S3 object and the DynamoDB items for a `raw_file_id`).
 - The `store()` and `store_page()` methods return a string identifier. The pipeline uses these IDs to link pages to their parent raw file.
 - `get_pages()` returns `ConvertedPageRecord` Pydantic models ordered by `page_index` ascending.
 - If `storage_backend="custom"` but `custom_storage` is not provided, the pipeline raises a `ConfigurationError` at `get_storage()` time.
@@ -563,6 +576,9 @@ class InMemoryRawFileRepository(RawFileRepository):
         file_id = str(uuid.uuid4())
         self._files[file_id] = content
         return file_id
+
+    async def delete(self, raw_file_id) -> None:
+        self._files.pop(raw_file_id, None)
 
 
 class InMemoryPageRepository(PageRepository):
@@ -592,6 +608,10 @@ class InMemoryPageRepository(PageRepository):
             self._pages.get(raw_file_id, []),
             key=lambda p: p.page_index,
         )
+
+    async def delete_pages(self, raw_file_id) -> int:
+        removed = self._pages.pop(raw_file_id, [])
+        return len(removed)
 ```
 
 ---
@@ -688,7 +708,7 @@ configure(storage_backend="none")  # final value: "none"
 | `ConfigurationError: storage_backend='custom' requires passing custom_storage` | Missing `custom_storage` tuple | Pass `custom_storage=(raw_repo, page_repo)` to `configure()`. |
 | `ConfigurationError: Unknown storage_backend` | Invalid backend name | Use one of: `"none"`, `"mongodb"`, `"custom"`. |
 | Pages not found after ingestion | Storage backend was `none` during pipeline run | Re-run with `storage_backend="mongodb"` or `custom`. |
-| GridFS errors on large files | MongoDB version < 4.6 or missing GridFS support | Upgrade MongoDB to 4.6+ or use a managed MongoDB service. |
+| GridFS errors on large files | Very old MongoDB, or a driver/server mismatch | Use a currently supported MongoDB (4.4+ / 5.0+) or a managed MongoDB service. GridFS itself is available in every modern MongoDB release. |
 | `ImportError: No module named 'motor'` | MongoDB extras not installed | Run `pip install "scinr[mongodb]"`. |
 | Custom backend methods not called | Passed class instead of instance | `custom_storage` expects instantiated objects: `(MyRawRepo(), MyPageRepo())`. |
 | Duplicate files ingested | No deduplication check | The `checksum_sha256` index on `raw_files` enables dedup queries. Implement pre-ingest checks using this field. |

@@ -7,7 +7,7 @@ methods — no Cypher required::
     from scinr.newton import configure
     from scinr.newton.navigation import graph_navigator, In, Gte
 
-    configure(neo4j_user="neo4j", neo4j_password="…")   # graph_backend defaults to "neo4j"
+    configure(neo4j_user="neo4j", neo4j_password="…", neo4j_database="neo4j")  # graph_backend defaults to "neo4j"
 
     async with graph_navigator() as nav:
         roots = await nav.list_root_documents()

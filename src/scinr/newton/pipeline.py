@@ -17,7 +17,7 @@ Minimal full pipeline::
     from scinr.newton.config import configure
     from scinr.newton.pipeline import run_pipeline
 
-    configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="...")
+    configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
     result = asyncio.run(run_pipeline(input_raw="files/"))
 
 Skip Stage 0 (reuse previous converter output)::
@@ -159,7 +159,7 @@ async def run_pipeline(
         context_instructions: Custom instructions injected into converter and annotation prompts.
         update_mode: If `True`, Stage 2 replaces latest document version in Neo4j without incrementing version.
         replaces: `document_name` of existing document superseded by newly ingested document.
-        parallel_docs: Maximum number of documents processed concurrently (default: `1`).
+        parallel_docs: Maximum number of documents processed concurrently (default: `5`).
         on_partial_failure: Control behavior when a stage fails
             (`"abort"`, `"continue"`, or `"warn"`).
 
@@ -184,9 +184,8 @@ async def run_pipeline(
               document is only a *partial* failure — the document itself
               is still valid and can proceed to its next requested stage.
               This only stops that document's advancement when
-              `on_partial_failure` is `"abort"` (the default, preserving
-              the historical per-unit "soft-abort" behavior). With
-              `"continue"` or `"warn"`, the document keeps advancing to its
+              `on_partial_failure` is `"abort"`. With `"continue"` or
+              `"warn"` (the default), the document keeps advancing to its
               next requested stage even though some nodes failed in the
               previous one.
 

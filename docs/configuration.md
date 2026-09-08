@@ -103,7 +103,17 @@ from scinr.newton import configure
 
 ### Neo4j Parameters
 
-Same as the mentioned previously, but in lowercase.
+The same settings as the [Neo4j environment variables](#neo4j), passed as lowercase keyword arguments.
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `neo4j_uri` | `str \| None` | Bolt URI. Default `bolt://localhost:7687`. |
+| `neo4j_user` | `str \| None` | Username. **Required** (via arg or `NEO4J_USER`). |
+| `neo4j_password` | `str \| None` | Password. **Required** (via arg or `NEO4J_PASSWORD`). |
+| `neo4j_database` | `str \| None` | Database name. **Required** (via arg or `NEO4J_DATABASE`). |
+| `neo4j_concurrency` | `int \| None` | Max concurrent async Neo4j sessions. Default `10`. |
+| `neo4j_sync_concurrency` | `int \| None` | Max concurrent sync ingestion dispatches. Default `8`. |
+| `graph_backend` | `str \| None` | Read-only navigation backend. Default `"neo4j"`. |
 
 ### Models / Themes Parameters
 
@@ -127,11 +137,33 @@ Same as the mentioned previously, but in lowercase.
 
 ### PDF / Mistral OCR Parameters
 
-Same as previously mentioned.
+The same settings as the [PDF / Mistral OCR environment variables](#pdf-mistral-ocr), passed as lowercase keyword arguments.
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `mistral_api_key` | `str \| None` | Mistral API key for PDF OCR. Default `None`. |
+| `mistral_ocr_safe_max_pages` | `int \| None` | Page threshold above which OCR is forced. Default `900`. |
+| `mistral_ocr_safe_max_bytes` | `int \| None` | Byte threshold above which OCR is forced. Default `47185920` (45 MiB). |
+| `mistral_ocr_max_retries` | `int \| None` | Retry attempts per chunk on retryable errors. Default `15`. |
+| `mistral_ocr_retry_backoff_seconds` | `float \| None` | Base backoff between retries (exponential, capped at 5 min). Default `2.0`. |
+| `mistral_ocr_chunk_concurrency` | `int \| None` | Concurrent OCR chunk tasks. Default `1`. |
+| `mistral_ocr_error_strategy` | `Literal["fail_fast", "best_effort"] \| None` | OCR error handling. Default `"fail_fast"`. |
 
 ### Pipeline Parameters
 
-Same as previouly mentioned
+The same settings as the [Pipeline environment variables](#pipeline), passed as lowercase keyword arguments.
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `llm_concurrency` | `int \| None` | Max concurrent LLM calls across all stages. Default `4`. |
+| `extraction_batch_size` | `int \| None` | Pages per extraction chunk. Default `1`. |
+| `prompt_caching_enabled` | `bool \| None` | Bedrock system-prompt caching. Default `True`. |
+| `full_docstring` | `bool \| None` | Store the full model docstring (`True`) or only its first line (`False`). Default `True`. |
+| `consolidation_token_safety_margin` | `float \| None` | Fraction of `max_tokens` reserved for output during `fast_extraction=True` consolidation. Default `0.75`. |
+| `consolidation_max_output_tokens` | `int \| None` | Explicit output-token ceiling for consolidation; derived from the margin when unset. Default `None`. |
+| `consolidation_max_input_tokens` | `int \| None` | Explicit input-size ceiling for consolidation; no check when unset. Default `None`. |
+
+> **Note:** `fast_extraction` itself is **not** a `configure()` setting — it is a per-call `run_pipeline(fast_extraction=...)` argument. See [Running the Pipeline](user-guides/running-pipeline.md#fast_extraction-parallel-stage-1-extraction-opt-in).
 
 ### Logging Parameters
 
@@ -163,7 +195,6 @@ The simplest approach: set environment variables and call `configure()` to let s
 
 ```bash
 # .env file
-NEO4J
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
@@ -268,7 +299,16 @@ configure(
 
 scinr reads standard `.env` files. You can copy the provided example from the repository and fill in your values.
 
-The `.env.example` file is provided in the project root and contains all available settings with helpful comments. Key notes:
+```bash
+cp .env.example .env
+```
+
+The `.env.example` file in the project root contains every available setting with inline comments. Key notes:
+
+- `configure()` loads the `.env` file from the **current working directory** automatically (via `python-dotenv`). You never import `dotenv` yourself.
+- Only `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` are strictly required. `MODEL_ID` is required too unless you pass a ready-built `llm=` to `configure()`.
+- Environment values are **overridden** by explicit `configure(...)` arguments (see [Configuration Resolution](#configuration-resolution)).
+- Leaving an optional variable unset falls back to the hard-coded default in the [Complete Reference](#complete-reference-all-settings) table.
 
 ---
 
@@ -338,6 +378,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Neo4j URI** | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` |
 | **Neo4j User** | `neo4j_user` | `NEO4J_USER` | *(required)* |
 | **Neo4j Password** | `neo4j_password` | `NEO4J_PASSWORD` | *(required)* |
+| **Neo4j Database** | `neo4j_database` | `NEO4J_DATABASE` | *(required)* |
 | **Neo4j Auth** | *(derived)* | `NEO4J_AUTH` | Fallback format |
 | **Neo4j Async Concurrency** | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | `10` |
 | **Neo4j Sync Concurrency** | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | `8` |
@@ -365,7 +406,10 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Enabled Base Themes** | `enabled_base_themes` | *(none)* | `None` |
 | **Enabled User Themes** | `enabled_user_themes` | *(none)* | `None` |
 | **Extra Converters** | `extra_converters` | *(none)* | `None` |
-| **Normalization** | `normalization_enabled` | `NORMALIZATION_ENABLED` | `false` |
+| **Normalization** | `normalization_enabled` | `NORMALIZATION_ENABLED` | `true` |
 | **Normalization Batch** | `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` |
 | **Normalization LLM** | `normalization_llm` | *(none)* | `None` (falls back to `llm`) |
+| **Consolidation output margin** | `consolidation_token_safety_margin` | *(none)* | `0.75` (used only when `fast_extraction=True`) |
+| **Consolidation max output tokens** | `consolidation_max_output_tokens` | *(none)* | `None` (derived from the margin) |
+| **Consolidation max input tokens** | `consolidation_max_input_tokens` | *(none)* | `None` (no check) |
 | **Log Level** | `log_level` | *(none)* | `"INFO"` |

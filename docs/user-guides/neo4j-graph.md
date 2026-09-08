@@ -1,6 +1,6 @@
 # Neo4j Graph Model
 
-`scinr` builds a connected graph representation of input documents and extracted domain concepts inside Neo4j. This guide covers every node type, relationship, and query pattern produced by the `scinr.newton` extraction engine.
+`scinr` builds a connected graph representation of input documents and extracted domain concepts inside Neo4j. This guide covers the node types, relationships, and query patterns produced by the `scinr.newton` extraction engine.
 
 The graph serves as the primary output store. After a document passes through the Newton pipeline, all structural elements and extracted entities are persisted as interconnected nodes and relationships, enabling complex cross-document queries that would be difficult or impossible with a flat relational schema.
 
@@ -54,26 +54,24 @@ Represents a structural element within a document — a section, subsection, fre
 ```
 (:StructureNode:Section {
   id: "M3- Notice to applicant::1::1-foreword",
+  node_id: "1-foreword",
   role: "section",
   title: "Foreword",
-  text: "The introduction text...",
-  page_number: 1,
-  hierarchy_level: 1,
-  appearance_order: 1,
-  latest: true
+  theme: "pharmaceutical_quality",
+  source_page_ids: ["..."],
+  appearance_order: 1
 })
 ```
 
 | Property | Type | Description |
 |---|---|---|
-| `id` | String | Unique hierarchical identifier for this structure node. |
-| `role` | String | One of: `section`, `subsection`, `freeform_block`, `table`, `field_group`, `appendix`, `row`. |
-| `title` | String | Heading text, if this node represents a section heading. Null for leaf nodes like paragraphs. |
-| `text` | String | The raw text content of this structural element. |
-| `page_number` | Integer | Source page number, when available (PDF, paginated documents). Null for non-paginated sources. |
-| `hierarchy_level` | Integer | Nesting depth in the document outline. Root headings are level 1, sub-sections increment from there. |
-| `appearance_order` | Integer | Order of appearance within the sibling nodes at the same hierarchy level. |
-| `latest` | Boolean | Indicates if this is the latest version of the structure node. |
+| `id` | String | **Unique** hierarchical identifier for this structure node (the primary key; a uniqueness constraint is enforced). Use this to address a node. |
+| `node_id` | String | Short local identifier derived from the heading number or appearance-order slug. Convenient for display, but **not guaranteed unique** across the graph — do not use it as a key. |
+| `role` | String | One of: `section`, `subsection`, `freeform_block`, `table`, `field_group`, `appendix`, `row`. Indexed. |
+| `title` | String | Heading text, if this node represents a section heading. Null for leaf blocks like paragraphs. |
+| `theme` | String | Theme path assigned to this node during extraction (default `"default"`). |
+| `source_page_ids` | List | IDs of the converted source pages this node was extracted from. |
+| `appearance_order` | Integer | 1-based order of appearance among sibling nodes. |
 
 **Key characteristics:** Unlike `:ModelInstance` and `:LabeledEntity` (which use a single label plus a type property), `:StructureNode` genuinely carries a **second dynamic label** derived from its `role` property, applied via `SET n:{RoleLabel}` at ingestion time (see `ingest/nodes.py`). The mapping is deterministic PascalCase-of-role:
 
@@ -147,6 +145,26 @@ Key characteristics:
 
 ---
 
+### Other node types
+
+These nodes complete the graph. The extraction, annotation, and catalog layers all use them.
+
+| Label | Created by | Description |
+|---|---|---|
+| `:InfoUnit` | Ingestion (Stage 2) | The smallest semantic content unit of a `:StructureNode` — `{uid, title, order, description}`. Attached via `[:HAS_INFO_UNIT]`. The `description` / `title` fields back the fulltext search indexes. |
+| `:ExtractionResult` | Entity extraction (Stage 4) | One per extracted `:StructureNode`. Anchors a section's extraction output; carries `uid` and `model_class`. |
+| `:ModelDecision` | Annotation (Stage 3) | The annotation decision for a `:StructureNode` — `{matched_model_class, confidence, reasoning}`. |
+| `:CatalogModel` | Catalog setup | A registered Pydantic extraction model. Keyed by `name`. |
+| `:ModelField` | Catalog setup | One field of a `:CatalogModel`. Composite key `(name, model)`. |
+| `:EntityLabel` | Catalog setup | Schema-level `entity_label` singleton, keyed by `label`. |
+| `:Theme` | Catalog setup | An extraction-model theme (from a `catalog.py`). |
+| `:ProposedModel` / `:ProposedField` | Annotation | Details of a "no exact match" annotation proposal. |
+| `:SupplementaryField` / `:ComplementaryMatch` | Annotation | Supplementary fields and complementary-model matches on a `:ModelDecision`. |
+| `:Entity` | Triple fallback (Stage 4) | A subject/object node from the generic subject–predicate–object fallback used when no domain model matches. Global singleton, MERGE'd by normalized value. |
+| Role labels (`:Section`, `:Subsection`, `:FreeformBlock`, `:Table`, `:FieldGroup`, `:Appendix`, `:Row`) | Ingestion | The second, role-derived label on every `:StructureNode` (see the `:StructureNode` section above). |
+
+---
+
 ## Relationship Types
 
 ### Document Structure
@@ -155,8 +173,10 @@ These relationships form the hierarchical tree of a document.
 
 | Relationship | From | To | Description |
 |---|---|---|---|
-| `[:HAS_STRUCTURE]` | `:Document` | `:StructureNode` | A document contains this top-level structure node. |
+| `[:HAS_STRUCTURE]` | `:Document` | `:StructureNode` | A document contains this top-level structure node. Connects the `:Document` **only** to its root structure node — never repeats between `:StructureNode`s. |
 | `[:HAS_CHILD]` | `:StructureNode` | `:StructureNode` | Parent-child relationship in the document hierarchy. Headings point to their child headings, paragraphs, tables, etc. |
+| `[:HAS_INFO_UNIT]` | `:StructureNode` | `:InfoUnit` | The semantic content units of a structure node. |
+| `[:IS_COMPOSED_OF]` | `:Document` | `:Document` | Folder hierarchy — a folder document contains child documents. |
 
 ### Extraction
 
@@ -166,6 +186,29 @@ These relationships link extracted entities back to the document sections they c
 |---|---|---|---|
 | `[:HAS_EXTRACTION]` | `:StructureNode` | `:ExtractionResult` | This section contains an extraction result. |
 | `[:HAS_<FIELD>]` | `:ExtractionResult` | `:ModelInstance` | The extraction result contains this model instance (field name determines relationship type). |
+| `[:REFERENCES]` | `:ModelInstance` | `:LabeledEntity` | A model instance references a globally deduplicated entity value (from an `entity_label` field). Always originates from `:ModelInstance`, never the reverse. |
+| `[:USES_PRIMARY_MODEL]` | `:ExtractionResult` | `:CatalogModel` | The primary extraction model used for this section. |
+| `[:USES_COMPLEMENTARY_MODEL]` | `:ExtractionResult` | `:CatalogModel` | A complementary model applied alongside the primary (0..*). |
+
+### Annotation & Catalog
+
+| Relationship | From | To | Description |
+|---|---|---|---|
+| `[:HAS_MODEL_DECISION]` | `:StructureNode` | `:ModelDecision` | The annotation decision for this section. |
+| `[:MATCHED_MODEL]` | `:ModelDecision` | `:CatalogModel` | The model class the annotation agent selected. |
+| `[:HAS_FIELD]` | `:CatalogModel` | `:ModelField` | The declared fields of a catalog model. |
+| `[:PRODUCES_ENTITY]` | `:CatalogModel` | `:EntityLabel` | An `entity_label` produced by one of the model's fields. |
+| `[:BELONGS_TO_THEME]` | `:CatalogModel` | `:Theme` | The theme a catalog model belongs to. |
+| `[:AGGREGATES]` | `:CatalogModel` | `:CatalogModel` | A parent (list-wrapper / aggregate) model that contains other models. |
+
+### Triple Fallback
+
+When no domain model matches a section, a generic subject–predicate–object fallback runs instead.
+
+| Relationship | From | To | Description |
+|---|---|---|---|
+| `[:HAS_ENTITY {role}]` | `:ExtractionResult` | `:Entity` | A subject or object entity of a fallback triple (`role` distinguishes them). |
+| Custom predicate (`UPPER_SNAKE_CASE` / normalized) | `:Entity` | `:Entity` | The predicate edge of a triple. Predicate types are open-ended — there can be thousands of distinct ones; the [Graph Navigation](graph-navigation.md) API filters them out by default. |
 
 ### Entity Relationships (from `field_relationships`)
 
@@ -252,7 +295,7 @@ The tabular pipeline (CSV/XLSX/XLS ingestion) supports an optional **normalizati
 
 **Why this matters for the graph — linking across datasets:** the raw field on its own is just a string property; it does not participate in any deduplication unless it separately carries its own `entity_label`. The **normalized** sub-model, by contrast, is written to the graph as an ordinary `:ModelInstance` node (linked from its parent via `[:HAS_<FIELDNAME>]`) — and if *that* sub-model declares its own `instance_key` and/or `entity_label` fields (exactly as described in the section above), it deduplicates and links globally just like any other keyed `ModelInstance`. In other words: **normalization does not create graph links by itself** — it produces a clean, structured value that is *much easier* to key or label consistently than free-text, which is what actually enables reliable joins between rows/documents that describe the same real-world entity but wrote it differently (e.g. `"123 Main St, Springfield"` vs `"123 main street springfield"`).
 
-**Example pattern** (illustrative — this exact mechanism is documented and implemented, but no domain model in this repository currently uses it in production; see `docs/user-guides/normalization.md` for the full guide):
+**Example pattern** (see `docs/user-guides/normalization.md` for the full guide):
 
 ```python
 class NormalizedAddress(ExtractionModel):
@@ -348,13 +391,13 @@ In this pattern:
 
 ### In-place Update (`update_mode=True`)
 
-When `update_mode=True`, the existing document and all its downstream nodes are replaced in-place. The `version` property on the `:Document` node increments, and the `path` remains the same.
+When `update_mode=True`, the existing document and all its downstream nodes are replaced in-place. The `version` property on the `:Document` node is **reused** (it does **not** increment), and the `path` remains the same. The ingestion loader finds the latest version by `path`, deletes its `:StructureNode` / `:InfoUnit` descendants, and re-inserts the new structure at the same version number.
 
 ```
 (:Document {
   name: "clinical_trial_report.pdf",
   path: "/path/to/clinical_trial_report.pdf",
-  version: 2,
+  version: 1,
   load_date: 2024-06-01T09:00:00,
   latest: true,
   is_folder: false
@@ -363,7 +406,7 @@ When `update_mode=True`, the existing document and all its downstream nodes are 
 
 ### Replacement (`replaces="old_name"`)
 
-When `replaces` is set, a new `:Document` node is created with the same path and version, and a `[:HAS_NEWER_VERSION]` relationship links the old document to the new one.
+When `replaces` is set, a new `:Document` node is created with the same `path` and an **incremented** `version`, and a `[:HAS_NEWER_VERSION]` relationship links the old document to the new one.
 
 ```
 (:Document {name: "clinical_trial_report.pdf", path: "/path/to/clinical_trial_report.pdf", version: 1, latest: false})
@@ -380,7 +423,7 @@ When a document needs to be permanently removed from the graph (rather than upda
 - Cascade-deletes all connected structure, annotation, and extraction nodes.
 - Runs garbage collection on orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes.
 
-Unlike `--update` re-ingestion, deletion is **irreversible** — there is no undo. See the [Document Deletion](document-deletion.md) guide for details.
+Unlike `update_mode=True` re-ingestion, deletion is **irreversible** — there is no undo. See the [Document Deletion](document-deletion.md) guide for details.
 
 ---
 

@@ -178,7 +178,7 @@ configure(extraction_batch_size=1)  # Default: 1 page per chunk
 
 **Default:** `False`  **Passed to:** `run_pipeline(fast_extraction=...)` — a per-call
 `run_pipeline()` argument, not a `configure()` setting or environment variable
-(see [Running the Pipeline](running-pipeline.md#fast_extraction) for why).
+(see [Running the Pipeline](running-pipeline.md#fast_extraction-parallel-stage-1-extraction-opt-in) for why).
 
 By default, Stage 1 extraction processes chunks **sequentially**: each chunk's LLM
 call sees the deterministic `active_hierarchy` built from every chunk processed so
@@ -235,19 +235,19 @@ file can simply be deleted once you've re-run extraction for that document.
 
 ### Normalization Batch Size (`normalization_batch_size`)
 
-**Default:** `3`  **Env var:** `NORMALIZATION_BATCH_SIZE`
+**Default:** `5`  **Env var:** `NORMALIZATION_BATCH_SIZE`
 
 The number of normalization entries grouped per LLM call in the tabular pipeline. Each call sends multiple table entries to the LLM for structural normalization.
 
 ```python
-configure(normalization_batch_size=3)  # Default: 3 entries per call
+configure(normalization_batch_size=5)  # Default: 5 entries per call
 ```
 
 #### Trade-offs
 
 | Value | Pros | Cons |
 | :--- | :--- | :--- |
-| `3` (default) | Balanced quality and cost | Moderate number of calls |
+| `5` (default) | Balanced quality and cost | Moderate number of calls |
 | `10-15` | Fewer calls, lower cost | Larger context per call |
 | `15-20` | Maximum cost savings | Risk of context overflow |
 | `20+` | Fewest calls | May exceed model context window |
@@ -257,7 +257,7 @@ configure(normalization_batch_size=3)  # Default: 3 entries per call
 | Normalization complexity | `normalization_batch_size` | Reasoning |
 | :--- | :--- | :--- |
 | Simple (few columns, clean data) | 10-20 | Entries are small; batching is efficient |
-| Complex (many columns, messy data) | 3-5 | Each entry needs more context |
+| Complex (many columns, messy data) | 5 (default) or lower | Each entry needs more context |
 | Cost-sensitive | 10-15 | Good balance of cost and quality |
 | Quality-critical | 3-5 | Smaller batches = more focused normalization |
 
@@ -347,12 +347,12 @@ PDF processing uses a two-path strategy: small PDFs are processed with `pdfplumb
 
 ```python
 configure(
-    mistral_ocr_safe_max_pages=900,        # Pages threshold
-    mistral_ocr_safe_max_bytes=47185920,   # Size threshold (45 MiB)
-    mistral_ocr_max_retries=3,             # Retry count
-    mistral_ocr_retry_backoff_seconds=2.0, # Retry backoff
-    mistral_ocr_chunk_concurrency=1,       # OCR chunk concurrency
-    mistral_ocr_error_strategy="best_effort",  # Error handling
+    mistral_ocr_safe_max_pages=900,        # Pages threshold (default)
+    mistral_ocr_safe_max_bytes=47185920,   # Size threshold, 45 MiB (default)
+    mistral_ocr_max_retries=15,            # Retry count (default)
+    mistral_ocr_retry_backoff_seconds=2.0, # Retry backoff base (default)
+    mistral_ocr_chunk_concurrency=1,       # OCR chunk concurrency (default)
+    mistral_ocr_error_strategy="best_effort",  # Error handling (default is "fail_fast")
 )
 ```
 
@@ -382,15 +382,15 @@ PDFs larger than this threshold always use Mistral OCR, regardless of page count
 
 ### `mistral_ocr_max_retries`
 
-**Default:** `3`  **Env var:** `MISTRAL_OCR_MAX_RETRIES`
+**Default:** `15`  **Env var:** `MISTRAL_OCR_MAX_RETRIES`
 
-Number of retry attempts for OCR failures. Each retry uses exponential backoff based on `mistral_ocr_retry_backoff_seconds`.
+Number of retry attempts per chunk for retryable network/HTTP OCR errors. Each retry uses exponential backoff based on `mistral_ocr_retry_backoff_seconds`.
 
 ### `mistral_ocr_retry_backoff_seconds`
 
 **Default:** `2.0`  **Env var:** `MISTRAL_OCR_RETRY_BACKOFF_SECONDS`
 
-Base backoff in seconds between retries. Actual backoff is exponential: first retry waits 2s, second waits 4s, third waits 8s.
+Base backoff in seconds between retries. The wait grows exponentially (2s, 4s, 8s, …), capped at 5 minutes between retries.
 
 ### `mistral_ocr_chunk_concurrency`
 
@@ -434,8 +434,8 @@ configure(
     llm_concurrency=2,           # Conservative LLM calls
     neo4j_concurrency=5,         # Light Neo4j load
     neo4j_sync_concurrency=5,    # Light sync load
-    extraction_batch_size=1,     # Maximum quality
-    normalization_batch_size=3,  # Default
+    extraction_batch_size=1,     # Maximum quality (default)
+    normalization_batch_size=5,  # Default
     prompt_caching_enabled=True, # Still useful for small batches
 )
 
@@ -539,7 +539,7 @@ configure(
     neo4j_concurrency=30,        # Max Neo4j throughput
     neo4j_sync_concurrency=25,   # Max sync throughput
     extraction_batch_size=1,     # Smaller batches = faster per call
-    normalization_batch_size=3,  # Default batch size
+    normalization_batch_size=5,  # Default batch size
     mistral_ocr_chunk_concurrency=4,  # Parallel OCR
     mistral_ocr_error_strategy="best_effort",  # Don't wait on failures
 )

@@ -293,14 +293,14 @@ class TestOnPartialFailureAbort:
         assert result.entity_extraction is not None
         assert [d.document_name for d in result.entity_extraction.documents] == ["doc-good"]
 
-    async def test_abort_is_the_default_value(self, mock_stages):
-        """Pin the current default of on_partial_failure to 'abort' — if the
-        refactor changes this default, this test must fail loudly.
+    async def test_warn_is_the_default_value(self, mock_stages):
+        """Pin the current default of on_partial_failure to 'warn' — if the
+        default changes, this test must fail loudly.
         """
         import inspect
 
         sig = inspect.signature(run_pipeline)
-        assert sig.parameters["on_partial_failure"].default == "abort"
+        assert sig.parameters["on_partial_failure"].default == "warn"
 
 
 # ---------------------------------------------------------------------------
