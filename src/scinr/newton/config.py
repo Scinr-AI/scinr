@@ -12,7 +12,7 @@ Parameter resolution order for all parameters:
 Usage (library mode):
     from langchain_openai import ChatOpenAI
     from scinr.newton.config import configure
-    configure(llm=ChatOpenAI(model="gpt-4o"), neo4j_user="neo4j", neo4j_password="...")
+    configure(llm=ChatOpenAI(model="gpt-4o"), neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
 
 Usage (CLI mode / .env file):
     configure()  # Reads everything from environment variables
@@ -171,7 +171,7 @@ def get_config() -> ScinrConfig:
             "Call configure() before using any pipeline function:\n"
             "\n"
             "  from scinr.newton import configure\n"
-            "  configure(llm=your_llm, neo4j_uri=..., neo4j_user=..., neo4j_password=...)\n"
+            "  configure(llm=your_llm, neo4j_uri=..., neo4j_user=..., neo4j_password=..., neo4j_database=...)\n"
             "\n"
             "For CLI usage with environment variables, scinr-ingest handles this automatically."
         )
@@ -245,8 +245,9 @@ def configure(
         llm: LangChain BaseChatModel instance to use for all LLM calls.
         repair_llm: LangChain BaseChatModel for the JSON repair loop. Falls back to `llm` if None.
         neo4j_uri: Neo4j connection URI. Env: `NEO4J_URI`. Default: `bolt://localhost:7687`.
-        neo4j_user: Neo4j username. Env: `NEO4J_USER`.
-        neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`.
+        neo4j_user: Neo4j username. Env: `NEO4J_USER`. Required.
+        neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`. Required.
+        neo4j_database: Neo4j target database name. Env: `NEO4J_DATABASE`. Required.
         graph_backend: Backend for the read-only graph-navigation API
             (`scinr.newton.navigation`). `'neo4j'` (default). Env: `GRAPH_BACKEND`.
             Validated like `storage_backend`; reserved for future engines.
@@ -407,6 +408,12 @@ def configure(
             "  - Set NEO4J_PASSWORD=your_password in your .env file\n"
             "  - Pass neo4j_password='...' to configure()\n"
             "  - Set NEO4J_AUTH=neo4j/password in your .env file"
+        )
+    if not resolved_neo4j_database:
+        raise ConfigurationError(
+            "Neo4j database is not configured. Options:\n"
+            "  - Set NEO4J_DATABASE=neo4j in your .env file\n"
+            "  - Pass neo4j_database='neo4j' to configure()"
         )
 
     # ── Graph navigation ──────────────────────────────────────────────────────

@@ -1062,6 +1062,7 @@ configure(
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
     extra_models_paths=["./my_models"],   # root directory of your package
     enabled_user_themes=["my_theme"],     # optional: activate only specific user themes
 )

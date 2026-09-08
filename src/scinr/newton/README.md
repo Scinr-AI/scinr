@@ -48,6 +48,7 @@ configure(
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="secret",
+    neo4j_database="neo4j",
 )
 ```
 
@@ -60,6 +61,7 @@ configure(
 | `neo4j_uri` | `str` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt connection URI. |
 | `neo4j_user` | `str` | `NEO4J_USER` or `NEO4J_AUTH` | — | Neo4j username. Required. Also parsed from `NEO4J_AUTH=user/password`. |
 | `neo4j_password` | `str` | `NEO4J_PASSWORD` or `NEO4J_AUTH` | — | Neo4j password. Required. Also parsed from `NEO4J_AUTH=user/password`. |
+| `neo4j_database` | `str` | `NEO4J_DATABASE` | — | Neo4j target database name. Required. |
 | `enabled_base_themes` | `list[ThemePath \| str] \| None` | — | `None` (all) | Whitelist of built-in theme paths to activate. `None` activates all. |
 | `enabled_user_themes` | `list[str] \| None` | — | `None` (all) | Whitelist of user-defined theme paths to activate. `None` activates all. |
 | `extra_models_paths` | `list[str \| Path] \| None` | `SCINR_EXTRA_MODELS_PATHS` | `[]` | Filesystem directories scanned for additional user themes. Colon-separated in env var. |
@@ -98,7 +100,7 @@ Async function. Orchestrates the full scinr.newton pipeline end-to-end, chaining
 import asyncio
 from scinr.newton import configure, run_pipeline
 
-configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="secret")
+configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="secret", neo4j_database="neo4j")
 result = asyncio.run(run_pipeline(input_raw="files/"))
 print(result.success, result.total_duration_seconds)
 ```
@@ -655,6 +657,7 @@ configure(
     llm=my_llm,
     neo4j_user="neo4j",
     neo4j_password="secret",
+    neo4j_database="neo4j",
     storage_backend="custom",
     custom_storage=(MyRawFileRepo(), MyPageRepo()),
 )
@@ -688,6 +691,7 @@ configure(
     llm=my_llm,
     neo4j_user="neo4j",
     neo4j_password="secret",
+    neo4j_database="neo4j",
     extra_converters={".rtf": MyRtfConverter},
 )
 ```
@@ -719,6 +723,7 @@ configure(
     llm=my_llm,
     neo4j_user="neo4j",
     neo4j_password="secret",
+    neo4j_database="neo4j",
     extra_models_paths=["/path/to/my/themes/"],
     enabled_user_themes=["my_domain"],   # None activates all
 )

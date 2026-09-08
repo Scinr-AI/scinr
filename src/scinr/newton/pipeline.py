@@ -17,7 +17,7 @@ Minimal full pipeline::
     from scinr.newton.config import configure
     from scinr.newton.pipeline import run_pipeline
 
-    configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="...")
+    configure(llm=my_llm, neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
     result = asyncio.run(run_pipeline(input_raw="files/"))
 
 Skip Stage 0 (reuse previous converter output)::

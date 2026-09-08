@@ -60,6 +60,7 @@ class TestConfigureDefaults:
         assert cfg.neo4j_uri == _DUMMY_URI
         assert cfg.neo4j_user == _DUMMY_USER
         assert cfg.neo4j_password == _DUMMY_PASS
+        assert cfg.neo4j_database == "neo4j"  # resolved from the NEO4J_DATABASE env default
         assert cfg.storage_backend == "none"
         # get_config() returns the same object
         assert get_config() is cfg
@@ -195,6 +196,20 @@ class TestConfigureDefaults:
                 neo4j_uri=_DUMMY_URI,
                 neo4j_user=_DUMMY_USER,
                 # neo4j_password intentionally omitted
+            )
+
+    def test_configure_missing_neo4j_database_raises(self, monkeypatch):
+        """configure() raises ConfigurationError when neo4j_database is missing."""
+        monkeypatch.delenv("NEO4J_DATABASE", raising=False)
+
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="Neo4j database"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                # neo4j_database intentionally omitted
             )
 
 

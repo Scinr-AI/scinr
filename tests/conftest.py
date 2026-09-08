@@ -70,6 +70,16 @@ sys.modules["scinr.newton.cli"] = _cli_stub
 
 
 @pytest.fixture(autouse=True)
+def _default_neo4j_database(monkeypatch):
+    """`configure()` requires NEO4J_DATABASE. Provide a default for every test
+    via the environment so the ~70 existing `configure(...)` call sites keep
+    working; a test that exercises the "database missing" path can still
+    `monkeypatch.delenv("NEO4J_DATABASE", raising=False)` in its own body.
+    """
+    monkeypatch.setenv("NEO4J_DATABASE", "neo4j")
+
+
+@pytest.fixture(autouse=True)
 def clean_config():
     """Reset the global scinr.newton config singleton after each test."""
     import scinr.newton.config as cfg_module
