@@ -81,7 +81,7 @@ Before running the pipeline, ensure you have the following:
 
 ### Optional
 
-4. **MongoDB 4.6+** — Required only if you want persistent storage of raw files and converted pages. Run locally with Docker:
+4. **MongoDB** — Required only if you want persistent storage of raw files and converted pages. Any currently supported release works (4.4+ / 5.0+). Run locally with Docker:
 
    ```bash
    docker run -p 27017:27017 mongo:7
@@ -124,12 +124,12 @@ NEO4J_DATABASE=neo4j
 MISTRAL_API_KEY=your_mistral_api_key
 
 # ─── Storage (optional) ─────────────────────────────────────────────────────
-STORAGE_BACKEND=mongodb
-MONGO_URI=mongodb://user:pass@localhost:27017
+STORAGE_BACKEND=none                 # or "mongodb" for persistent storage
+# MONGODB_URI=mongodb://user:pass@localhost:27017
 
 # ─── Pipeline ───────────────────────────────────────────────────────────────
-EXTRACTION_BATCH_SIZE=3
-LLM_CONCURRENCY=32
+EXTRACTION_BATCH_SIZE=1              # default; 2–3 trades a little quality for fewer LLM calls
+LLM_CONCURRENCY=4                    # default; raise it toward your provider's rate limit
 ```
 
 ### Required fields for a first run
@@ -147,8 +147,8 @@ LLM_CONCURRENCY=32
 | :--- | :--- |
 | `MISTRAL_API_KEY` | Mistral API key for PDF OCR. |
 | `STORAGE_BACKEND` | `none` (default) or `mongodb` for persistent storage. |
-| `EXTRACTION_BATCH_SIZE` | It indicates the number of pages processed in the same call. The recommended values for most use cases are 2 or 3. |
-| `LLM_CONCURRENCY` | It indicates the number of llm calls that are done in parallel. You can start with 32, but it depends mainly from the rate limits from your provider. |
+| `EXTRACTION_BATCH_SIZE` | Number of pages processed per extraction call. Default `1` (best quality). `2`–`3` reduces call count at a small quality cost. See [Performance Tuning](user-guides/performance-tuning.md#extraction-batch-size-extraction_batch_size). |
+| `LLM_CONCURRENCY` | Number of LLM calls made in parallel across all stages. Default `4`. Raise it gradually toward your provider's rate limit while watching for `429` errors. See [Performance Tuning](user-guides/performance-tuning.md#llm-concurrency-llm_concurrency). |
 
 > **Note:** `python-dotenv` is included as a core dependency. When you call `configure()`, it automatically loads variables from a `.env` file in your current working directory. You do not need to import `dotenv` manually.
 
@@ -178,6 +178,9 @@ The following script configures `scinr` and runs the full pipeline on all docume
 
 ```python
 import asyncio
+
+from langchain_aws import ChatBedrockConverse
+
 from scinr.newton import configure, run_pipeline
 
 async def main():
@@ -186,14 +189,15 @@ async def main():
     #   1. Explicit arguments (highest priority)
     #   2. Environment variables / .env file
     #   3. Hard-coded defaults
-    llm = ChatBedrockConverse(...)
+    llm = ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1")
 
     configure(
         llm=llm,
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="password",
-        mistral_api_key="", # Needed por pdfs OCR
+        neo4j_database="neo4j",
+        mistral_api_key="",  # needed for PDF OCR
     )
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -223,13 +227,13 @@ python run_ingestion.py
 
 The full pipeline runs these stages in order:
 
-1. **Preprocess** — Converts raw files to an intermediate JSON with the content transformed into Markdown.
-2. **Extraction** — Uses the LLM to parse document structure and extract hierarchical sections.
-3. **Ingestion** — Writes document, structure nodes and Info Units into Neo4j.
-4. **Annotation** — An LLM agent assigns an extraction model to each structural node.
-5. **Entity Extraction** — Extracts typed Pydantic entities from annotated nodes and writes them as graph subgraphs.
+0. **Preprocess** — Converts raw files to an intermediate JSON with the content transformed into Markdown.
+1. **Extraction** — Uses the LLM to parse document structure and extract hierarchical sections.
+2. **Ingestion** — Writes document, structure nodes and Info Units into Neo4j.
+3. **Annotation** — An LLM agent assigns an extraction model to each structural node.
+4. **Entity Extraction** — Extracts typed Pydantic entities from annotated nodes and writes them as graph subgraphs.
 
-1a. **Tabular** — If `.csv`, `.xlsx`, or `.xls` files are detected in `input_raw`, they are processed through a separate tabular pipeline with LLM-powered normalization.
+> **Tabular path:** if `.csv`, `.xlsx`, or `.xls` files are present in `input_raw`, they are auto-detected and processed through a separate tabular pipeline (with LLM-powered normalization) alongside Stages 0–4.
 
 
 ### Running individual stages
@@ -275,8 +279,8 @@ ORDER BY nodes DESC;
 MATCH (s:StructureNode)-[:HAS_MODEL_DECISION]->(m:ModelDecision)
 MATCH (s)-[:HAS_INFO_UNIT]->(i:InfoUnit)
 WHERE m.matched_model_class IS NOT NULL
-RETURN s.node_id as Structure_Node_ID, s.title as Structure_Node_Title, m.matched_model_class AS model, collect(i.description) as Info_Unit_Descriptions
-ORDER BY s.node_id;
+RETURN s.id AS Structure_Node_ID, s.title AS Structure_Node_Title, m.matched_model_class AS model, collect(i.description) AS Info_Unit_Descriptions
+ORDER BY s.id;
 
 -- NOTE: You can check with this query how the matched model adapts to the information contained in the structure node title and the Info Unit Descriptions.
 
@@ -295,7 +299,7 @@ async def verify():
         "bolt://localhost:7687",
         auth=("neo4j", "your_password")
     ) as driver:
-        async with driver.session(database=cfg.neo4j_database) as session:
+        async with driver.session(database="neo4j") as session:
             result = await session.run(
                 "MATCH (d:Document) RETURN count(d) AS doc_count"
             )
@@ -335,9 +339,9 @@ if result.ingestion:
 You must:
 - Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance.
 
-### `ConfigurationError: Neo4j username/password is not configured`
+### `ConfigurationError: Neo4j username is not configured` / `... password is not configured`
 
-Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`.
+`configure()` raises these separately. Set `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` in your `.env` file, or pass them as arguments to `configure()`.
 
 ### Neo4j connection refused
 

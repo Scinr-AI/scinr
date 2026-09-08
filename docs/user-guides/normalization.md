@@ -50,8 +50,8 @@ Tabular data often contains messy, inconsistent, or composite values in a single
 
 | Characteristic | Detail |
 |---|---|
-| **Opt-in** | Only fields with `normalization_model: True` in `json_schema_extra` are processed |
-| **Off by default** | The engine is disabled unless `normalization_enabled=True` |
+| **Per-field opt-in** | Only fields with `normalization_model: True` in `json_schema_extra` are processed — a model with no such field is unaffected |
+| **Enabled by default** | The engine is active unless you explicitly set `normalization_enabled=False`. When it is enabled but a model declares no `normalization_model` field, nothing happens. |
 | **Tabular-only** | Wired into the tabular pipeline; ignored by the unstructured pipeline |
 | **Additive** | A normalization field is still an ordinary nested model for all other purposes |
 | **Deduplicated** | Identical source values across rows trigger only one LLM call |
@@ -137,7 +137,7 @@ The **unique key** is constructed as `{target_type.__name__}:{md5_hash}` where t
 
 #### Phase 3: Batching (group by target type)
 
-Entries are grouped by `target_type.__name__` because the LLM structured output call requires a homogeneous target type. Within each group, entries are batched by `normalization_batch_size` (default: 3). Duplicate entries (same unique key from different rows) are deduplicated — only unique keys proceed to the LLM.
+Entries are grouped by `target_type.__name__` because the LLM structured output call requires a homogeneous target type. Within each group, entries are batched by `normalization_batch_size` (default: 5). Duplicate entries (same unique key from different rows) are deduplicated — only unique keys proceed to the LLM.
 
 ```python
 # engine.py — simplified
@@ -345,8 +345,8 @@ configure(
 
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
-| `normalization_enabled` | `NORMALIZATION_ENABLED` | `false` | Enable/disable the normalization engine |
-| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `3` | Max entries per LLM batch call |
+| `normalization_enabled` | `NORMALIZATION_ENABLED` | `true` | Enable/disable the normalization engine. Set to `false` to skip it entirely. |
+| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` | Max entries per LLM batch call |
 | `normalization_llm` | — | Falls back to main `llm` | Dedicated LLM instance for normalization calls |
 
 ### Parameter resolution order
@@ -354,12 +354,12 @@ configure(
 For each parameter: **explicit argument** > **environment variable** > **default value**.
 
 ```bash
-# Enable normalization via env var
-export NORMALIZATION_ENABLED=true
+# Disable normalization via env var (it is on by default)
+export NORMALIZATION_ENABLED=false
 export NORMALIZATION_BATCH_SIZE=10
 
 # Run pipeline — env vars are picked up automatically
-scinr-ingest --input ./data/contacts.csv --theme contacts
+python run_ingestion.py
 ```
 
 ### When to use a dedicated normalization LLM
@@ -713,7 +713,7 @@ Using a separate, cheaper LLM for normalization:
 
 ```python
 configure(
-    llm=ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-20250514"),  # Main LLM
+    llm=ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6"),  # Main LLM
     normalization_llm=ChatBedrockConverse(model="us.anthropic.claude-haiku-3"),  # Normalization LLM
 )
 ```
@@ -1071,7 +1071,7 @@ from scinr.newton import configure
 
 # Main LLM for extraction and annotation
 main_llm = ChatBedrockConverse(
-    model="us.anthropic.claude-sonnet-4-20250514",
+    model="us.anthropic.claude-sonnet-4-6",
     region_name="us-east-1",
 )
 
@@ -1106,15 +1106,17 @@ Note that row 4 has the same `raw_address` as row 1 — the normalization engine
 
 ```python
 import asyncio
-from scinr.newton.pipeline import run_pipeline
+from scinr.newton import run_pipeline
 
 async def main():
+    # Point input_raw at the folder holding the CSV; tabular files are auto-detected.
     result = await run_pipeline(
-        input_path="./data/manufacturers.csv",
-        theme="pharma_contacts",
+        input_raw="./data",
+        stages=["tabular"],
     )
-    print(f"Processed {result.total_rows} rows")
-    print(f"Normalized {result.normalization_count} fields")
+    print(f"Success: {result.success}")
+    if result.tabular:
+        print(f"Files processed: {result.tabular.total_processed}")
 
 asyncio.run(main())
 ```
@@ -1174,26 +1176,25 @@ asyncio.run(main())
 
 ### Step 6: Neo4j graph result
 
+Field values live as **properties on the `:ModelInstance` node itself**; nested normalized models are **separate child `:ModelInstance` nodes** linked via `[:HAS_<FIELDNAME>]`. The `[:HAS_<FIELD>]` type from `:ExtractionResult` to the row's instance is derived from the composite-schema field name.
+
 ```
-(:StructureNode {name: "manufacturers.csv"})
+(:StructureNode:Row)
   -[:HAS_EXTRACTION]->
   (:ExtractionResult)
-    -[:HAS_CONDITION_IDS]->
-    (:ModelInstance {model_class: "ManufacturerContact"})
-      -[:HAS_PROPERTIES {manufacturer_name: "PharmaCorp Inc", ...}]
+    -[:HAS_MANUFACTURER_CONTACT]->
+    (:ModelInstance {model_class: "ManufacturerContact", manufacturer_name: "PharmaCorp Inc", raw_address: "123 Main Street, ..."})
       -[:REFERENCES]->(:LabeledEntity {label: "Manufacturer", value: "PharmaCorp Inc"})
       -[:HAS_NORMALIZED_ADDRESS]->
-      (:ModelInstance {model_class: "NormalizedAddress"})
-        -[:HAS_PROPERTIES {street: "123 Main Street", city: "Springfield", ...}]
+      (:ModelInstance {model_class: "NormalizedAddress", street: "123 Main Street", city: "Springfield", ...})
         -[:REFERENCES]->(:LabeledEntity {label: "Country", value: "US"})
       -[:HAS_NORMALIZED_SUBSTANCE]->
-      (:ModelInstance {model_class: "NormalizedSubstance"})
-        -[:HAS_PROPERTIES {inn_name: "Metformin", strength: "500 mg", ...}]
+      (:ModelInstance {model_class: "NormalizedSubstance", inn_name: "Metformin", strength: "500 mg", ...})
         -[:REFERENCES]->(:LabeledEntity {label: "ActiveSubstance", value: "Metformin"})
         -[:REFERENCES]->(:LabeledEntity {label: "CasNumber", value: "1105-50-9"})
 ```
 
-Row 4 (PharmaCorp Inc, same address) shares the same `NormalizedAddress` node as row 1 via the `country_code` entity_label dedup. The `NormalizedSubstance` nodes are different because the substances differ.
+Row 4 (PharmaCorp Inc, same address) shares the same `NormalizedAddress` node as row 1 **only if** that sub-model declares an `instance_key` (or the `Country` `:LabeledEntity` is what deduplicates). The `NormalizedSubstance` nodes are different because the substances differ.
 
 ---
 

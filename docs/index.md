@@ -16,7 +16,7 @@ It uses LLMs and Pydantic models to extract structured, domain-specific informat
 
 * **Tabular data pipeline** — Normalize scientific spreadsheets and extract structured entities from tabular data.
 
-* **Multi-format ingestion** — Supports .pdf, .docx, .xlsx, and .csv. Support for .pptx, .json, .xml, .html, and .txt is planned in the roadmap.
+* **Multi-format ingestion** — Supports `.pdf`, `.docx`, `.xlsx`, `.xls`, and `.csv`. Support for `.pptx`, `.json`, `.xml`, `.html`, and `.txt` is planned in the roadmap.
 
 * **Pydantic extraction models** — Define structured schemas for domain entities such as compounds, clinical trials, and assays.
 
@@ -38,7 +38,7 @@ Unstructured documents go through five stages:
 
 ```text
 Raw Documents
-(.pdf, .docx, .pptx, .json, .html, .txt, ...)
+(.pdf, .docx, .xlsx, .xls, .csv)
         │
         ▼
 1. Preprocess
@@ -100,7 +100,8 @@ async def main():
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="password",
-        mistral_api_key="", # Needed por pdfs OCR
+        neo4j_database="neo4j",
+        mistral_api_key="",  # needed for PDF OCR
     )
 
     result = await run_pipeline(input_raw="./raw_documents")

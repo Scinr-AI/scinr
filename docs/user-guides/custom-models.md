@@ -288,17 +288,17 @@ class VariationCodeModel(ExtractionModel):
 
 ### 5.3 Complementary model hints
 
-When a model is typically used together with other models, declare this explicitly:
+When a model is typically used together with another model, it helps to say so in the docstring in plain language:
 
 ```python
 class DocumentationModel(ExtractionModel):
     """
     A documentation requirement for a variation.
-    They are perfect candidates as ComplementaryModels for VariationCodeModel.
+    Typically extracted alongside VariationCodeModel as a complementary model.
     """
 ```
 
-The annotation agent reads `ComplementaryModels` hints and may suggest them as secondary models to apply alongside the primary model.
+This is a **writing convention**, not a parsed directive: there is no special keyword the engine looks for. The annotation agent decides on complementary models from the overall docstrings and field descriptions, so clear prose like the above nudges it in the right direction. The chosen complementary models end up in the `complementary_models` field of the annotation decision.
 
 ---
 
@@ -801,7 +801,7 @@ class ContactRecord(ExtractionModel):
 
 This mechanism is:
 
-- **Opt-in and off by default.** It only runs if the pipeline caller has explicitly called `configure(normalization_enabled=True, normalization_llm=..., normalization_batch_size=...)`. If `normalization_enabled` is `False` (the default), `normalization_model` is completely inert.
+- **Per-field opt-in, enabled by default.** The engine is active unless the caller sets `configure(normalization_enabled=False)`. Even when enabled, it only touches fields marked `normalization_model: True` — a model without any such field is unaffected. Set `normalization_enabled=False` to switch the engine off entirely (`normalization_model` then becomes inert). Use `normalization_llm=...` / `normalization_batch_size=...` to tune it.
 - **Tabular-only hook, but the keys stay visible everywhere.** The `NormalizationEngine` hook is wired into the tabular ingestion pipeline and nowhere else — it never runs during Stage 3–4 (PDF/DOCX) extraction. During Stage 3–4, the nested field is populated by the extraction LLM call directly, guided by the field's `description=`.
 - **Additive, not exclusive.** A field marked `normalization_model: True` is otherwise an ordinary nested-model field for every other purpose. Its own nested fields may still carry `entity_label`, `instance_key: True`, `field_relationships`, or `instance_relationships`.
 
@@ -919,7 +919,7 @@ class ContactRecord(ExtractionModel):
 
 ### Validation
 
-- [ ] Auto-discovery verified: `python -c "from scinr.newton.utils.theme_registry import ThemeRegistry; print(ThemeRegistry().list_themes())"`
+- [ ] Auto-discovery verified: `python -c "from scinr.newton.utils.theme_registry import get_theme_registry; print(get_theme_registry().get_all_theme_paths())"`
 - [ ] No import errors: `python -c "import my_package.my_theme.catalog"`
 - [ ] At least one real document processed end-to-end (Stage 3 + Stage 4)
 

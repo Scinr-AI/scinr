@@ -2,7 +2,7 @@
 
 Get from zero to a working knowledge graph in under 15 minutes.
 
-This guide walks you through installing `scinr`, configuring your environment, preparing documents, running the full 6-stage ingestion pipeline, and verifying the extracted knowledge graph in Neo4j.
+This guide walks you through installing `scinr`, configuring your environment, preparing documents, running the full ingestion pipeline (Stages 0–4, plus an auto-detected tabular path), and verifying the extracted knowledge graph in Neo4j.
 
 ---
 
@@ -69,6 +69,7 @@ MODEL_ID=us.anthropic.claude-sonnet-4-6
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
 ```
 
 ### Required vs. optional fields
@@ -79,6 +80,7 @@ NEO4J_PASSWORD=your_password
 | `NEO4J_URI` | No | Neo4j Bolt URI. Default: `bolt://localhost:7687`. |
 | `NEO4J_USER` | Yes | Neo4j username (usually `neo4j`). |
 | `NEO4J_PASSWORD` | Yes | Neo4j password. |
+| `NEO4J_DATABASE` | Yes | Neo4j database name (usually `neo4j`). |
 | `MISTRAL_API_KEY` | No | Mistral API key for PDF OCR. |
 | `STORAGE_BACKEND` | No | `none` (default, in-memory) or `mongodb`. |
 
@@ -102,13 +104,11 @@ mkdir -p raw_docs
 | PDF | `.pdf` | Text-based via `pdfplumber`; OCR via Mistral API |
 | Word | `.docx` | Full text + structure extraction |
 | Excel | `.xlsx`, `.xls` | Auto-routed to tabular pipeline |
-| PowerPoint | `.pptx` | Slide text extraction |
 | CSV | `.csv` | Auto-routed to tabular pipeline |
-| HTML | `.html`, `.htm` | Cleaned and parsed |
-| JSON | `.json` | API responses, structured data |
-| Text | `.txt`, `.md`, `.rst` | Plain text |
 
-> **Warning:** Tabular files (`.csv`, `.xlsx`, `.xls`) are automatically routed to the tabular pipeline and bypass the standard 5-stage extraction flow. This is intentional — spreadsheets have a fundamentally different structure than narrative documents.
+> **Roadmap:** `.pptx`, `.html`, `.json`, `.xml`, and `.txt` converters exist in the codebase but are not yet officially supported or tested. Stick to the formats above for production use.
+
+> **Warning:** Tabular files (`.csv`, `.xlsx`, `.xls`) are automatically routed to the tabular pipeline and bypass the standard extraction flow (Stages 0–4). This is intentional — spreadsheets have a fundamentally different structure than narrative documents.
 
 ---
 
@@ -134,7 +134,7 @@ async def main():
         neo4j_password="your_password",
     )
 
-    # Run the full 6-stage pipeline
+    # Run the default pipeline (Stages 0–4; tabular files are auto-detected)
     result = await run_pipeline(input_raw="./raw_docs")
 
     # Check overall result
@@ -206,27 +206,30 @@ Stages executed: ['preprocess', 'extraction', 'ingestion', 'annotation', 'entity
 
 After the pipeline completes, your data is available in Neo4j. Use the Neo4j Browser (`http://localhost:7474`) or any Cypher client to inspect the results.
 
+> **Schema note:** `HAS_STRUCTURE` connects a `:Document` **only** to its root `:StructureNode`; deeper nesting is `HAS_CHILD`. Extracted entities hang off `(:StructureNode)-[:HAS_EXTRACTION]->(:ExtractionResult)-[:HAS_<field>]->(:ModelInstance)-[:REFERENCES]->(:LabeledEntity)`. See [Neo4j Graph Model](neo4j-graph.md) for the full reference.
+
 ### List all ingested documents
 
 ```cypher
 MATCH (d:Document)
-RETURN d.document_name, d.format, d.ingested_at, d.version
-ORDER BY d.ingested_at DESC;
+WHERE d.latest = true
+RETURN d.name, d.path, d.version, d.load_date
+ORDER BY d.load_date DESC;
 ```
 
 ### View document structure
 
 ```cypher
-MATCH (d:Document)-[:HAS_STRUCTURE]->(s:StructureNode)
-RETURN d.document_name AS document, s.section_title AS section, s.node_type
+MATCH (d:Document)-[:HAS_STRUCTURE]->(:StructureNode)-[:HAS_CHILD*0..]->(s:StructureNode)
+RETURN d.name AS document, s.title AS section, s.role
 LIMIT 20;
 ```
 
 ### View the full hierarchy
 
 ```cypher
-MATCH (d:Document)-[:HAS_STRUCTURE]->(s:StructureNode)-[:HAS_CHILD]->(c:StructureNode)
-RETURN d.document_name AS document, s.section_title AS parent, c.section_title AS child, c.node_type AS child_type
+MATCH (d:Document)-[:HAS_STRUCTURE]->(:StructureNode)-[:HAS_CHILD*0..]->(parent:StructureNode)-[:HAS_CHILD]->(child:StructureNode)
+RETURN d.name AS document, parent.title AS parent, child.title AS child, child.role AS child_role
 LIMIT 30;
 ```
 
@@ -234,16 +237,16 @@ LIMIT 30;
 
 ```cypher
 MATCH (m:ModelInstance)
-RETURN labels(m) AS type, count(m) AS count
+RETURN m.model_class AS type, count(m) AS count
 ORDER BY count DESC;
 ```
 
 ### View labeled entities (globally deduplicated)
 
 ```cypher
-MATCH (e:LabeledEntity)
-RETURN head(labels(e)[1..]) AS entity_type, e.value, count(e) AS occurrences
-ORDER BY occurrences DESC
+MATCH (:ModelInstance)-[:REFERENCES]->(e:LabeledEntity)
+RETURN e.label AS entity_type, e.value, count(*) AS references
+ORDER BY references DESC
 LIMIT 20;
 ```
 
@@ -258,10 +261,10 @@ ORDER BY count DESC;
 ### Explore a specific document's extraction results
 
 ```cypher
-MATCH (d:Document)-[:HAS_STRUCTURE*0..]->(s:StructureNode)<-[:EXTRACTED_FROM]-(m:ModelInstance)
-WHERE d.document_name = 'YourDocumentName'
-RETURN s.section_title AS section,
-       head(labels(m)[1..]) AS model_type,
+MATCH (d:Document {name: 'YourDocumentName'})-[:HAS_STRUCTURE]->(:StructureNode)-[:HAS_CHILD*0..]->(s:StructureNode)
+MATCH (s)-[:HAS_EXTRACTION]->(:ExtractionResult)-[r]->(m:ModelInstance)
+RETURN s.title AS section,
+       m.model_class AS model_type,
        count(m) AS entities
 ORDER BY entities DESC
 LIMIT 20;
@@ -272,8 +275,7 @@ LIMIT 20;
 In Neo4j Browser, run this query to get a visual overview:
 
 ```cypher
-MATCH path = (d:Document)-[:HAS_STRUCTURE*1..3]->(s:StructureNode)
-WHERE d.document_name = 'YourDocumentName'
+MATCH path = (d:Document {name: 'YourDocumentName'})-[:HAS_STRUCTURE]->(:StructureNode)-[:HAS_CHILD*0..2]->(:StructureNode)
 RETURN path
 LIMIT 50;
 ```
@@ -371,9 +373,9 @@ You must either:
 - Set `MODEL_ID` in your `.env` file (for AWS Bedrock), or
 - Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance.
 
-### `"Neo4j username/password is not configured"`
+### `"Neo4j username is not configured"` / `"Neo4j password is not configured"`
 
-Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`.
+`configure()` raises these separately. Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`. `NEO4J_DATABASE` is also required.
 
 ### Neo4j connection refused
 
@@ -395,7 +397,7 @@ print('Neo4j connection OK')
 Check that:
 
 - The `input_raw` directory exists and contains supported file types.
-- File extensions are recognized (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.pptx`, `.html`, `.json`, `.txt`, `.md`).
+- File extensions are recognized (`.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`).
 - The path is correct — relative paths are resolved from your current working directory.
 
 ### ImportError: `langchain-aws is not installed`

@@ -473,8 +473,8 @@ Tabular file (CSV/XLSX)
 
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
-| `normalization_enabled` | `NORMALIZATION_ENABLED` | `False` | Enable/disable the normalization engine |
-| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `3` | Max entries per LLM batch call |
+| `normalization_enabled` | `NORMALIZATION_ENABLED` | `True` | Enable/disable the normalization engine (set `False` to skip it) |
+| `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` | Max entries per LLM batch call |
 | `normalization_llm` | — | Falls back to main `llm` | Dedicated LLM for normalization calls |
 
 ---
@@ -1163,17 +1163,17 @@ Processing a document with `VariationModel` produces:
   -[:HAS_EXTRACTION]->
   (:ExtractionResult)
     -[:USES_PRIMARY_MODEL]->(:CatalogModel {name: "VariationModel"})
-    -[:HAS_CONDITION_IDS {index}]->(:ModelInstance {model_class: "VariationModel"})
+    -[:HAS_VARIATION]->(:ModelInstance {model_class: "VariationModel"})
+    #  ^ the ExtractionResult→ModelInstance relationship type is HAS_<FIELD>,
+    #    derived from the composite-schema field that holds this instance.
+
+  (:ModelInstance {model_class: "VariationModel"})
     -[:REFERENCES]->(:LabeledEntity {label: "VariationCode", value: "Q.I.a.1"})
     -[:REFERENCES]->(:LabeledEntity {label: "ProcedureType", value: "II"})
     -[:REFERENCES]->(:LabeledEntity {label: "Country", value: "DE"})
     -[:REFERENCES]->(:LabeledEntity {label: "ProductName", value: "Metformin 500mg"})
-
-  (:ModelInstance {model_class: "VariationModel"})
-    -[:APPLIES_TO]->
-    (:ModelInstance {model_class: "ConditionModel", condition_id: "1"})
-    -[:APPLIES_TO]->
-    (:ModelInstance {model_class: "ConditionModel", condition_id: "2"})
+    -[:APPLIES_TO]->(:ModelInstance {model_class: "ConditionModel", condition_id: "1"})
+    -[:APPLIES_TO]->(:ModelInstance {model_class: "ConditionModel", condition_id: "2"})
 
   (:LabeledEntity {label: "VariationCode", value: "Q.I.a.1"})
     ← shared across all extractions with this code

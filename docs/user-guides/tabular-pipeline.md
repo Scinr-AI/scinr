@@ -490,7 +490,7 @@ The `NormalizationEngine` processes instances in batches:
 1. **Detection:** For each model instance, the engine scans fields for `json_schema_extra["normalization_model"] == True`.
 2. **Source extraction:** For each normalizable field, it extracts the values of the sibling fields listed in `normalization_source_fields`.
 3. **Deduplication:** Instances with identical source values are grouped by a hash key — the LLM is called once per unique source combination.
-4. **Batching:** Unique entries are grouped by target type and processed in batches of `normalization_batch_size` (default: 3).
+4. **Batching:** Unique entries are grouped by target type and processed in batches of `normalization_batch_size` (default: 5).
 5. **LLM call:** Each batch is sent to the LLM with structured output, requesting normalized instances of the target type.
 6. **Application:** Results are applied back to the original instances via `setattr` (with validation bypass fallback).
 7. **Caching:** Results are cached by hash key — duplicate source values reuse the cached normalization.
@@ -542,50 +542,55 @@ The `NormalizationEngine` caches results by a hash of the source values. If two 
 
 ### 9.1 Graph Structure
 
-The tabular pipeline writes the following nodes and relationships to Neo4j:
+The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subgraph`) as the unstructured pipeline, so the node and relationship types match the [Neo4j Graph Model](neo4j-graph.md). One sheet becomes a `:StructureNode:Table`; each data row becomes a `:StructureNode:Row`:
 
 ```
 (:Document)
   └── [:HAS_STRUCTURE] ──► (:StructureNode:Table)
                                 ├── [:HAS_MODEL_DECISION] ──► (:ModelDecision)
-                                │                                   ├── [:MATCHES_MODEL] ──► (:Model {class: "ProductRecord"})
-                                │                                   └── [:MATCHES_THEME] ──► (:Theme)
-                                └── [:HAS_STRUCTURE] ──► (:StructureNode:Row)
-                                                            ├── [:HAS_INFO_UNIT] ──► (:InfoUnit)
-                                                            ├── [:HAS_MODEL_DECISION] ──► (:ModelDecision)
-                                                            └── [:HAS_MODEL_INSTANCE] ──► (:ModelInstance {model_class: "ProductRecord"})
-                                                                                              ├── [:HAS_LABELED_ENTITY] ──► (:LabeledEntity)
-                                                                                              ├── (field properties from model data)
-                                                                                              └── [:HAS_<NORMALIZED_FIELD>] ──► (:ModelInstance {model_class: "NormalizedXxx", ...})
+                                │                                   └── [:MATCHED_MODEL] ──► (:CatalogModel {name: "ProductRecord"})
+                                │                                                                └── [:BELONGS_TO_THEME] ──► (:Theme)
+                                └── [:HAS_CHILD] ──► (:StructureNode:Row)
+                                                        ├── [:HAS_INFO_UNIT] ──► (:InfoUnit)
+                                                        ├── [:HAS_MODEL_DECISION] ──► (:ModelDecision)
+                                                        └── [:HAS_EXTRACTION] ──► (:ExtractionResult)
+                                                                                    ├── [:USES_PRIMARY_MODEL] ──► (:CatalogModel)
+                                                                                    └── [:HAS_<FIELD>] ──► (:ModelInstance {model_class: "ProductRecord"})
+                                                                                                              ├── [:REFERENCES] ──► (:LabeledEntity)
+                                                                                                              ├── (field properties from model data)
+                                                                                                              └── [:HAS_<NORMALIZED_FIELD>] ──► (:ModelInstance {model_class: "NormalizedXxx", ...})
 ```
 
 > A field marked `normalization_model: True` produces its own child `:ModelInstance` node (linked via `[:HAS_<FIELDNAME>]`) — never a flattened/embedded property on the parent row's node.
 
 ### 9.2 Node Types
 
-| Node | Labels | Created by | Description |
-| :--- | :--- | :--- | :--- |
-| Document | `:Document` | Tabular agent | Source file tracking node (path, version, raw_file_id). |
-| Table | `:StructureNode:Table` | `write_tabular` | One per sheet. Contains sheet metadata (column/row count, theme). |
-| Row | `:StructureNode:Row` | `write_tabular` | One per data row. Contains row data as InfoUnit Markdown. |
-| ModelDecision | `:ModelDecision` | `write_annotation` | The LLM's model selection decision for the table. |
-| ModelInstance | `:ModelInstance` (with `model_class: "{ModelName}"`) | `write_extraction_subgraph` | One per row. Contains all model field values as properties. |
-| LabeledEntity | `:LabeledEntity` (with `label: "{Label}"`) | `write_extraction_subgraph` | One per `entity_label` field value. Globally deduplicated. |
-| InfoUnit | `:InfoUnit` | `write_tabular` | Markdown table representation of a single row. |
+| Node | Labels | Description |
+| :--- | :--- | :--- |
+| Document | `:Document` | Source file tracking node (`path`, `version`, `raw_file_id`, …). |
+| Table | `:StructureNode:Table` | One per sheet. Root structure node of the sheet. |
+| Row | `:StructureNode:Row` | One per data row, a child of the table. |
+| InfoUnit | `:InfoUnit` | The row rendered as a Markdown table, attached to the `:Row`. |
+| ModelDecision | `:ModelDecision` | The LLM's model-selection decision for the table (also linked from each row). |
+| ExtractionResult | `:ExtractionResult` | One per row; anchors the row's extraction output. |
+| ModelInstance | `:ModelInstance` (`model_class: "{ModelName}"`) | One per row. All model field values as properties. |
+| LabeledEntity | `:LabeledEntity` (`label: "{Label}"`) | One per `entity_label` field value. Globally deduplicated. |
+| CatalogModel / Theme | `:CatalogModel`, `:Theme` | The registered model and its theme. |
 
 ### 9.3 Relationships
 
 | Relationship | Source → Target | Description |
 | :--- | :--- | :--- |
-| `HAS_STRUCTURE` | Document → Table | Links document to its table sheets. |
-| `HAS_STRUCTURE` | Table → Row | Links table to its data rows. |
-| `HAS_MODEL_DECISION` | Table → ModelDecision | The model selection decision for this table. |
-| `HAS_MODEL_DECISION` | Row → ModelDecision | Links row to the table's model decision. |
+| `HAS_STRUCTURE` | Document → Table | Links document to its (root) table sheet node. |
+| `HAS_CHILD` | Table → Row | Links table to its data rows. |
 | `HAS_INFO_UNIT` | Row → InfoUnit | Row's data rendered as Markdown. |
-| `HAS_MODEL_INSTANCE` | Row → ModelInstance | The Pydantic model instance for this row. |
-| `HAS_LABELED_ENTITY` | ModelInstance → LabeledEntity | Entity fields (from `entity_label` annotation). |
-| `MATCHES_MODEL` | ModelDecision → Model | The selected extraction model class. |
-| `MATCHES_THEME` | ModelDecision → Theme | The classified thematic domain. |
+| `HAS_MODEL_DECISION` | Table → ModelDecision / Row → ModelDecision | The model-selection decision for this table (also linked from each row). |
+| `MATCHED_MODEL` | ModelDecision → CatalogModel | The selected extraction model class. |
+| `BELONGS_TO_THEME` | CatalogModel → Theme | The classified thematic domain (declared at the catalog-model level). |
+| `HAS_EXTRACTION` | Row → ExtractionResult | The row's extraction output. |
+| `USES_PRIMARY_MODEL` | ExtractionResult → CatalogModel | The primary model used for the row. |
+| `HAS_<FIELD>` | ExtractionResult → ModelInstance | The row's model instance (relationship type derived from the field name). |
+| `REFERENCES` | ModelInstance → LabeledEntity | Entity fields (from `entity_label` annotation). |
 
 ### 9.4 Entity Relationships
 
@@ -619,8 +624,8 @@ configure(
     llm=my_llm,
 
     # ── Tabular normalization ──────────────────────────────────────
-    normalization_enabled=True,           # Enable the NormalizationEngine
-    normalization_batch_size=10,          # Max entries per LLM batch (default: 3)
+    normalization_enabled=True,           # On by default; pass False to disable
+    normalization_batch_size=10,          # Max entries per LLM batch (default: 5)
     normalization_llm=cheaper_llm,        # Optional dedicated LLM for normalization
 )
 ```
@@ -628,7 +633,7 @@ configure(
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `normalization_enabled` | `bool` | `True` | Enable/disable the `NormalizationEngine`. When `False`, `normalization_model` fields are inert and stay `None`. |
-| `normalization_batch_size` | `int` | `3` | Maximum number of unique normalization entries per LLM call. Higher values batch more entries but increase prompt size. |
+| `normalization_batch_size` | `int` | `5` | Maximum number of unique normalization entries per LLM call. Higher values batch more entries but increase prompt size. |
 | `normalization_llm` | `BaseChatModel` | `None` | Dedicated LLM for normalization calls. Falls back to the main `llm` when `None`. Use a cheaper/faster model here. |
 
 ### 10.2 Concurrency
@@ -768,16 +773,17 @@ RETURN t.title AS table,
 
 ### 12.3 Debugging Normalization
 
-To check which normalizations were applied:
+A normalized field is a **separate child `:ModelInstance` node** (linked via `[:HAS_<FIELDNAME>]`), not a property on the parent row's node. To count how many parent instances got a normalized child:
 
 ```cypher
-MATCH (mi:ModelInstance)
-WHERE mi.normalized_substance IS NOT NULL
-RETURN count(mi) AS normalized_count
+// Rows that produced a normalized_substance child
+MATCH (parent:ModelInstance)-[:HAS_NORMALIZED_SUBSTANCE]->(:ModelInstance)
+RETURN count(DISTINCT parent) AS normalized_count;
 
-MATCH (mi:ModelInstance)
-WHERE mi.normalized_substance IS NULL
-RETURN count(mi) AS unnormalized_count
+// Rows of a given model class that did NOT
+MATCH (parent:ModelInstance {model_class: "ProductRecord"})
+WHERE NOT (parent)-[:HAS_NORMALIZED_SUBSTANCE]->(:ModelInstance)
+RETURN count(parent) AS unnormalized_count;
 ```
 
 ---

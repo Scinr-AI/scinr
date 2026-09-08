@@ -32,9 +32,9 @@ The function opens and closes its own Neo4j driver — you do not need to manage
 | Operation | What it does | Use when |
 |---|---|---|
 | `delete_document()` | Permanently removes the `:Document` node and all descendants. No undo. | The document should no longer exist in the graph at all. |
-| `--update` re-ingestion | Keeps the `:Document` node, wipes its content, and re-ingests new data. | You want to refresh the content of an existing document while preserving its identity and version history. |
+| `update_mode=True` re-ingestion | Keeps the `:Document` node, wipes its content, and re-ingests new data at the same version. | You want to refresh the content of an existing document while preserving its identity and version history. |
 
-If you simply need to update content, use the `--update` flag with `run_pipeline()`. Use `delete_document()` only when you want complete, permanent removal.
+If you simply need to update content, pass `update_mode=True` to `run_pipeline()`. Use `delete_document()` only when you want complete, permanent removal.
 
 ---
 
@@ -249,7 +249,7 @@ print(result.documents_deleted)    # total :Document nodes removed
 
 ### No Undo
 
-Unlike `--update` re-ingestion (which preserves the `:Document` node and allows you to re-run the pipeline), `delete_document()` removes the document entirely. If you need the document back, you must re-ingest it from the original source file.
+Unlike `update_mode=True` re-ingestion (which preserves the `:Document` node and allows you to re-run the pipeline), `delete_document()` removes the document entirely. If you need the document back, you must re-ingest it from the original source file.
 
 ### Shared LabeledEntity Deduplication
 
@@ -259,7 +259,7 @@ Unlike `--update` re-ingestion (which preserves the `:Document` node and allows 
 
 If the target document is part of a folder hierarchy (connected via `IS_COMPOSED_OF`), the cascade delete reaches **all** documents connected through that relationship — including folder-parent documents and their siblings. This means deleting a leaf document in a folder hierarchy may also delete the parent folder document and its other children.
 
-If you need to delete only a single document without affecting its folder hierarchy, consider using `--update` re-ingestion instead, or manually manage the folder structure before deletion.
+If you need to delete only a single document without affecting its folder hierarchy, consider using `update_mode=True` re-ingestion instead, or manually manage the folder structure before deletion.
 
 The same cascade applies in `job_id` mode: `delete_document(job_id=...)` seeds the cascade with every `:Document` carrying that `job_id`, then follows `IS_COMPOSED_OF*` to their descendants. In the normal case every document produced by one `run_pipeline()` call shares the `job_id`, so this simply deletes the whole run. The edge case to be aware of is a folder-parent node that was first created by job A and later reused (via `MERGE`) by a document ingested under job B — deleting job A will also remove that job-B leaf through the cascade.
 
@@ -277,7 +277,7 @@ When `version` is specified, only that version's cascade is deleted. However, sh
 
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model, node types, and relationships affected by deletion.
 - **[Neo4j Graph Storage — instance_key shells](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key)** — Understand what a `:ModelInstance` "shell" node is and why unreferenced ones only get cleaned up via the garbage-collection pass described below.
-- **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, including the `--update` flag for in-place document updates.
+- **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, including `update_mode=True` for in-place document updates.
 - **[Deletion API](../api/deletion.md)** — Auto-generated reference for `delete_document()`.
 - **[Results API](../api/results.md)** — `DeletionResult` dataclass reference.
 - **[Architecture](../architecture.md)** — Pipeline stages and Neo4j schema details.

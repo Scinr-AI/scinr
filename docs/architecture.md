@@ -4,13 +4,13 @@
 
 The architecture provides **two independent ingestion pipelines** that write to the same knowledge graph:
 
-* **Unstructured document pipeline** — A 5-stage pipeline for supported document formats: PDF, DOCX, and PPTX. It handles preprocessing, structural extraction, graph ingestion, annotation, and domain entity extraction.
+* **Unstructured document pipeline** — A 5-stage pipeline (Stages 0–4) for supported document formats: PDF and DOCX. It handles preprocessing, structural extraction, graph ingestion, annotation, and domain entity extraction.
 
 * **Tabular data pipeline** — A dedicated pipeline for CSV, XLSX, and XLS data. It bypasses the document pipeline and uses structural normalization, LLM-driven mapping, and entity extraction to write structured knowledge directly to the graph.
 
 Both pipelines produce compatible entities and relationships in the **same Neo4j knowledge graph**, sharing graph conventions, node labels, relationship types, and schema constraints.
 
-Support for additional formats such as JSON, HTML, and TXT is planned for the roadmap.
+Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codebase but are not yet officially supported or tested. Only `.pdf`, `.docx`, `.xlsx`, `.xls`, and `.csv` are supported today.
 
 ---
 
@@ -107,7 +107,7 @@ All stage functions are `async def` and return typed `StageResult` dataclasses.
 
 **Purpose:** Convert raw source files into a standardized intermediate JSON format.
 
-**Input:** Directory of raw files (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.csv`, `.json`, `.html`, `.xml`, `.txt`).
+**Input:** Directory of raw files. Officially supported: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`. (Converters for `.pptx`, `.html`, `.json`, `.xml`, `.txt` exist but are not yet supported.)
 
 **Output:**
 - `StageResult` with per-file success/failure counts
@@ -118,12 +118,15 @@ All stage functions are `async def` and return typed `StageResult` dataclasses.
 
 Each file format has a dedicated converter inheriting from `BaseConverter` (abstract class in `converters/base.py`):
 
-| Converter | File | Supported Extensions | Dependencies |
-|---|---|---|---|
-| `PdfConverter` | `converters/pdf.py` | `.pdf` | `pdfplumber`, Mistral OCR API |
-| `DocxConverter` | `converters/docx.py` | `.docx` | `python-docx` |
-| `XlsxConverter` | `converters/xlsx.py` | `.xlsx`, `.xls` | `openpyxl`, `pandas` |
-| `CsvConverter` | `converters/csv.py` | `.csv` | `pandas` |
+| Converter | File | Supported Extensions | Dependencies | Status |
+|---|---|---|---|---|
+| `PdfConverter` | `converters/pdf.py` | `.pdf` | `pdfplumber`, Mistral OCR API | Supported |
+| `DocxConverter` | `converters/docx.py` | `.docx` | `python-docx` | Supported |
+| `XlsxConverter` | `converters/xlsx.py` | `.xlsx`, `.xls` | `openpyxl`, `pandas` | Supported (tabular) |
+| `CsvConverter` | `converters/csv.py` | `.csv` | `pandas` | Supported (tabular) |
+| `PptxConverter` | `converters/pptx.py` | `.pptx` | `python-pptx` | Registered, not yet supported |
+| `HtmlConverter` | `converters/html.py` | `.html`, `.htm` | — | Registered, not yet supported |
+| `TextConverter` | `converters/text.py` | `.txt`, `.md` | — | Registered, not yet supported |
 
 Converters are registered in `converters/registry.py` via a lazy-loaded extension-to-class map. Custom converters can be injected at runtime via `configure(extra_converters={...})` — the `apply_converter_overrides()` function handles both new extensions and built-in overrides.
 
@@ -139,10 +142,10 @@ Every converter produces an `IntermediateDocument` (Pydantic model) with:
 - `pages`: list of `IntermediatePage` objects, each containing `index`, `markdown` (text content), `images` (base64-encoded with MIME type), `dimensions`, `tables`, `hyperlinks`, `header`, `footer`, and `page_id`.
 - `folder_path`: relative path of the source file's parent directory from the input root.
 - `raw_file_id`: MongoDB ObjectId of the stored raw file (when storage backend is configured).
-- `context_instructions`: free-text user context injected via CLI `--context`.
+- `context_instructions`: free-text user context passed via `run_pipeline(context_instructions=...)`.
 - `document_name`: stem of the original source file.
 
-**Concurrency:** Documents are processed with bounded parallelism via `parallel_docs` parameter (default: 1 for sequential processing, matching pre-existing behavior).
+**Concurrency:** Documents are processed with bounded parallelism via the `parallel_docs` parameter (default: `5` when driven through `run_pipeline()`; `1` for the standalone `run_preprocess()` / `run_tabular_pipeline()` entry points).
 
 The actual per-file conversion is dispatched via `_run_convert()`: synchronous converters (docx, pptx, xlsx, csv, html, text) run on `asyncio.to_thread()`, while async converters (`PdfConverter`, whose conversion is genuine network I/O against the Mistral OCR API) are awaited natively on the event loop — so the concurrency `parallel_docs` schedules translates into real parallel progress instead of blocking the loop.
 
@@ -169,7 +172,7 @@ The storage layer is abstracted behind `storage/factory.py` and supports three b
 
 **Architecture:**
 
-The extraction engine (`extraction/` module) processes documents in **sliding-window chunks** of configurable size (`extraction_batch_size`, default: 3 pages per chunk). Each chunk:
+The extraction engine (`extraction/` module) processes documents in **sliding-window chunks** of configurable size (`extraction_batch_size`, default: 1 page per chunk). Each chunk:
 
 1. Builds the **active hierarchy** — the current tree of `StructureNode` objects accumulated so far for this document.
 2. Sends the previous page (for context), current pages, and active hierarchy to the LLM via `extract_chunk()`.
@@ -246,7 +249,7 @@ The ingestion module (`ingest/`) provides:
 
 **Node Properties:**
 
-- `:Document`: `name`, `path`, `version`, `latest`, `raw_file_id`, `context_instructions`, `ingestion_timestamp`
+- `:Document`: `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions` (plus `tenant_id` / `created_by_user_id` / `job_id` when provided)
 - `:StructureNode`: `id` (composite key), `title`, `role`, `appearance_order`, `theme`, `source_page_ids`, `row_index` (tabular only)
 - `:InfoUnit`: `uid`, `title`, `order`, `description`
 
@@ -302,10 +305,11 @@ A second LLM call validates and formats the decision, ensuring the model class n
 
 ```
 (:StructureNode) -[:HAS_MODEL_DECISION]-> (:ModelDecision)
-(:ModelDecision) -[:MATCHES_MODEL]-> (:CatalogModel)
-(:ModelDecision) -[:BELONGS_TO_THEME]-> (:Theme)
-(:CatalogModel) -[:HAS_FIELD]-> (:ModelField)
-(:ModelField) -[:HAS_ENTITY_LABEL]-> (:EntityLabel)
+(:ModelDecision) -[:MATCHED_MODEL]-> (:CatalogModel)
+(:CatalogModel)  -[:BELONGS_TO_THEME]-> (:Theme)
+(:CatalogModel)  -[:HAS_FIELD]-> (:ModelField)
+(:CatalogModel)  -[:PRODUCES_ENTITY]-> (:EntityLabel)
+(:CatalogModel)  -[:AGGREGATES]-> (:CatalogModel)   [list-wrapper / aggregate models]
 ```
 
 **Theme System:**
@@ -451,7 +455,7 @@ For each tabular file:
 
 **NormalizationEngine:**
 
-When `normalization_enabled=True` (default: `False`), the `NormalizationEngine` (in `tabular/`) performs post-extraction normalization for nested model fields. It batches entries (configurable via `normalization_batch_size`, default: 5) and uses a dedicated LLM (`normalization_llm`, falls back to main `llm`) to normalize values into consistent formats.
+When `normalization_enabled` is `True` (the default — set it to `False` to disable), the `NormalizationEngine` (in `tabular/`) performs post-extraction normalization for nested model fields marked `normalization_model: True`. It batches entries (configurable via `normalization_batch_size`, default: 5) and uses a dedicated LLM (`normalization_llm`, falls back to main `llm`) to normalize values into consistent formats.
 
 **Tabular Neo4j Structure:**
 
@@ -565,9 +569,9 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 | `llm_concurrency` | `LLM_CONCURRENCY` | 4 | Max concurrent LLM calls |
 | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | 10 | Max concurrent Neo4j async sessions |
 | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches |
-| `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | 3 | Pages per extraction chunk |
+| `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | 1 | Pages per extraction chunk |
 | `prompt_family` | `PROMPT_FAMILY` | `"generic"` | Prompt variant family |
-| `normalization_enabled` | `NORMALIZATION_ENABLED` | `False` | Enable tabular normalization |
+| `normalization_enabled` | `NORMALIZATION_ENABLED` | `True` | Enable tabular normalization (set `False` to disable) |
 | `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | 5 | Max entries per normalization batch |
 
 ### LLM Configuration
@@ -589,7 +593,7 @@ Three prompt families are supported via `PromptFamily` enum:
 |---|---|---|
 | `GENERIC` | Simplified, model-agnostic prompts | All LLM families (default) |
 | `CLAUDE` | XML-structured instructions, multi-step protocols, internal checklists | Claude/Sonnet models |
-| `GPT_REASONING` | Markdown section headers, goal-based language, no CoT elicitation | OpenAI reasoning models (GPT-5.5, o3, o4-mini) |
+| `GPT_REASONING` | Markdown section headers, goal-based language, no CoT elicitation | OpenAI reasoning models (o3, o4-mini, and similar) |
 
 Each family has dedicated prompt files in `annotation/` and `entity_extraction/` modules (e.g., `prompts_claude.py`, `prompts_gpt_reasoning.py`, `prompts_generic.py`).
 
@@ -614,7 +618,6 @@ scinr.newton/
 ├── pipeline_units.py           # DocumentUnit discovery (raw_file, extraction_json, ingestion_json, pre_ingested)
 ├── results.py                  # PipelineResult, StageResult, DocumentResult dataclasses
 ├── exceptions.py               # ScinrError hierarchy
-├── cli.py                      # CLI entry point (Typer-based)
 │
 ├── annotation/                 # Stage 3: LLM classification
 │   ├── agent.py                # run_annotation_agent(), run_manual_annotation()
@@ -835,17 +838,18 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 | `IS_COMPOSED_OF` | Document → Document | Folder hierarchy |
 | `HAS_NEWER_VERSION` | Document → Document | Version succession |
 | `HAS_MODEL_DECISION` | StructureNode → ModelDecision | Annotation result |
-| `MATCHES_MODEL` | ModelDecision → CatalogModel | Selected model |
-| `BELONGS_TO_THEME` | ModelDecision → Theme | Theme assignment |
+| `MATCHED_MODEL` | ModelDecision → CatalogModel | Selected model |
+| `BELONGS_TO_THEME` | CatalogModel → Theme | Theme assignment (at the catalog-model level) |
 | `HAS_FIELD` | CatalogModel → ModelField | Model schema |
-| `HAS_ENTITY_LABEL` | ModelField → EntityLabel | Entity label declaration |
+| `PRODUCES_ENTITY` | CatalogModel → EntityLabel | Entity label declaration |
+| `AGGREGATES` | CatalogModel → CatalogModel | List-wrapper / aggregate model containment |
 | `HAS_EXTRACTION` | StructureNode → ExtractionResult | Extraction output |
 | `USES_PRIMARY_MODEL` | ExtractionResult → CatalogModel | Primary model used |
 | `USES_COMPLEMENTARY_MODEL` | ExtractionResult → CatalogModel | Complementary model |
 | `HAS_<FIELD>` | ExtractionResult → ModelInstance | Nested model instance |
 | `REFERENCES` | ModelInstance → LabeledEntity | Entity reference |
-| `HAS_ENTITY` | ExtractionResult → Entity | Triple extraction entity |
-| 'NORMALIZED_PREDICATE' | Entity → Entity | Custom Triple relationship, it can be any predicate created by the LLM on entity_extraction. |
+| `HAS_ENTITY` | ExtractionResult → Entity | Triple extraction entity (`role` on the edge distinguishes subject/object) |
+| *(normalized predicate)* | Entity → Entity | Custom Triple relationship — any predicate the LLM produces during entity extraction. Open-ended type set. |
 
 ### Constraints and Indexes
 
@@ -877,10 +881,10 @@ When `storage_backend="mongodb"`:
 
 ### Repository Interfaces
 
-- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path)` → ObjectId
-- **`PageRepository`** (ABC): `store(document_name, pages, folder_path)` → list of ObjectIds
+- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path) -> str` and `delete(raw_file_id) -> None`
+- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown) -> str`, `get_pages(raw_file_id) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id) -> int`
 
-Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used when `storage_backend="none"`, returning `None` for all operations.
+Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used when `storage_backend="none"`.
 
 ---
 

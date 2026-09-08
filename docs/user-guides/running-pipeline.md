@@ -38,7 +38,7 @@ The pipeline consists of six named stages. The default run executes Stages 0-4 i
 
 | Stage | Name | Description |
 | :--- | :--- | :--- |
-| 0 | `"preprocess"` | Convert raw files (PDF, DOCX, PPTX, etc.) to intermediate JSON/Markdown |
+| 0 | `"preprocess"` | Convert raw files (PDF, DOCX, XLSX, XLS, CSV) to intermediate JSON/Markdown |
 | 1 | `"extraction"` | Parse document structure into hierarchical sections via LLM |
 | 2 | `"ingestion"` | Write `:Document` and `:StructureNode` nodes into Neo4j |
 | 3 | `"annotation"` | LLM agent assigns extraction models to each structure node |
@@ -83,6 +83,9 @@ async def run_pipeline(
     # ── Parallelism ───────────────────────────────────────────────────────────
     parallel_docs: int = 5,
 
+    # ── Stage 1 extraction mode (opt-in) ─────────────────────────────────────
+    fast_extraction: bool = False,
+
     # ── Behaviour on partial failure ─────────────────────────────────────────
     on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
 
@@ -105,7 +108,7 @@ async def run_pipeline(
 
 **Type:** `str | None`  **Default:** `None`
 
-Path to a folder containing raw source files (PDF, DOCX, PPTX, XLSX, CSV, HTML, JSON, TXT, MD). This activates Stage 0 (`"preprocess"`), which converts all supported files into an intermediate representation.
+Path to a folder containing raw source files (PDF, DOCX, XLSX, XLS, CSV). This activates Stage 0 (`"preprocess"`), which converts all supported files into an intermediate representation. (Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist but are not yet officially supported.)
 
 ```python
 result = await run_pipeline(input_raw="./raw_docs")
