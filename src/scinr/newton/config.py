@@ -132,7 +132,7 @@ class ScinrConfig:
     # Pipeline behaviour
     prompt_caching_enabled: bool = True
     full_docstring: bool = True
-    extraction_batch_size: int = 3
+    extraction_batch_size: int = 1
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
     neo4j_sync_concurrency: int = 8
@@ -146,7 +146,7 @@ class ScinrConfig:
     prompt_family: PromptFamily = PromptFamily.GENERIC
     # Normalization
     normalization_enabled: bool = True
-    normalization_batch_size: int = 3
+    normalization_batch_size: int = 5
     normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
 
 

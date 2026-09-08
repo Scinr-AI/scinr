@@ -517,7 +517,7 @@ Two separate semaphores control Neo4j access:
 2. Runs stages sequentially within the unit
 3. Implements soft-abort semantics:
    - **Stage 0/1/2 failure**: Always stops the unit (no valid artifact for subsequent stages)
-   - **Stage 3/4 partial failure** (`nodes_failed > 0`): Stops the unit only when `on_partial_failure="abort"` (default). With `"continue"` or `"warn"`, the unit advances to its next stage despite partial failures.
+   - **Stage 3/4 partial failure** (`nodes_failed > 0`): Stops the unit only when `on_partial_failure="abort"`. With `"continue"` or `"warn"` (the default), the unit advances to its next stage despite partial failures.
 4. Never propagates exceptions — returns a `UnitResult` with `fatal_error` set for uncaught exceptions
 
 ### Pre-Warming
@@ -981,9 +981,9 @@ The `on_partial_failure` parameter controls pipeline behavior when a stage repor
 
 | Value | Behavior |
 |---|---|
-| `"abort"` | Stops the failing document's remaining stages (default) |
+| `"abort"` | Stops the failing document's remaining stages |
 | `"continue"` | Document advances to next stage silently |
-| `"warn"` | Document advances with per-document warning logged |
+| `"warn"` (default) | Document advances with a per-document warning logged |
 
 Note: `on_partial_failure` only affects annotation (Stage 3) and entity extraction (Stage 4) partial failures. Stage 0/1/2 failures always stop the document (no valid artifact to continue with).
 
