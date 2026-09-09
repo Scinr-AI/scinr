@@ -558,7 +558,7 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
-| `llm` | — | None | LangChain `BaseChatModel` instance |
+| `llm` | — | None | LangChain `BaseChatModel` instance. **Optional** — only required for LLM-dependent stages, not navigation. |
 | `repair_llm` | — | Falls back to `llm` | Secondary LLM for JSON repair |
 | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
 | `neo4j_user` | `NEO4J_USER` | — | Neo4j username (required) |
@@ -584,6 +584,8 @@ The caller always builds the model and passes it as `configure(llm=...)`. Any La
 - Any other LangChain chat model with structured output support
 
 The model is selected via `configure(llm=...)` — there is no `MODEL_ID` / environment-variable path. `configure()` does not require it; the stages that call the LLM (1, 3, 4, and tabular normalization) do.
+
+The LLM is optional: when no `llm` is passed and `MODEL_ID` is unset, scinr runs without an LLM (for example, graph navigation alone). LLM-dependent stages raise a `ConfigurationError` at use time if none is configured.
 
 ### Prompt Family
 

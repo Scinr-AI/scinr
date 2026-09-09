@@ -191,6 +191,19 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 
 ## Configuration Examples
 
+### Navigation Only (No LLM)
+
+Graph navigation (`scinr.newton.navigation`) is read-only and does not need any LLM. Configure only the Neo4j connection:
+
+```python
+# Navigation only — no LLM required
+configure(
+    neo4j_user="neo4j",
+    neo4j_password="your_password",
+    neo4j_database="neo4j",
+)  # storage_backend defaults to "none"; graph_backend to "neo4j"
+```
+
 ### Minimal Setup
 
 Put Neo4j / OCR settings in `.env`; build the LLM in code and pass it to `configure()`. `configure()` always reads `.env` via `python-dotenv`, so you never need to import dotenv manually.

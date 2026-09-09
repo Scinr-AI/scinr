@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from scinr.newton.config import get_config
 from scinr.newton.entity_extraction.schema_composer import _to_snake_case
+from scinr.newton.exceptions import ConfigurationError
 from scinr.newton.tabular.normalization.detector import (
     extract_source_values_from_dict,
     get_normalization_specs,
@@ -295,6 +296,11 @@ async def _write_tabular_with_normalization(
 
     cfg = get_config()
     norm_llm = cfg.normalization_llm or cfg.llm
+    if norm_llm is None:
+        raise ConfigurationError(
+            "Tabular normalization requires an LLM, but none is configured. "
+            "Pass llm=... to configure() or set MODEL_ID."
+        )
 
     # Step 1: Pre-scan all rows → dedup map
     logger.info("tabular: building normalization dedup map for %d rows", len(all_rows))
@@ -717,6 +723,11 @@ async def _write_row_batch(
 
             if normalization_instances and cfg.normalization_enabled:
                 norm_llm = cfg.normalization_llm or cfg.llm
+                if norm_llm is None:
+                    raise ConfigurationError(
+                        "Tabular normalization requires an LLM, but none is configured. "
+                        "Pass llm=... to configure() or set MODEL_ID."
+                    )
                 engine = NormalizationEngine(
                     llm=norm_llm,
                     batch_size=cfg.normalization_batch_size,

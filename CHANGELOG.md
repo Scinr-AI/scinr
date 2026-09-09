@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-09-08
+
+### Changed
+- **`llm` is now optional** in `configure()` / `ScinrConfig`. When no LLM is
+  supplied (no `llm=` argument and no `MODEL_ID` env var), `configure()` succeeds
+  with `cfg.llm = None` instead of raising `ConfigurationError: No LLM configured`,
+  enabling **navigation-only** use of `scinr.newton.navigation` without any LLM
+  setup — only Neo4j credentials (`NEO4J_USER`, `NEO4J_PASSWORD`,
+  `NEO4J_DATABASE`) are required.
+- The LLM requirement is now enforced **lazily**: `get_llm()` / `get_repair_llm()`
+  raise a descriptive `ConfigurationError` only when an LLM-dependent stage
+  (extraction, annotation, entity extraction, or tabular mapping/normalization)
+  actually runs without a configured LLM, instead of failing at configure time.
+
+### Added
+- Navigation-only configuration examples in the **Configuration** reference and
+  the **Graph Navigation** guide, showing `configure(neo4j_user=…, 
+  neo4j_password=…, neo4j_database=…)` with no LLM.
+
+### Fixed
+- Inconsistency where `scinr.newton.navigation.__init__` advertised an LLM-less
+  `configure()` call that `configure()` would reject at runtime.
+
 ## [0.3.7] - 2026-09-06
 
 ### Added

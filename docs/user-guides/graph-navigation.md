@@ -39,6 +39,16 @@ configure(
 )
 ```
 
+### No LLM required
+
+Graph navigation is read-only and does **not** require any LLM. Configure only the Neo4j connection:
+
+```python
+configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
+```
+
+Then use `graph_navigator()` (async context manager) or `get_graph_navigator()`.
+
 ---
 
 ## Quick start
