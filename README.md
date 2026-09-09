@@ -185,16 +185,17 @@ cp .env.example .env
 ```
 
 ```dotenv
-# Required — LLM (AWS Bedrock example)
-MODEL_ID=us.anthropic.claude-sonnet-4-6
+# LLM — configured in code via configure(llm=...), NOT here.
+# Provider SDK settings still come from the environment:
 AWS_DEFAULT_REGION=us-east-1
 
 # Required — Neo4j
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
 
-# Optional — PDF OCR
+# Required to ingest any PDF (PDF conversion is Mistral OCR only)
 MISTRAL_API_KEY=your_mistral_key
 
 # Optional — MongoDB storage backend
@@ -223,12 +224,12 @@ newton --stage all --input-raw files/ --parallel-docs 4
 
 | Parameter | Type | Description |
 |---|---|---|
-| `llm` | `BaseChatModel` | LangChain model for all LLM calls (required) |
+| `llm` | `BaseChatModel \| None` | LangChain model for all LLM calls. Optional at `configure()` time; needed for LLM pipeline stages |
 | `repair_llm` | `BaseChatModel` | Model for the JSON repair loop; falls back to `llm` if not set |
 | `neo4j_uri` | `str` | Neo4j connection URI. Default: `bolt://localhost:7687` |
 | `neo4j_user` | `str` | Neo4j username (required) |
 | `neo4j_password` | `str` | Neo4j password (required) |
-| `mistral_api_key` | `str` | Mistral API key for PDF OCR; required only when processing PDF files |
+| `mistral_api_key` | `str` | Mistral OCR API key. Required to process any PDF — PDF conversion is Mistral OCR only, with no fallback |
 | `storage_backend` | `str` | `'none'` (default), `'mongodb'`, or `'custom'` |
 | `extraction_batch_size` | `int` | Pages per extraction chunk. Default: `1` |
 | `llm_concurrency` | `int` | Max concurrent LLM calls (semaphore). Default: `4` |
@@ -239,15 +240,15 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 
 ### Environment variables (CLI mode)
 
+The LLM is **not** an environment variable — build a LangChain chat model and pass it to `configure(llm=...)`. Provider SDK settings (`AWS_DEFAULT_REGION`, `OPENAI_API_KEY`, …) come from the environment as each SDK expects.
+
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `MODEL_ID` | Yes* | — | Bedrock model ID (e.g. `us.anthropic.claude-sonnet-4-6`) — *Bedrock only* |
-| `AWS_DEFAULT_REGION` | Yes* | `us-east-1` | AWS region; must match model ID prefix — *Bedrock only* |
-| `REPAIR_MODEL_ID` | No | same as `MODEL_ID` | Model for the repair loop — *Bedrock only* |
 | `NEO4J_URI` | No | `bolt://localhost:7687` | Neo4j connection URI |
 | `NEO4J_USER` | Yes | — | Neo4j username (also accepts `NEO4J_AUTH=user/password`) |
 | `NEO4J_PASSWORD` | Yes | — | Neo4j password (also accepts `NEO4J_AUTH=user/password`) |
-| `MISTRAL_API_KEY` | No | — | Mistral OCR API key; required only for PDF conversion |
+| `NEO4J_DATABASE` | Yes | — | Neo4j target database name |
+| `MISTRAL_API_KEY` | For PDFs | — | Mistral OCR API key; required to ingest any PDF (no non-Mistral path) |
 | `STORAGE_BACKEND` | No | — | Set to `mongodb` to enable raw file + page storage |
 | `MONGODB_URI` | No | `mongodb://localhost:27017` | MongoDB connection URI |
 | `MONGODB_DATABASE` | No | `scinr` | MongoDB database name |
@@ -259,7 +260,7 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 | `PROMPT_CACHING_ENABLED` | No | `true` | Enable Bedrock prompt caching (`cachePoint`) |
 | `SCINR_EXTRA_MODELS_PATHS` | No | — | Colon-separated paths to user-defined theme directories |
 
-> **AWS region & model ID**: The model ID prefix must match the region group. `us.anthropic.claude-sonnet-4-6` requires `AWS_DEFAULT_REGION` in `us-east-1` or `us-west-2`. For Europe use `eu.` prefix with `eu-central-1`; for Asia Pacific use `ap.` prefix with `ap-northeast-1`.
+> **AWS region & model ID** (when using `ChatBedrockConverse`): the model ID prefix must match the region group. `us.anthropic.claude-sonnet-4-6` needs `AWS_DEFAULT_REGION` in `us-east-1` / `us-west-2`; Europe uses the `eu.` prefix with `eu-central-1`; Asia Pacific uses `ap.` with `ap-northeast-1`. Set `region_name=` on the model.
 
 ---
 

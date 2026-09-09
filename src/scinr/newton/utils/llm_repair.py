@@ -140,7 +140,8 @@ async def run_repair_loop(
     """Attempt to repair a failed structured LLM output using a repair LLM.
 
     Uses with_structured_output(schema, include_raw=True) with the
-    REPAIR_MODEL_ID model. Iterates up to MAX_REPAIR_RETRIES times with
+    configured `repair_llm` (falls back to the main `llm`). Iterates up to
+    MAX_REPAIR_RETRIES times with
     escalating temperatures. Applies prompt caching on the system message
     when PROMPT_CACHING_ENABLED=true.
 

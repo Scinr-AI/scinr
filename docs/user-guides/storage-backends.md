@@ -55,16 +55,17 @@ When `storage_backend="none"` (the default), scinr uses no-op repository impleme
 ### Configuration
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
-# Explicit — same as omitting the parameter entirely
+# Explicit — same as omitting storage_backend entirely
 configure(
+    llm=ChatOllama(model="llama3"),
     storage_backend="none",
 )
 
-# Or via environment variable
-# $ export STORAGE_BACKEND=none
-configure()  # picks up STORAGE_BACKEND=none from environment
+# storage_backend also resolves from STORAGE_BACKEND in the environment.
+# Pass llm= too if this run will execute any LLM stage.
 ```
 
 ### Behavior
@@ -86,13 +87,16 @@ configure()  # picks up STORAGE_BACKEND=none from environment
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         storage_backend="none",  # explicit, but this is the default
     )
 
@@ -122,9 +126,11 @@ This installs `motor` (async MongoDB driver) and `pymongo` (sync driver, used fo
 ### Configuration
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 configure(
+    llm=ChatOllama(model="llama3"),
     storage_backend="mongodb",
     mongodb_uri="mongodb://localhost:27017",
     mongodb_database="scinr",
@@ -325,11 +331,13 @@ stream.on("data", function(chunk) { /* process chunk */ });
 When `storage_backend="mongodb"`, the factory validates the MongoDB connection at startup using a synchronous ping with a 5-second timeout. If the server is unreachable, a `StorageError` is raised immediately:
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 from scinr.newton.exceptions import StorageError
 
 try:
     configure(
+        llm=ChatOllama(model="llama3"),
         storage_backend="mongodb",
         mongodb_uri="mongodb://wrong-host:27017",
     )
@@ -342,13 +350,16 @@ except StorageError as e:
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         storage_backend="mongodb",
         mongodb_uri="mongodb://user:pass@mongo.internal:27017",
         mongodb_database="scinr_production",
@@ -536,6 +547,7 @@ class DynamoDBPageRepository(PageRepository):
 ### Registering the Custom Backend
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 # Instantiate your custom repositories
@@ -544,6 +556,7 @@ page_repo = DynamoDBPageRepository(table_name="scinr-pages", region="us-east-1")
 
 # Register them as a tuple
 configure(
+    llm=ChatOllama(model="llama3"),
     storage_backend="custom",
     custom_storage=(raw_repo, page_repo),
 )
@@ -683,7 +696,7 @@ Storage settings follow the standard triple-resolution pattern:
 ```python
 # Example: env var sets backend to "mongodb", configure() overrides to "none"
 # $ export STORAGE_BACKEND=mongodb
-configure(storage_backend="none")  # final value: "none"
+configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value: "none"
 ```
 
 ### All Storage Settings
@@ -719,11 +732,13 @@ Enable debug logging to see storage operations:
 
 ```python
 import logging
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 logging.basicConfig(level=logging.DEBUG)
 
 configure(
+    llm=ChatOllama(model="llama3"),
     storage_backend="mongodb",
     mongodb_uri="mongodb://localhost:27017",
     log_level="DEBUG",

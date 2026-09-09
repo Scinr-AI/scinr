@@ -2,6 +2,21 @@
 
 This is the definitive reference for `run_pipeline()` — the single entry point that orchestrates the full `scinr.newton` ingestion pipeline. Every parameter, option, and workflow pattern is documented here.
 
+!!! note "LLM setup"
+    The extraction, annotation and entity-extraction stages (and tabular
+    normalization) need an LLM. Set it with `configure(llm=...)` — there is
+    no `MODEL_ID` env var. `configure()` itself does not require it. The
+    examples below use a local open-source model through
+    [Ollama](https://ollama.com/) — `pip install "scinr[ollama]"`, then
+    `ollama pull llama3`:
+
+    ```python
+    from langchain_ollama import ChatOllama
+    llm = ChatOllama(model="llama3")
+    ```
+
+    Swap in any LangChain `BaseChatModel` (`ChatBedrockConverse`, `ChatOpenAI`, …).
+
 ---
 
 ## Quick Start
@@ -10,13 +25,17 @@ The simplest possible pipeline run — convert raw files, extract structure, ing
 
 ```python
 import asyncio
+
+from langchain_ollama import ChatOllama  # or any LangChain BaseChatModel
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -28,7 +47,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`configure()` automatically reads `.env` via `python-dotenv`, so if your environment variables are set, you can call `configure()` with no arguments and it works.
+`configure()` automatically reads `.env` via `python-dotenv`, so Neo4j / storage / OCR settings can come from the environment. Pass `llm=` when the run includes an LLM stage.
 
 ---
 
@@ -569,13 +588,16 @@ The canonical first run — convert raw files, extract structure, ingest to Neo4
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -601,13 +623,16 @@ Re-run annotation and entity extraction on documents already in Neo4j, without t
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Re-annotate and re-extract entities for specific documents
@@ -630,13 +655,16 @@ Ingest new documents into a Neo4j graph that already contains previously ingeste
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # New documents in a separate folder
@@ -660,13 +688,16 @@ A document has been corrected or updated. Replace it in the graph while maintain
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Ingest the new version, linking it as the replacement
@@ -689,13 +720,16 @@ Process only CSV/XLSX/XLS files without running the standard document pipeline.
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Tabular-only pipeline
@@ -719,13 +753,16 @@ Force a specific extraction model on all nodes of a document, skipping the LLM a
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Apply a known model to all nodes without LLM annotation
@@ -750,13 +787,16 @@ Stamp every `:Document` node created by a run with the owning tenant, the user w
 ```python
 import asyncio
 import uuid
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline, delete_document
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     job_id = f"ingest-{uuid.uuid4()}"
@@ -863,13 +903,16 @@ For production pipelines, you often want to split processing into separate runs 
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # ── Step 1: Convert raw files to intermediate JSON ──────────────────
@@ -920,6 +963,7 @@ The pipeline can raise several exceptions before or during execution:
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import (
     configure, run_pipeline,
     ConfigurationError, PreconditionError,
@@ -928,9 +972,11 @@ from scinr.newton import (
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     try:
@@ -983,13 +1029,16 @@ import asyncio
 import sys
 from pathlib import Path
 
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def run(input_dir: str, parallel: int = 5) -> None:
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     if not Path(input_dir).is_dir():
@@ -1022,13 +1071,16 @@ if __name__ == "__main__":
 ```python
 import asyncio
 from pathlib import Path
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def smart_run(input_dir: str) -> None:
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     tabular_ext = {".csv", ".xlsx", ".xls"}
@@ -1058,13 +1110,16 @@ asyncio.run(smart_run("./raw_docs"))
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def resume_pipeline(document_name: str) -> None:
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Skip already-annotated and already-extracted nodes

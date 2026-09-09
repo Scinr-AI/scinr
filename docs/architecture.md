@@ -120,7 +120,7 @@ Each file format has a dedicated converter inheriting from `BaseConverter` (abst
 
 | Converter | File | Supported Extensions | Dependencies | Status |
 |---|---|---|---|---|
-| `PdfConverter` | `converters/pdf.py` | `.pdf` | `pdfplumber`, Mistral OCR API | Supported |
+| `PdfConverter` | `converters/pdf.py` | `.pdf` | Mistral OCR API (`MISTRAL_API_KEY` required), `pypdf` for splitting | Supported |
 | `DocxConverter` | `converters/docx.py` | `.docx` | `python-docx` | Supported |
 | `XlsxConverter` | `converters/xlsx.py` | `.xlsx`, `.xls` | `openpyxl`, `pandas` | Supported (tabular) |
 | `CsvConverter` | `converters/csv.py` | `.csv` | `pandas` | Supported (tabular) |
@@ -132,7 +132,7 @@ Converters are registered in `converters/registry.py` via a lazy-loaded extensio
 
 **PDF Conversion Strategy:**
 
-The `PdfConverter` uses Mistal OCR Api. It chunks large PDFs by page count (`mistral_ocr_safe_max_pages`, default 900) and file size (`mistral_ocr_safe_max_bytes`, default 45 MiB), sends each chunk to the Mistral OCR endpoint, and reassembles the result. The `pdf_splitter.py` module handles structural PDF partitioning.
+Every PDF is converted through the Mistral OCR API (`POST https://api.mistral.ai/v1/ocr`); there is no non-Mistral path, so `MISTRAL_API_KEY` (or `configure(mistral_api_key=...)`) is mandatory for any PDF. PDFs larger than `mistral_ocr_safe_max_pages` (default 900) or `mistral_ocr_safe_max_bytes` (default 45 MiB) are split into chunks by `pdf_splitter.py` (using `pypdf`); each chunk is sent to the OCR endpoint and the pages are reassembled.
 
 Error strategy for Mistral OCR is configurable: `fail_fast` (default, aborts the entire document on any chunk failure) or `best_effort` (skips failed chunks and continues).
 
@@ -576,14 +576,14 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 
 ### LLM Configuration
 
-The library supports any LangChain `BaseChatModel` that implements `with_structured_output()`:
-- `ChatOpenAI` (OpenAI)
+The caller always builds the model and passes it as `configure(llm=...)`. Any LangChain `BaseChatModel` that implements `with_structured_output()` works:
 - `ChatBedrockConverse` (AWS Bedrock)
+- `ChatOpenAI` (OpenAI)
 - `ChatAnthropic` (Anthropic/Claude)
 - `ChatOllama` (Ollama)
 - Any other LangChain chat model with structured output support
 
-When `MODEL_ID` is set (and no explicit `llm` is passed), `configure()` automatically creates a `ChatBedrockConverse` instance with connection pool sizing relative to `llm_concurrency`.
+The model is selected via `configure(llm=...)` — there is no `MODEL_ID` / environment-variable path. `configure()` does not require it; the stages that call the LLM (1, 3, 4, and tabular normalization) do.
 
 ### Prompt Family
 
@@ -634,7 +634,7 @@ scinr.newton/
 │   ├── base.py                 # BaseConverter ABC, IntermediateDocument, IntermediatePage
 │   ├── registry.py             # Extension-to-converter map, apply_converter_overrides()
 │   ├── main.py                 # convert_one(), convert_folder() — parallel conversion
-│   ├── pdf.py                  # PdfConverter (pdfplumber + Mistral OCR)
+│   ├── pdf.py                  # PdfConverter (Mistral OCR API)
 │   ├── pdf_splitter.py         # Structural PDF partitioning for OCR chunking
 │   ├── docx.py                 # DocxConverter (python-docx)
 │   ├── xlsx.py                 # XlsxConverter (openpyxl + pandas)

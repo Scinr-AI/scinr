@@ -4,6 +4,18 @@ The tabular pipeline is a **complete alternative path** to the standard Stages 0
 
 This is the definitive reference for the tabular pipeline. Every aspect of file discovery, header normalization, column mapping, model instantiation, normalization integration, and Neo4j output is documented here.
 
+!!! note "LLM setup"
+    The tabular pipeline calls an LLM for theme classification, model decision
+    and column mapping, so it needs `configure(llm=...)` — there is no `MODEL_ID`
+    env var. The examples use a local open-source model via
+    [Ollama](https://ollama.com/) (`pip install "scinr[ollama]"`, then
+    `ollama pull llama3`):
+
+    ```python
+    from langchain_ollama import ChatOllama
+    llm = ChatOllama(model="llama3")   # or any LangChain BaseChatModel
+    ```
+
 ---
 
 ## 1. Introduction
@@ -116,13 +128,16 @@ When `run_pipeline()` receives an `input_raw` directory containing tabular files
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Auto-detection: CSV/XLSX files in input_raw are processed by tabular pipeline
@@ -156,13 +171,16 @@ result = await run_pipeline(
 For full control, call the tabular pipeline directly:
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_tabular_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     result = await run_tabular_pipeline(
@@ -612,21 +630,23 @@ These work identically to the unstructured pipeline — the tabular pipeline use
 The tabular normalization engine is configured via `configure()`:
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 configure(
+    # ── LLM (used for theme classification, model decision, column mapping) ──
+    llm=ChatOllama(model="llama3"),
+
     # ── Neo4j ──────────────────────────────────────────────────────
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="your_password",
-
-    # ── LLM (used for theme classification, model decision, column mapping) ──
-    llm=my_llm,
+    neo4j_database="neo4j",
 
     # ── Tabular normalization ──────────────────────────────────────
     normalization_enabled=True,           # On by default; pass False to disable
     normalization_batch_size=10,          # Max entries per LLM batch (default: 5)
-    normalization_llm=cheaper_llm,        # Optional dedicated LLM for normalization
+    normalization_llm=ChatOllama(model="llama3"),  # Optional dedicated LLM for normalization
 )
 ```
 
@@ -648,13 +668,16 @@ Tabular normalization LLM calls share the global LLM semaphore configured via `l
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         # Enable normalization for tabular data
         normalization_enabled=True,
         normalization_batch_size=10,
@@ -681,13 +704,16 @@ asyncio.run(main())
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         normalization_enabled=True,
     )
 
@@ -709,13 +735,16 @@ asyncio.run(main())
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_tabular_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         normalization_enabled=True,
         normalization_batch_size=5,
     )

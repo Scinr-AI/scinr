@@ -2,6 +2,19 @@
 
 This guide covers every lever available to tune `scinr.newton` pipeline performance for production deployments. It walks through concurrency, batch sizes, prompt optimization, OCR tuning, scenario-based recommendations, and diagnostic techniques.
 
+!!! note "LLM setup"
+    The LLM stages need `configure(llm=...)` (there is no `MODEL_ID` env var).
+    The snippets below assume a model has been built — e.g. a local open-source
+    one via [Ollama](https://ollama.com/):
+
+    ```python
+    from langchain_ollama import ChatOllama
+    llm = ChatOllama(model="llama3")   # or ChatBedrockConverse / ChatOpenAI / ...
+    ```
+
+    Each `configure(...)` example below passes `llm=llm`; single-setting
+    snippets that omit it are showing only the parameter under discussion.
+
 ---
 
 ## Introduction
@@ -44,6 +57,7 @@ Controls the maximum number of simultaneous LLM calls across **all** pipeline st
 from scinr.newton import configure
 
 configure(
+    llm=llm,
     llm_concurrency=4,  # Default
 )
 ```
@@ -79,6 +93,7 @@ Two separate semaphores control Neo4j access:
 
 ```python
 configure(
+    llm=llm,
     neo4j_concurrency=10,       # Async operations (Stages 3, 4)
     neo4j_sync_concurrency=8,   # Sync operations (Stage 2)
 )
@@ -201,6 +216,7 @@ estimation (used only when `fast_extraction=True`):
 
 ```python
 configure(
+    llm=llm,
     consolidation_token_safety_margin=0.75,     # fraction of max_tokens reserved for output
     consolidation_max_output_tokens=None,       # explicit override; derived from the margin above if unset
     consolidation_max_input_tokens=None,        # explicit input-size ceiling; skipped (no check) if unset
@@ -322,17 +338,20 @@ configure(prompt_family="generic")  # Default
 ```python
 # Claude on Bedrock
 configure(
+    llm=llm,
     prompt_family="claude",
     prompt_caching_enabled=True,
 )
 
 # OpenAI o-series
 configure(
+    llm=llm,
     prompt_family="gpt_reasoning",
 )
 
 # Ollama or other local model
 configure(
+    llm=llm,
     prompt_family="generic",
 )
 ```
@@ -343,12 +362,13 @@ configure(
 
 ## Mistral OCR Tuning
 
-PDF processing uses a two-path strategy: small PDFs are processed with `pdfplumber` (fast, no API cost), while large or complex PDFs use Mistral OCR (slower, API cost). The tuning parameters control this boundary and the OCR behavior itself.
+**Every PDF is converted through the Mistral OCR API** — there is no alternative code path, so `MISTRAL_API_KEY` (or `configure(mistral_api_key=...)`) is mandatory for any PDF. These settings tune how large PDFs are split into chunks before OCR and how transient OCR errors are handled.
 
 ```python
 configure(
-    mistral_ocr_safe_max_pages=900,        # Pages threshold (default)
-    mistral_ocr_safe_max_bytes=47185920,   # Size threshold, 45 MiB (default)
+    llm=llm,
+    mistral_ocr_safe_max_pages=900,        # Chunk-split page threshold (default)
+    mistral_ocr_safe_max_bytes=47185920,   # Chunk-split size threshold, 45 MiB (default)
     mistral_ocr_max_retries=15,            # Retry count (default)
     mistral_ocr_retry_backoff_seconds=2.0, # Retry backoff base (default)
     mistral_ocr_chunk_concurrency=1,       # OCR chunk concurrency (default)
@@ -360,25 +380,25 @@ configure(
 
 **Default:** `900`  **Env var:** `MISTRAL_OCR_SAFE_MAX_PAGES`
 
-PDFs with fewer pages than this threshold use `pdfplumber` (fast, no API cost) if they contain extractable text. PDFs at or above this threshold use Mistral OCR regardless.
+A PDF with more pages than this is split into page-range chunks (by `pdf_splitter.py`) before each chunk is sent to the OCR API, then the pages are reassembled. Smaller PDFs are sent in a single request. The threshold exists because the Mistral OCR API has per-request page/size limits.
 
 | Value | Effect |
 | :--- | :--- |
-| Lower (e.g., 100) | More PDFs use OCR; better quality for scanned docs |
-| Higher (e.g., 2000) | More PDFs use pdfplumber; faster, cheaper |
-| Default (900) | Balanced; most PDFs use pdfplumber |
+| Lower (e.g., 200) | More/smaller chunks per large PDF — more requests, each cheaper/faster |
+| Higher (e.g., 1000) | Fewer, larger chunks — closer to the API's hard limit |
+| Default (900) | Safe margin under the API limit |
 
 ### `mistral_ocr_safe_max_bytes`
 
 **Default:** `47185920` (45 MiB)  **Env var:** `MISTRAL_OCR_SAFE_MAX_BYTES`
 
-PDFs larger than this threshold always use Mistral OCR, regardless of page count. Large files are more likely to be scanned images or have complex layouts that benefit from OCR.
+A PDF larger than this (in serialized bytes) is chunk-split before OCR, and a chunk that is still too large is bisected further until each piece fits. Works together with `mistral_ocr_safe_max_pages`.
 
 | Value | Effect |
 | :--- | :--- |
-| Lower (e.g., 10 MiB) | More files use OCR |
-| Higher (e.g., 100 MiB) | Fewer files use OCR |
-| Default (45 MiB) | Balanced |
+| Lower (e.g., 10 MiB) | Smaller chunks — more requests |
+| Higher (e.g., 100 MiB) | Larger chunks — risk of hitting the API's size limit |
+| Default (45 MiB) | Safe margin under the API limit |
 
 ### `mistral_ocr_max_retries`
 
@@ -428,9 +448,12 @@ For production pipelines processing many documents, `"best_effort"` is recommend
 Lightweight configuration for development, testing, or small document sets.
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
+llm = ChatOllama(model="llama3")
 configure(
+    llm=llm,
     llm_concurrency=2,           # Conservative LLM calls
     neo4j_concurrency=5,         # Light Neo4j load
     neo4j_sync_concurrency=5,    # Light sync load
@@ -456,6 +479,7 @@ Balanced configuration for typical production workloads.
 
 ```python
 configure(
+    llm=llm,
     llm_concurrency=8,           # More parallel LLM calls
     neo4j_concurrency=15,        # Moderate Neo4j load
     neo4j_sync_concurrency=12,   # Moderate sync load
@@ -481,6 +505,7 @@ Maximum throughput configuration for large document sets.
 
 ```python
 configure(
+    llm=llm,
     llm_concurrency=16,          # High parallel LLM calls
     neo4j_concurrency=25,        # High Neo4j throughput
     neo4j_sync_concurrency=20,   # High sync throughput
@@ -508,12 +533,11 @@ Minimize API costs while maintaining acceptable quality.
 
 ```python
 configure(
+    llm=llm,
     llm_concurrency=2,            # Fewer parallel calls (no rush)
     extraction_batch_size=3,      # More pages per call
     normalization_batch_size=15,  # Larger normalization batches
     prompt_caching_enabled=True,  # Cache prompts (Bedrock)
-    mistral_ocr_safe_max_pages=2000,  # Prefer pdfplumber over OCR
-    mistral_ocr_safe_max_bytes=104857600,  # 100 MiB threshold
 )
 
 result = await run_pipeline(
@@ -525,9 +549,10 @@ result = await run_pipeline(
 **Cost-saving strategies:**
 - Larger extraction batches = fewer LLM calls per document
 - Larger normalization batches = fewer LLM calls per table
-- Higher OCR thresholds = more pdfplumber usage (free)
 - Prompt caching = reduced token costs on Bedrock
 - Lower concurrency = no wasted retries from rate limiting
+
+> **Note:** PDF OCR cost is fixed per page — every PDF goes through the Mistral OCR API. The `mistral_ocr_safe_max_*` settings only affect how a large PDF is chunked, not whether OCR runs.
 
 ### Speed-Sensitive
 
@@ -535,6 +560,7 @@ Minimize wall-clock time while maintaining acceptable cost.
 
 ```python
 configure(
+    llm=llm,
     llm_concurrency=16,          # Max parallel LLM calls
     neo4j_concurrency=30,        # Max Neo4j throughput
     neo4j_sync_concurrency=25,   # Max sync throughput
@@ -649,28 +675,27 @@ If the LLM stage is slow and `llm_concurrency` is at its maximum, try increasing
 Bedrock is the primary supported provider with the most tuning options.
 
 ```python
+from langchain_aws import ChatBedrockConverse
+
 configure(
-    # Prompt caching — critical for cost at scale
-    prompt_caching_enabled=True,
+    llm=ChatBedrockConverse(
+        model="us.anthropic.claude-sonnet-4-6",
+        region_name="us-east-1",
+        max_tokens=65536,          # set on the model itself
+    ),
+    # Cheaper model for the JSON repair loop
+    repair_llm=ChatBedrockConverse(model="us.anthropic.claude-haiku-3", region_name="us-east-1"),
 
-    # Use a cheaper model for repair/retry operations
-    # repair_llm=ChatBedrockConverse(model="us.anthropic.claude-haiku-3"),
-
-    # Set appropriate MAX_TOKENS for your model
-    # (via environment variable: MAX_TOKENS=65536)
-
-    # Prompt family for Claude models
+    prompt_caching_enabled=True,   # critical for cost at scale
     prompt_family="claude",
-
-    # Concurrency tuned for Bedrock rate limits
-    llm_concurrency=8,
+    llm_concurrency=8,             # tuned for Bedrock rate limits
 )
 ```
 
 **Bedrock-specific tips:**
 - **Prompt caching** is the single biggest cost reducer. Always keep it enabled.
-- **REPAIR_MODEL_ID** can be set to a cheaper/faster model (e.g., Claude Haiku) for JSON repair operations, saving cost on retries.
-- **MAX_TOKENS** should be set appropriately for your model. Too high wastes tokens; too low truncates responses.
+- Pass a cheaper/faster model as `repair_llm=` (e.g. Claude Haiku) for JSON repair operations, saving cost on retries.
+- Set `max_tokens` on the model you build. Too high wastes tokens; too low truncates responses.
 - Check your account's **TPMS** (Tokens Per Minute) and **RPM** (Requests Per Minute) limits in the AWS Console.
 
 ### OpenAI
@@ -737,10 +762,14 @@ configure(
 Use different concurrency settings for different pipeline phases by reconfiguring between runs:
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
+
+llm = ChatOllama(model="llama3")
 
 # Phase 1: Preprocess + Extraction (LLM-heavy)
 configure(
+    llm=llm,
     llm_concurrency=16,           # Max LLM calls for extraction
     neo4j_concurrency=5,          # Minimal Neo4j (not used yet)
 )
@@ -753,6 +782,7 @@ result1 = await run_pipeline(
 
 # Phase 2: Ingestion (Neo4j-heavy)
 configure(
+    llm=llm,
     llm_concurrency=2,            # Minimal LLM (not used)
     neo4j_concurrency=25,         # Max Neo4j for ingestion
     neo4j_sync_concurrency=20,
@@ -765,6 +795,7 @@ result2 = await run_pipeline(
 
 # Phase 3: Annotation + Extraction (LLM-heavy again)
 configure(
+    llm=llm,
     llm_concurrency=16,           # Max LLM calls
     neo4j_concurrency=15,         # Moderate Neo4j
 )
@@ -781,11 +812,14 @@ Dynamically adjust concurrency based on pipeline feedback:
 
 ```python
 import asyncio
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def adaptive_run(input_dir: str, max_docs: int = 100) -> None:
+    llm = ChatOllama(model="llama3")
     # Start conservative
     configure(
+        llm=llm,
         llm_concurrency=4,
         neo4j_concurrency=10,
     )
@@ -810,6 +844,7 @@ async def adaptive_run(input_dir: str, max_docs: int = 100) -> None:
 
     # If first batch was clean, increase concurrency for the main run
     configure(
+        llm=llm,
         llm_concurrency=12,
         neo4j_concurrency=20,
     )
@@ -829,10 +864,13 @@ For very large document sets, process in batches with progress reporting:
 ```python
 import asyncio
 from pathlib import Path
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def batch_run(input_dir: str, batch_size: int = 20) -> None:
+    llm = ChatOllama(model="llama3")
     configure(
+        llm=llm,
         llm_concurrency=8,
         neo4j_concurrency=15,
         parallel_docs=5,

@@ -28,6 +28,8 @@ All environment variables are optional unless otherwise noted. They are read at 
 
 ### LLM / Model
 
+The LLM has **no environment variable** — build a LangChain chat model in code and pass it as `configure(llm=..., repair_llm=...)` (not required at `configure()` time; needed for LLM stages). Only concurrency is env-configurable:
+
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `LLM_CONCURRENCY` | `4` | Maximum number of concurrent LLM calls. |
@@ -59,9 +61,9 @@ All environment variables are optional unless otherwise noted. They are read at 
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MISTRAL_API_KEY` | `None` | Mistral API key for PDF OCR extraction. Required to process PDF files. |
-| `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` | Maximum number of pages before OCR becomes mandatory. |
-| `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` (45 MiB) | Maximum file size in bytes before OCR is required. |
+| `MISTRAL_API_KEY` | `None` | Mistral OCR API key. **Required to ingest any PDF** — PDF conversion is Mistral OCR only, there is no fallback. |
+| `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` | Page count above which a PDF is split into chunks before each chunk is sent to the OCR API. |
+| `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` (45 MiB) | Byte size above which a PDF is split into chunks before each chunk is sent to the OCR API. |
 | `MISTRAL_OCR_MAX_RETRIES` | `15` | Number of retry attempts for OCR failures. Retry uses exponential backoff capped at 5 minutes between retries. |
 | `MISTRAL_OCR_RETRY_BACKOFF_SECONDS` | `2.0` | Base backoff in seconds between retries. |
 | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` | Maximum concurrent OCR chunk processing. |
@@ -88,7 +90,7 @@ All environment variables are optional unless otherwise noted. They are read at 
 
 ## Programmatic Configuration
 
-The `configure()` function is the primary way to set up scinr at runtime. It accepts keyword arguments organized by category. All parameters are optional — omitting a parameter falls back to the environment variable or hard-coded default. It includes all the parameters previously mentioned. 
+The `configure()` function is the primary way to set up scinr at runtime. It accepts keyword arguments organized by category. Every parameter is optional at `configure()` time: most fall back to an environment variable or hard-coded default, while `llm=` (which has neither) is only needed once the pipeline runs an LLM stage.
 
 ```python
 from scinr.newton import configure
@@ -98,8 +100,8 @@ from scinr.newton import configure
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
-| `llm` | `Any \| None` | Pre-constructed LLM client instance. When provided, bypasses `MODEL_ID` and AWS Bedrock auto-configuration. |
-| `repair_llm` | `Any \| None` | Separate LLM client for repair/retry operations. Falls back to `llm` if not provided. |
+| `llm` | `BaseChatModel \| None` | A ready-built LangChain chat model for all LLM calls (`ChatBedrockConverse`, `ChatOpenAI`, `ChatOllama`, …). Optional at `configure()` time; needed for the extraction / annotation / entity-extraction stages and tabular normalization. |
+| `repair_llm` | `BaseChatModel \| None` | Separate model for the JSON repair loop. Falls back to `llm` if not provided. |
 
 ### Neo4j Parameters
 
@@ -189,9 +191,9 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 
 ## Configuration Examples
 
-### Minimal Setup (Environment Variables Only)
+### Minimal Setup
 
-The simplest approach: set environment variables and call `configure()` to let scinr pick them up automatically. `configure()` always reads `.env` via `python-dotenv`, so you never need to import dotenv manually.
+Put Neo4j / OCR settings in `.env`; build the LLM in code and pass it to `configure()`. `configure()` always reads `.env` via `python-dotenv`, so you never need to import dotenv manually.
 
 ```bash
 # .env file
@@ -208,8 +210,8 @@ import asyncio
 from scinr.newton import configure, run_pipeline
 from langchain_aws import ChatBedrockConverse
 async def main():
-    # configure() reads .env automatically — no arguments needed
-    llm = ChatBedrockConverse(...)
+    # The model is passed via llm=; everything else can come from .env.
+    llm = ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1")
     configure(llm=llm)
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -218,7 +220,7 @@ async def main():
 asyncio.run(main())
 ```
 
-> **Note:** `configure()` is always required before calling `run_pipeline()`. Even when all values come from environment variables, you must call `configure()` to resolve and validate the configuration.
+> **Note:** `configure()` must be called before `run_pipeline()`. Supply `llm=` whenever the run includes an LLM stage (extraction, annotation, entity extraction, tabular normalization).
 
 ### Full AWS Bedrock Setup
 
@@ -227,11 +229,12 @@ Complete programmatic configuration for a production Bedrock deployment.
 ```python
 from scinr.newton import configure
 from langchain_aws import ChatBedrockConverse
-llm = ChatBedrockConverse(...)
+
+llm = ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1")
 configure(
-    # LLM — AWS Bedrock
-    llm=None,  # let scinr auto-create from MODEL_ID env var
-    repair_llm=None,  # use same model for repairs
+    # LLM — needed for LLM stages
+    llm=llm,
+    repair_llm=None,  # falls back to `llm`
 
     # Neo4j
     neo4j_uri="bolt://neo4j.internal:7687",
@@ -306,7 +309,7 @@ cp .env.example .env
 The `.env.example` file in the project root contains every available setting with inline comments. Key notes:
 
 - `configure()` loads the `.env` file from the **current working directory** automatically (via `python-dotenv`). You never import `dotenv` yourself.
-- Only `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` are strictly required. `MODEL_ID` is required too unless you pass a ready-built `llm=` to `configure()`.
+- `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` are strictly required. The LLM has no env var — pass it as `configure(llm=...)` when a run includes an LLM stage.
 - Environment values are **overridden** by explicit `configure(...)` arguments (see [Configuration Resolution](#configuration-resolution)).
 - Leaving an optional variable unset falls back to the hard-coded default in the [Complete Reference](#complete-reference-all-settings) table.
 
@@ -371,10 +374,6 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | :--- | :--- | :--- | :--- |
 | **LLM Client** | `llm` | *(none)* | `None` |
 | **Repair LLM Client** | `repair_llm` | *(none)* | `None` (falls back to `llm`) |
-| **Model ID** | *(via `llm`)* | `MODEL_ID` | *(required if no `llm`)* |
-| **Repair Model ID** | *(via `repair_llm`)* | `REPAIR_MODEL_ID` | Falls back to `MODEL_ID` |
-| **AWS Region** | *(via `llm`)* | `AWS_DEFAULT_REGION` | `us-east-1` |
-| **Max Tokens** | *(via `llm`)* | `MAX_TOKENS` | `65536` |
 | **Neo4j URI** | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` |
 | **Neo4j User** | `neo4j_user` | `NEO4J_USER` | *(required)* |
 | **Neo4j Password** | `neo4j_password` | `NEO4J_PASSWORD` | *(required)* |
