@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-09-16
+
+### Fixed
+- **`delete_document()` no longer leaves folder-parent (and other
+  structure-less) `:Document` nodes behind.** The cascade-delete Cypher query
+  chained two `UNWIND` clauses, and `UNWIND` on an empty list silently drops
+  the row — so any `:Document` with no `:StructureNode` of its own (every
+  folder-parent Document created purely to model the path hierarchy, plus any
+  leaf never fully processed) never reached the final `DETACH DELETE` and
+  survived. Deleting by a folder `path` (or a `job_id`/selector whose cascade
+  included folders) removed the real content documents underneath but left
+  the folder nodes themselves — and any intermediate subfolders — orphaned
+  in Neo4j. The query now guards the structure-node `UNWIND` with
+  `CASE WHEN ... THEN [NULL] ELSE ...` so every matched `:Document` reaches
+  `DETACH DELETE` regardless of whether it has structure of its own.
+
 ## [0.3.8] - 2026-09-08
 
 ### Changed
