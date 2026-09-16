@@ -72,12 +72,12 @@ Before running the pipeline, ensure you have the following:
      neo4j:5
    ```
 
-3. **LLM credentials** — depending on your provider:
+3. **An LLM** — build a LangChain chat model and pass it to `configure(llm=...)`. It is used by the extraction, annotation, and entity-extraction stages (and tabular normalization); `configure()` itself does not require it. Provider credentials come from the environment as each SDK expects:
 
-   - **AWS Bedrock**: AWS credentials configured via `~/.aws/credentials`, environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), or an IAM role. The model is selected via the `MODEL_ID` environment variable (e.g., `us.anthropic.claude-sonnet-4-6`).
-   - **OpenAI**: An `OPENAI_API_KEY` environment variable.
-   - **Ollama**: A locally running Ollama instance (`ollama serve`) with the desired model pulled (`ollama pull llama3`).
-   - **Any LangChain-compatible model**: You can pass a `BaseChatModel` instance directly to `configure()`.
+   - **AWS Bedrock** (`ChatBedrockConverse`): AWS credentials via `~/.aws/credentials`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or an IAM role; region via `AWS_DEFAULT_REGION`.
+   - **OpenAI** (`ChatOpenAI`): `OPENAI_API_KEY`.
+   - **Ollama** (`ChatOllama`): a running Ollama instance (`ollama serve`) with the model pulled (`ollama pull llama3`).
+   - **Any other LangChain `BaseChatModel`** also works.
 
 ### Optional
 
@@ -89,7 +89,7 @@ Before running the pipeline, ensure you have the following:
 
    Without MongoDB, `scinr` operates in memory-only mode (`storage_backend=none`), which is perfectly fine for most workflows.
 
-5. **Mistral API key** — Required to process PDF files with OCR. Obtain a key from [Mistral AI](https://console.mistral.ai/). Without it, PDFs can still be processed with `pdfplumber` (text-based extraction, no OCR).
+5. **Mistral API key** — Required to process **any** PDF. PDF conversion is done entirely through the Mistral OCR API; there is no non-Mistral path. Obtain a key from [Mistral AI](https://console.mistral.ai/). Not needed if you never ingest PDFs.
 
 ---
 
@@ -105,14 +105,12 @@ cp .env.example .env
 
 ### Step 2: Fill in your values
 
-Open `.env` and set the values for your environment. Here is what the template looks like and what to fill in:
+Open `.env` and set the values for your environment. The LLM is **not** configured here — you pass it in code as `configure(llm=...)`. Here is what the template looks like and what to fill in:
 
 ```ini
-# ─── LLM (AWS Bedrock) ──────────────────────────────────────────────────────
+# ─── LLM provider SDK settings (the model itself is passed to configure(llm=...)) ──
 AWS_DEFAULT_REGION=us-east-1
-MODEL_ID=us.anthropic.claude-sonnet-4-6
-REPAIR_MODEL_ID=us.anthropic.claude-haiku-3
-PROMPT_CACHING_ENABLED=true
+PROMPT_CACHING_ENABLED=true          # Bedrock only
 
 # ─── Neo4j ──────────────────────────────────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
@@ -121,7 +119,7 @@ NEO4J_PASSWORD=your_password
 NEO4J_DATABASE=neo4j
 
 # ─── PDF Conversion (Mistral OCR) ───────────────────────────────────────────
-MISTRAL_API_KEY=your_mistral_api_key
+MISTRAL_API_KEY=your_mistral_api_key   # required for any PDF
 
 # ─── Storage (optional) ─────────────────────────────────────────────────────
 STORAGE_BACKEND=none                 # or "mongodb" for persistent storage
@@ -141,11 +139,11 @@ LLM_CONCURRENCY=4                    # default; raise it toward your provider's 
 | `NEO4J_PASSWORD` | Your Neo4j password. |
 | `NEO4J_DATABASE` | Your Neo4j database name.(usually `neo4j`). |
 
-### Optional fields
+### Other fields
 
 | Variable | What to set |
 | :--- | :--- |
-| `MISTRAL_API_KEY` | Mistral API key for PDF OCR. |
+| `MISTRAL_API_KEY` | Mistral OCR API key. **Required to ingest any PDF** (there is no non-Mistral PDF path). Optional if you never process PDFs. |
 | `STORAGE_BACKEND` | `none` (default) or `mongodb` for persistent storage. |
 | `EXTRACTION_BATCH_SIZE` | Number of pages processed per extraction call. Default `1` (best quality). `2`–`3` reduces call count at a small quality cost. See [Performance Tuning](user-guides/performance-tuning.md#extraction-batch-size-extraction_batch_size). |
 | `LLM_CONCURRENCY` | Number of LLM calls made in parallel across all stages. Default `4`. Raise it gradually toward your provider's rate limit while watching for `429` errors. See [Performance Tuning](user-guides/performance-tuning.md#llm-concurrency-llm_concurrency). |
@@ -162,7 +160,7 @@ Create a directory and place some documents in it. `scinr` supports the followin
 
 | Format | Extension | Notes |
 | :--- | :--- | :--- |
-| PDF | `.pdf` | Text-based via `pdfplumber`; OCR via Mistral API |
+| PDF | `.pdf` | Converted via the Mistral OCR API — requires `MISTRAL_API_KEY` |
 | Word | `.docx` | Full text + structure extraction |
 | Excel | `.xlsx`, `.xls` | Routed to tabular pipeline automatically |
 | CSV | `.csv` | Routed to tabular pipeline automatically |
@@ -184,11 +182,8 @@ from langchain_aws import ChatBedrockConverse
 from scinr.newton import configure, run_pipeline
 
 async def main():
-    # configure() reads .env automatically via python-dotenv.
-    # It resolves LLM, Neo4j, and storage settings from:
-    #   1. Explicit arguments (highest priority)
-    #   2. Environment variables / .env file
-    #   3. Hard-coded defaults
+    # The model is passed via llm=. Neo4j / storage settings resolve
+    # from the arguments below, then the environment / .env, then defaults.
     llm = ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1")
 
     configure(
@@ -197,7 +192,7 @@ async def main():
         neo4j_user="neo4j",
         neo4j_password="password",
         neo4j_database="neo4j",
-        mistral_api_key="",  # needed for PDF OCR
+        mistral_api_key="your_mistral_key",  # required to ingest any PDF
     )
 
     result = await run_pipeline(input_raw="./raw_docs")
@@ -334,10 +329,9 @@ if result.ingestion:
 
 ## Troubleshooting
 
-### `ConfigurationError: No LLM configured`
+### An LLM stage fails with "no LLM configured"
 
-You must:
-- Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance.
+Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance. The extraction / annotation / entity-extraction stages and tabular normalization require it; `configure()` itself does not.
 
 ### `ConfigurationError: Neo4j username is not configured` / `... password is not configured`
 
@@ -355,8 +349,7 @@ python -c "from neo4j import GraphDatabase; d = GraphDatabase.driver('bolt://loc
 
 ### PDFs fail to process
 
-PDF processing requires either:
-- A Mistral API key (for OCR) set via `MISTRAL_API_KEY` in your `.env`, or
+PDF conversion runs entirely on the Mistral OCR API. Set `MISTRAL_API_KEY` in your `.env` (or pass `mistral_api_key=` to `configure()`). There is no local/text-extraction fallback — without a key, PDFs cannot be ingested.
 
 ### `No documents discovered for this run`
 

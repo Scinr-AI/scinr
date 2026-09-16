@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 # Import directly from submodules — NOT from scinr.newton (top-level)
-from scinr.newton.config import ScinrConfig, configure, get_config
+from scinr.newton.config import ScinrConfig, configure, get_config, get_llm, get_repair_llm
 from scinr.newton.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
@@ -499,3 +499,64 @@ class TestConsolidationMaxInputTokensConfig:
             neo4j_password=_DUMMY_PASS,
         )
         assert cfg.consolidation_max_input_tokens == 20000
+
+
+class TestOptionalLlm:
+    """Tests for the optional-LLM contract: configure() succeeds without an LLM
+    (navigation-only mode), and get_llm()/get_repair_llm() raise a descriptive
+    ConfigurationError lazily when no LLM is configured.
+    """
+
+    def test_configure_without_llm_succeeds(self, monkeypatch):
+        """configure() with no llm arg and no MODEL_ID env var does not raise."""
+        monkeypatch.delenv("MODEL_ID", raising=False)
+        cfg = configure(
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.llm is None
+        assert cfg.repair_llm is None
+
+    def test_get_llm_raises_clear_error_when_no_llm(self, monkeypatch):
+        """get_llm() raises a ConfigurationError mentioning LLM/navigation when unconfigured."""
+        monkeypatch.delenv("MODEL_ID", raising=False)
+        configure(
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        with pytest.raises(ConfigurationError, match=r"(?i)llm"):
+            get_llm()
+
+    def test_get_repair_llm_raises_clear_error_when_no_llm(self, monkeypatch):
+        """get_repair_llm() raises a ConfigurationError when no LLM is configured."""
+        monkeypatch.delenv("MODEL_ID", raising=False)
+        configure(
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        with pytest.raises(ConfigurationError):
+            get_repair_llm()
+
+    def test_navigation_only_configure_allows_navigator_setup(self, monkeypatch):
+        """Navigation-only configure() (no LLM) yields a working navigator construction.
+
+        Neo4jGraphNavigator() performs no DB I/O at construction time (the driver
+        is only acquired in connect()), so it can be built without an LLM and
+        without a live Neo4j — mirroring tests/unit/test_navigation_neo4j.py's
+        direct-construction approach.
+        """
+        from scinr.newton.navigation.neo4j.navigator import Neo4jGraphNavigator
+
+        monkeypatch.delenv("MODEL_ID", raising=False)
+        cfg = configure(
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+        assert cfg.graph_backend == "neo4j"
+        assert cfg.llm is None
+        nav = Neo4jGraphNavigator()
+        assert isinstance(nav, Neo4jGraphNavigator)

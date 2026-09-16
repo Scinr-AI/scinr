@@ -2,6 +2,17 @@
 
 Create and register custom extraction themes to extend scinr with domain-specific models. A theme is a collection of extraction models organized under a common domain description. Themes are auto-discovered by `ThemeRegistry` and used by the extraction LLM (Stage 1) to classify document sections.
 
+!!! note "LLM setup"
+    Running the pipeline with a custom theme needs an LLM — `configure(llm=...)`
+    (there is no `MODEL_ID` env var). The snippets below use a local open-source
+    model via [Ollama](https://ollama.com/)
+    (`pip install "scinr[ollama]"`, then `ollama pull llama3`):
+
+    ```python
+    from langchain_ollama import ChatOllama
+    llm = ChatOllama(model="llama3")   # or any LangChain BaseChatModel
+    ```
+
 ---
 
 ## What is a Theme?
@@ -256,12 +267,15 @@ There are four ways to make a custom theme available to scinr.
 Pass filesystem paths to `configure()`. The `ThemeRegistry` scans each path recursively for `catalog.py` files.
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
     extra_models_paths=["/path/to/my_custom_theme"],
 )
 ```
@@ -270,6 +284,7 @@ Multiple paths:
 
 ```python
 configure(
+    llm=ChatOllama(model="llama3"),
     extra_models_paths=[
         "/home/user/projects/clinical_trials",
         "/opt/scinr/models/device_safety",
@@ -299,29 +314,38 @@ SCINR_EXTRA_MODELS_PATHS=/path/to/theme1:/path/to/theme2
 ```
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 # No extra_models_paths arg needed — read from environment
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
 )
 ```
 
 The environment variable is read during `configure()` and converted to a list of `Path` objects. Explicit `extra_models_paths` in `configure()` takes precedence and replaces the environment variable entirely.
+
+!!! note "POSIX path separator"
+    Paths are split on `:` (colon), so this form assumes POSIX-style paths. Windows paths with a drive letter (`C:\...`) will be split incorrectly — pass `extra_models_paths=` to `configure()` explicitly on Windows.
 
 ### Method 3: `enabled_user_themes`
 
 Use `enabled_user_themes` to whitelist specific user themes. This is useful when you have many themes in `extra_models_paths` but only want to activate a subset.
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
     extra_models_paths=["/path/to/my_models"],
     enabled_user_themes=["clinical_trials", "device_safety"],
 )
@@ -333,6 +357,7 @@ With `enabled_user_themes`, only the listed themes from user paths are active. A
 
 ```python
 configure(
+    llm=ChatOllama(model="llama3"),
     # Only these built-in themes are active
     enabled_base_themes=["default", "pharmaceutical_quality"],
     # Only these user themes are active
@@ -383,13 +408,16 @@ pip install scinr-clinical-trials
 ```
 
 ```python
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 # No extra_models_paths — entry point discovery handles it
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
 )
 ```
 
@@ -663,14 +691,17 @@ Enable debug logging to see the theme discovery process:
 
 ```python
 import logging
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
 logging.basicConfig(level=logging.DEBUG)
 
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="password",
+    neo4j_database="neo4j",
     extra_models_paths=["/path/to/my_models"],
 )
 ```
@@ -903,13 +934,16 @@ SELECTABLE_MODELS: list[type] = [
 ```python
 import asyncio
 from pathlib import Path
+from langchain_ollama import ChatOllama
 from scinr.newton import configure, run_pipeline
 
 async def main():
     configure(
+        llm=ChatOllama(model="llama3"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
         extra_models_paths=[str(Path(__file__).parent / "own_models")],
     )
 

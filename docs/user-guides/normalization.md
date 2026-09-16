@@ -320,24 +320,22 @@ class ContactRecord(ExtractionModel):
 ### Via `configure()`
 
 ```python
-from langchain_aws import ChatBedrockConverse
+from langchain_ollama import ChatOllama
 from scinr.newton import configure
 
-# Option 1: Use the same LLM as the main pipeline
+# Option 1: normalization reuses the main llm
 configure(
+    llm=ChatOllama(model="llama3"),
     normalization_enabled=True,
     normalization_batch_size=10,
 )
 
-# Option 2: Use a dedicated (cheaper) LLM for normalization
-normalize_llm = ChatBedrockConverse(
-    model="us.anthropic.claude-haiku-3",
-    region_name="us-east-1",
-)
+# Option 2: dedicated (cheaper/smaller) model just for normalization
 configure(
+    llm=ChatOllama(model="llama3"),
     normalization_enabled=True,
     normalization_batch_size=10,
-    normalization_llm=normalize_llm,
+    normalization_llm=ChatOllama(model="llama3.2:1b"),
 )
 ```
 
@@ -733,7 +731,8 @@ Normalization LLM calls share the global `llm_concurrency` semaphore (default: 4
 
 ```python
 configure(
-    llm_concurrency=8,           # More parallel LLM calls
+    llm=ChatOllama(model="llama3"),
+    llm_concurrency=8,            # More parallel LLM calls
     normalization_batch_size=10,  # Larger batches
 )
 ```

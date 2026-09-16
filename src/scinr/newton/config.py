@@ -14,6 +14,11 @@ Usage (library mode):
     from scinr.newton.config import configure
     configure(llm=ChatOpenAI(model="gpt-4o"), neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
 
+Usage (navigation only — no LLM required):
+    from scinr.newton.config import configure
+    from scinr.newton.navigation import graph_navigator
+    configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
+
 Usage (CLI mode / .env file):
     configure()  # Reads everything from environment variables
 """
@@ -242,8 +247,10 @@ def configure(
     Parameter resolution order: explicit argument > environment variable > default.
 
     Args:
-        llm: LangChain BaseChatModel instance to use for all LLM calls.
-        repair_llm: LangChain BaseChatModel for the JSON repair loop. Falls back to `llm` if None.
+        llm: LangChain BaseChatModel instance for LLM-dependent stages. Optional — not required
+            for graph navigation. When omitted and MODEL_ID is unset, scinr runs without an LLM.
+        repair_llm: LangChain BaseChatModel for the JSON repair loop. Falls back to `llm` if None;
+            stays None when no LLM is configured (navigation-only mode).
         neo4j_uri: Neo4j connection URI. Env: `NEO4J_URI`. Default: `bolt://localhost:7687`.
         neo4j_user: Neo4j username. Env: `NEO4J_USER`. Required.
         neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`. Required.
@@ -360,27 +367,24 @@ def configure(
                 ),
             )
         else:
-            raise ConfigurationError(
-                "No LLM configured. Options:\n"
-                "\n"
-                "  Option 1 — Use any LangChain model:\n"
-                "    from langchain_openai import ChatOpenAI\n"
-                "    from scinr.newton.config import configure\n"
-                "    configure(llm=ChatOpenAI(model='gpt-4o'))\n"
-                "\n"
-                "  Option 2 — Use AWS Bedrock (define in .env or environment):\n"
-                "    MODEL_ID=us.anthropic.claude-sonnet-4-6\n"
-                "    AWS_DEFAULT_REGION=us-east-1\n"
+            log.info(
+                "No LLM configured. scinr will run without an LLM "
+                "(navigation-only mode). LLM-dependent stages (extraction, "
+                "annotation, entity extraction, tabular mapping/normalization) "
+                "will raise a ConfigurationError until an LLM is supplied via "
+                "configure(llm=...) or the MODEL_ID env var."
             )
 
-    _validate_llm(resolved_llm)
+    if resolved_llm is not None:
+        _validate_llm(resolved_llm)
 
     resolved_repair_llm = repair_llm
     if resolved_repair_llm is None:
-        log.warning(
-            "Configure -- Specific Repair LLM has not been defined, fallback to main LLM. It is recommended to use a smaller or cheaper model for reparation steps."
-        )
-        resolved_repair_llm = resolved_llm  # fall back to main LLM
+        if resolved_llm is not None:
+            log.warning(
+                "Configure -- Specific Repair LLM has not been defined, fallback to main LLM. It is recommended to use a smaller or cheaper model for reparation steps."
+            )
+        resolved_repair_llm = resolved_llm  # may be None (navigation-only)
 
     # ── Neo4j ─────────────────────────────────────────────────────────────────
     resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -700,6 +704,33 @@ def _validate_llm(llm: Any) -> None:
         )
 
 
+def _require_llm() -> Any:
+    """Return the configured main LLM or raise a descriptive ConfigurationError.
+
+    Raises:
+        ConfigurationError: If no LLM is configured (``cfg.llm is None``).
+    """
+    cfg = get_config()
+    if cfg.llm is None:
+        raise ConfigurationError(
+            "An LLM is required for this operation but none is configured.\n"
+            "\n"
+            "Configure one before running LLM-dependent stages (extraction, "
+            "annotation, entity extraction, or tabular mapping/normalization):\n"
+            "\n"
+            "  Option 1 — Pass a LangChain model:\n"
+            "    from langchain_openai import ChatOpenAI\n"
+            "    configure(llm=ChatOpenAI(model='gpt-4o'))\n"
+            "\n"
+            "  Option 2 — Use AWS Bedrock (define in .env or environment):\n"
+            "    MODEL_ID=us.anthropic.claude-sonnet-4-6\n"
+            "    AWS_DEFAULT_REGION=us-east-1\n"
+            "\n"
+            "Note: graph navigation (scinr.newton.navigation) does NOT require an LLM."
+        )
+    return cfg.llm
+
+
 # ---------------------------------------------------------------------------
 # Public accessors
 # ---------------------------------------------------------------------------
@@ -741,24 +772,25 @@ def get_available_themes() -> dict[str, list[str]]:
 
 def get_llm(temperature: float = 0.0):
     """Return the configured LLM. Optionally binds a temperature."""
-    cfg = get_config()
+    llm = _require_llm()
     if temperature == 0.0:
-        return cfg.llm
+        return llm
     try:
-        return cfg.llm.bind(temperature=temperature)
+        return llm.bind(temperature=temperature)
     except Exception:
-        return cfg.llm
+        return llm
 
 
 def get_repair_llm(temperature: float = 0.0):
     """Return the configured repair LLM. Optionally binds a temperature."""
     cfg = get_config()
+    llm = cfg.repair_llm if cfg.repair_llm is not None else _require_llm()
     if temperature == 0.0:
-        return cfg.repair_llm
+        return llm
     try:
-        return cfg.repair_llm.bind(temperature=temperature)
+        return llm.bind(temperature=temperature)
     except Exception:
-        return cfg.repair_llm
+        return llm
 
 
 def get_prompt_family() -> PromptFamily:

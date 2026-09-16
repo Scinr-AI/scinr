@@ -45,10 +45,12 @@ import asyncio
 from scinr.newton import delete_document, configure, DeletionResult
 
 async def main():
+    # delete_document() makes no LLM calls, so no llm= is needed here.
     configure(
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="password",
+        neo4j_database="neo4j",
     )
 
     result = await delete_document("/path/to/document.pdf")

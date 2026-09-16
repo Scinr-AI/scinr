@@ -56,7 +56,7 @@ configure(
 
 | Parameter | Type | Env Var | Default | Description |
 |---|---|---|---|---|
-| `llm` | `BaseChatModel` | `MODEL_ID` | — | LangChain chat model for all LLM calls. If `None`, falls back to `ChatBedrockConverse` using `MODEL_ID`. Required. |
+| `llm` | `BaseChatModel \| None` | — | `None` | LangChain chat model for all LLM calls. Build it yourself and pass it in — there is no `MODEL_ID` / env-var fallback. Optional at `configure()` time; required for the extraction / annotation / entity-extraction stages and tabular normalization. |
 | `repair_llm` | `BaseChatModel` | — | falls back to `llm` | Separate model for JSON repair loop. Recommended: a smaller/cheaper model. |
 | `neo4j_uri` | `str` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt connection URI. |
 | `neo4j_user` | `str` | `NEO4J_USER` or `NEO4J_AUTH` | — | Neo4j username. Required. Also parsed from `NEO4J_AUTH=user/password`. |
@@ -73,7 +73,7 @@ configure(
 | `mongodb_gridfs_bucket` | `str` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` | GridFS bucket for raw binary files. |
 | `custom_storage` | `tuple \| None` | — | `None` | `(RawFileRepository, PageRepository)` when `storage_backend="custom"`. |
 | `extra_converters` | `dict[str, type] \| None` | — | `{}` | Maps file extensions to `BaseConverter` subclasses, overriding built-in converters. |
-| `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral API key for PDF OCR conversion. |
+| `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral OCR API key. **Required to convert any PDF** — PDF conversion is Mistral OCR only, there is no fallback. |
 | `prompt_caching_enabled` | `bool \| None` | `PROMPT_CACHING_ENABLED` | `True` | Enable Bedrock Converse prompt caching (~90% token cost reduction on repeated calls). |
 | `full_docstring` | `bool \| None` | `FULL_DOCSTRING` | `True` | Use the full class docstring (vs. only its first line) when building the model catalog description for LLM prompts (annotation stage) and Neo4j `CatalogModel.description`. |
 | `extraction_batch_size` | `int \| None` | `EXTRACTION_BATCH_SIZE` | `1` | Pages processed per extraction chunk (sliding window step). |
@@ -86,7 +86,7 @@ configure(
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
 
-**Raises:** `ConfigurationError` — if `llm` is not set and `MODEL_ID` is absent, if Neo4j credentials are missing, or if `storage_backend` is invalid.
+**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
 
 ---
 

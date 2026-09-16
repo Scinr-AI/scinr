@@ -93,15 +93,15 @@ from scinr.newton import configure, run_pipeline
 from langchain_aws import ChatBedrockConverse # Or any langchain adapter. 
 
 async def main():
-    llm = ChatBedrockConverse(...)
+    llm = ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1")
 
     configure(
-        llm=llm,
+        llm=llm,  # the model is set via llm= (no MODEL_ID env var)
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="password",
         neo4j_database="neo4j",
-        mistral_api_key="",  # needed for PDF OCR
+        mistral_api_key="your_mistral_key",  # required to ingest any PDF
     )
 
     result = await run_pipeline(input_raw="./raw_documents")
@@ -117,7 +117,7 @@ asyncio.run(main())
 
 ## How It Works
 
-1. **Configure** — Set up Neo4j, MongoDB, and LLM providers using `configure()` or environment variables.
+1. **Configure** — Call `configure()` with Neo4j / storage settings (these may also come from the environment) and, for anything that runs an LLM stage, your model as `llm=` (no `MODEL_ID` env var).
 
 2. **Run the pipeline** — Call `run_pipeline()` with your input directory. `scinr` handles document conversion, structure extraction, ingestion, annotation, and entity extraction.
 

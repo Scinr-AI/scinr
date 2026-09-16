@@ -41,13 +41,13 @@ pip install "scinr[ollama]"
 pip install "scinr[bedrock,openai,ollama,mongodb]"
 ```
 
-> **Tip:** If you plan to process PDF files with OCR, you will also need a [Mistral AI](https://console.mistral.ai/) API key. Without it, text-based PDFs are still processed via `pdfplumber`.
+> **Tip:** To process **any** PDF you need a [Mistral AI](https://console.mistral.ai/) API key — PDF conversion is done entirely through the Mistral OCR API. There is no fallback path for PDFs without a key.
 
 ---
 
 ## Step 2: Set up your environment
 
-`scinr` reads configuration from environment variables. The recommended approach is to create a `.env` file in your working directory.
+`scinr` reads Neo4j, storage, and OCR settings from environment variables. The **LLM is configured in code** — you pass a ready-built LangChain model as `llm=` to `configure()` (see [Step 4](#step-4-run-the-pipeline)). The recommended approach for everything else is a `.env` file in your working directory.
 
 ### Create `.env` from the template
 
@@ -59,30 +59,31 @@ cp .env.example .env
 
 ### Fill in the required values
 
-At a minimum, you need to set the LLM model identifier and Neo4j credentials. Here is a minimal `.env` for a first run:
+At a minimum, you need to set the Neo4j credentials. Here is a minimal `.env` for a first run:
 
 ```env
-# ─── LLM (AWS Bedrock) ──────────────────────────────────────────────────────
-MODEL_ID=us.anthropic.claude-sonnet-4-6
-
 # ─── Neo4j ──────────────────────────────────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
 NEO4J_DATABASE=neo4j
+
+# ─── PDF conversion ────────────────────────────────────────────────────────
+MISTRAL_API_KEY=your_mistral_key
 ```
 
 ### Required vs. optional fields
 
 | Variable | Required? | What to set |
 | :--- | :--- | :--- |
-| `MODEL_ID` | Yes (unless you pass `llm=` to `configure()`) | Your LLM model ID. For Bedrock: `us.anthropic.claude-sonnet-4-6`. |
 | `NEO4J_URI` | No | Neo4j Bolt URI. Default: `bolt://localhost:7687`. |
 | `NEO4J_USER` | Yes | Neo4j username (usually `neo4j`). |
 | `NEO4J_PASSWORD` | Yes | Neo4j password. |
 | `NEO4J_DATABASE` | Yes | Neo4j database name (usually `neo4j`). |
-| `MISTRAL_API_KEY` | No | Mistral API key for PDF OCR. |
+| `MISTRAL_API_KEY` | Yes, to process any PDF | Mistral OCR API key. PDF conversion has no non-Mistral path. |
 | `STORAGE_BACKEND` | No | `none` (default, in-memory) or `mongodb`. |
+
+> **LLM:** there is no `MODEL_ID` environment variable to set. Build a LangChain chat model in your script and pass it as `llm=` to `configure()`.
 
 > **Note:** `python-dotenv` is included as a core dependency. When you call `configure()`, it automatically loads variables from a `.env` file in your current working directory. You do not need to import `dotenv` manually.
 
@@ -101,7 +102,7 @@ mkdir -p raw_docs
 
 | Format | Extensions | Notes |
 | :--- | :--- | :--- |
-| PDF | `.pdf` | Text-based via `pdfplumber`; OCR via Mistral API |
+| PDF | `.pdf` | Converted via the Mistral OCR API — requires `MISTRAL_API_KEY` |
 | Word | `.docx` | Full text + structure extraction |
 | Excel | `.xlsx`, `.xls` | Auto-routed to tabular pipeline |
 | CSV | `.csv` | Auto-routed to tabular pipeline |
@@ -119,19 +120,21 @@ Create a Python script to configure `scinr` and run the full pipeline:
 ```python
 # quickstart.py
 import asyncio
+
+from langchain_aws import ChatBedrockConverse  # or any LangChain chat model
+
 from scinr.newton import configure, run_pipeline
 
 
 async def main():
-    # configure() reads .env automatically via python-dotenv.
-    # It resolves LLM, Neo4j, and storage settings from:
-    #   1. Explicit arguments (highest priority)
-    #   2. Environment variables / .env file
-    #   3. Hard-coded defaults
+    # The model is passed via llm= (no MODEL_ID env var). Neo4j and storage
+    # settings still come from .env (loaded automatically by configure()).
     configure(
+        llm=ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1"),
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
         neo4j_password="your_password",
+        neo4j_database="neo4j",
     )
 
     # Run the default pipeline (Stages 0–4; tabular files are auto-detected)
@@ -354,8 +357,10 @@ Persist raw files and converted pages to MongoDB:
 
 ```python
 configure(
+    llm=ChatOllama(model="llama3"),
     neo4j_user="neo4j",
     neo4j_password="your_password",
+    neo4j_database="neo4j",
     storage_backend="mongodb",
     mongodb_uri="mongodb://localhost:27017",
     mongodb_database="scinr",
@@ -366,12 +371,9 @@ configure(
 
 ## Troubleshooting
 
-### `"No LLM configured"`
+### An LLM stage fails with "no LLM configured"
 
-You must either:
-
-- Set `MODEL_ID` in your `.env` file (for AWS Bedrock), or
-- Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance.
+The extraction, annotation, and entity-extraction stages (and tabular normalization) need a model. Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance (e.g. `ChatBedrockConverse`, `ChatOpenAI`, `ChatOllama`). There is no environment-variable shortcut for the model. `configure()` itself does not require it — only these stages do.
 
 ### `"Neo4j username is not configured"` / `"Neo4j password is not configured"`
 
@@ -402,7 +404,7 @@ Check that:
 
 ### ImportError: `langchain-aws is not installed`
 
-If you set `MODEL_ID` but have not installed the Bedrock extra:
+If you build a `ChatBedrockConverse` model but have not installed the Bedrock extra:
 
 ```bash
 pip install "scinr[bedrock]"
@@ -410,12 +412,7 @@ pip install "scinr[bedrock]"
 
 ### PDFs fail to process
 
-PDF processing requires either:
-
-- A Mistral API key (for OCR) set via `MISTRAL_API_KEY` in your `.env`, or
-- The PDF must contain extractable text (processed via `pdfplumber` without OCR).
-
-If you see OCR-related errors and do not have a Mistral key, try text-based PDFs or set `MISTRAL_API_KEY`.
+PDF conversion goes entirely through the Mistral OCR API. Set `MISTRAL_API_KEY` in your `.env` (get a key at [console.mistral.ai](https://console.mistral.ai/)). Without it, no PDF can be processed — there is no local/text-extraction fallback.
 
 ### LLM calls are slow or rate-limited
 

@@ -33,9 +33,21 @@ configure(
     neo4j_uri="bolt://localhost:7687",
     neo4j_user="neo4j",
     neo4j_password="your_password",
+    neo4j_database="neo4j",
     # graph_backend="neo4j" is the default
+    # no llm= needed — navigation is read-only and makes no LLM calls
 )
 ```
+
+### No LLM required
+
+Graph navigation is read-only and does **not** require any LLM. Configure only the Neo4j connection:
+
+```python
+configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
+```
+
+Then use `graph_navigator()` (async context manager) or `get_graph_navigator()`.
 
 ---
 
@@ -43,11 +55,12 @@ configure(
 
 ```python
 import asyncio
+
 from scinr.newton import configure, graph_navigator
 from scinr.newton.navigation import In, Gte
 
 async def main():
-    configure(neo4j_user="neo4j", neo4j_password="pw")
+    configure(neo4j_user="neo4j", neo4j_password="pw", neo4j_database="neo4j")  # no llm= needed for navigation
 
     async with graph_navigator() as nav:
         roots = await nav.list_root_documents()
