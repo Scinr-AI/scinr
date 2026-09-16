@@ -86,19 +86,20 @@ RETURN DISTINCT n.raw_file_id AS raw_file_id
 """
 
 _CASCADE_DELETE_TAIL = """
-OPTIONAL MATCH (d)-[r:IS_COMPOSED_OF*]->(cd)
-WITH d, r, collect(DISTINCT cd) + d AS nodes
-UNWIND nodes AS documentNode
-OPTIONAL MATCH (documentNode)-[rdps:HAS_STRUCTURE*..]->(parentStructureNode)
-OPTIONAL MATCH (parentStructureNode)-[rpscs:HAS_CHILD*..]->(childStructureNode)
-WITH nodes, documentNode, r, rdps, rpscs, collect(DISTINCT childStructureNode) + collect(DISTINCT parentStructureNode) AS structureNodes
-UNWIND structureNodes AS structureNode
-OPTIONAL MATCH (structureNode)-[rsiu:HAS_INFO_UNIT]->(iu)
-OPTIONAL MATCH (structureNode)-[rsmd:HAS_MODEL_DECISION]->(md)
-OPTIONAL MATCH (md)-[rmdpm:HAS_PROPOSED_MODEL]-(pm)
-OPTIONAL MATCH (pm)-[rpmpf:HAS_PROPOSED_FIELD]->(pf)
-OPTIONAL MATCH (structureNode)-[rse:HAS_EXTRACTION]->(e)
-DETACH DELETE documentNode, structureNode, iu, md, pm, pf, rse, e
+OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd)
+WITH collect(DISTINCT d) + collect(DISTINCT cd) AS documentNodes
+UNWIND documentNodes AS documentNode
+WITH DISTINCT documentNode
+OPTIONAL MATCH (documentNode)-[:HAS_STRUCTURE*..]->(parentStructureNode)
+OPTIONAL MATCH (parentStructureNode)-[:HAS_CHILD*..]->(childStructureNode)
+WITH documentNode, collect(DISTINCT parentStructureNode) + collect(DISTINCT childStructureNode) AS docStructureNodes
+UNWIND (CASE WHEN docStructureNodes = [] THEN [NULL] ELSE docStructureNodes END) AS structureNode
+OPTIONAL MATCH (structureNode)-[:HAS_INFO_UNIT]->(iu)
+OPTIONAL MATCH (structureNode)-[:HAS_MODEL_DECISION]->(md)
+OPTIONAL MATCH (md)-[:HAS_PROPOSED_MODEL]-(pm)
+OPTIONAL MATCH (pm)-[:HAS_PROPOSED_FIELD]->(pf)
+OPTIONAL MATCH (structureNode)-[:HAS_EXTRACTION]->(e)
+DETACH DELETE documentNode, structureNode, iu, md, pm, pf, e
 RETURN
   count(DISTINCT documentNode) AS documents_deleted,
   count(DISTINCT structureNode) AS structure_nodes_deleted,
@@ -155,6 +156,7 @@ def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
         ``tenant_id``, ``created_by_user_id``, ``job_id``); only its non-None
         entries become WHERE conditions via :func:`_build_doc_match`.
     """
+
     def _do_delete() -> dict[str, int]:
         local_counters = dict.fromkeys(_CASCADE_COUNTER_FIELDS, 0)
         cfg = get_config()
@@ -170,8 +172,7 @@ def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
                 except Exception:
                     tx.rollback()
                     logger.exception(
-                        "delete_document: cascade delete transaction rolled back "
-                        "for filters=%r",
+                        "delete_document: cascade delete transaction rolled back for filters=%r",
                         filters,
                     )
                     raise

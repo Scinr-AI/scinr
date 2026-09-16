@@ -542,6 +542,36 @@ class TestDeleteDocumentCascade:
         assert gc_calls == []
         assert fake_driver.closed is True
 
+    async def test_cascade_query_guards_against_structure_less_documents(self, patch_driver):
+        """Regression pin for a real Cypher bug (not reachable via the mocked
+        driver's query semantics): ``UNWIND`` on an empty list drops the row
+        entirely, so without a ``CASE WHEN ... THEN [NULL] ...`` guard before
+        the structure-node ``UNWIND``, any ``documentNode`` with no
+        ``:StructureNode`` of its own (every folder-parent Document, plus any
+        leaf never fully processed) would silently never reach ``DETACH
+        DELETE`` and survive the cascade. Verified against a real Neo4j
+        instance: the un-guarded query left folder-parent and other
+        structure-less Document nodes behind after "deletion".
+        """
+        fake_driver = patch_driver(
+            _FakeDriver(existence_rows=[{"version": 1}], gc_emi_sequence=[0], gc_le_sequence=[0])
+        )
+
+        await delete_document("docs/structureless", version=1)
+
+        cascade_queries = [
+            query
+            for kind, query, _ in fake_driver.calls
+            if kind == "tx.run" and "documents_deleted" in query
+        ]
+        assert len(cascade_queries) == 1
+        query = cascade_queries[0]
+        assert "CASE WHEN docStructureNodes = [] THEN [NULL] ELSE docStructureNodes END" in query
+        # The document UNWIND must not be scoped to the IS_COMPOSED_OF path
+        # variable — grouping by a per-descendant path was the earlier
+        # (already-fixed) half of the same class of bug.
+        assert "WITH d, r," not in query
+
 
 class TestDeleteDocumentGarbageCollection:
     async def test_gc_pass_stops_at_first_zero(self, patch_driver):
