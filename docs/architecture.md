@@ -635,9 +635,9 @@ scinr.newton/
 ├── converters/                 # File format converters
 │   ├── base.py                 # BaseConverter ABC, IntermediateDocument, IntermediatePage
 │   ├── registry.py             # Extension-to-converter map, apply_converter_overrides()
-│   ├── main.py                 # convert_one(), convert_folder() — parallel conversion
+│   ├── main.py                 # convert_one() (output_dir=None → in-memory only), convert_folder() — parallel conversion
 │   ├── pdf.py                  # PdfConverter (Mistral OCR API)
-│   ├── pdf_splitter.py         # Structural PDF partitioning for OCR chunking
+│   ├── pdf_splitter.py         # Structural PDF partitioning for OCR chunking (lazy, one chunk in memory at a time)
 │   ├── docx.py                 # DocxConverter (python-docx)
 │   ├── xlsx.py                 # XlsxConverter (openpyxl + pandas)
 │   ├── csv.py                  # CsvConverter (pandas)
@@ -747,7 +747,7 @@ Data flows between stages through three mechanisms:
 
 | Mechanism | Direction | Description |
 |---|---|---|
-| **In-memory objects** | Stage N → Stage N+1 | `IntermediateDocument` (0→1), `Document` (1→2), document names (2→3→4) |
+| **In-memory objects** | Stage N → Stage N+1 | `IntermediateDocument` (0→1), `Document` (1→2), document names (2→3→4). Each object is released as soon as the next stage has consumed it. |
 | **Intermediate JSON files** | Stage N → disk → Stage N+1 | `*.json` (0→1), `extract-*.json` (1→2) |
 | **Neo4j graph** | Stage N → graph → Stage N+1 | `:Document`/`:StructureNode` (2→3→4), annotation subgraph (3→4) |
 

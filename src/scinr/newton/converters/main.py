@@ -277,14 +277,14 @@ def _parse_args() -> argparse.Namespace:
 
 async def convert_one(
     entry: Path,
-    output_dir: Path,
+    output_dir: Path | None,
     dry_run: bool = False,
     raw_file_repo: RawFileRepository | None = None,
     page_repo: PageRepository | None = None,
     _relative_prefix: Path | None = None,  # internal: relative path from the original input_dir
     context_instructions: str | None = None,
     parallel_docs: int = 1,
-) -> tuple[list[tuple[Path, Path, IntermediateDocument]], list[tuple[Path, str]]]:
+) -> tuple[list[tuple[Path, Path | None, IntermediateDocument]], list[tuple[Path, str]]]:
     """Convert a single directory entry (a file or a subdirectory).
 
     This is the per-entry unit of work factored out of :func:`convert_folder`
@@ -343,7 +343,13 @@ async def convert_one(
     entry:
         The file or subdirectory to convert.
     output_dir:
-        Directory where converted JSON files will be written.
+        Directory where converted JSON files will be written, or ``None`` to
+        **not write anything to disk**: the converted
+        :class:`~converters.base.IntermediateDocument` is only returned in
+        memory (the returned path is ``None``). The caller decides whether the
+        JSON is persisted by passing (or not) a directory; ``None`` is only
+        valid when *entry* is a file — a directory entry needs a real output
+        directory to mirror its structure into.
     dry_run:
         If ``True``, logs what would be done but writes nothing.
     raw_file_repo:
@@ -374,10 +380,11 @@ async def convert_one(
 
     Returns
     -------
-    tuple[list[tuple[Path, Path, IntermediateDocument]], list[tuple[Path, str]]]
+    tuple[list[tuple[Path, Path | None, IntermediateDocument]], list[tuple[Path, str]]]
         ``(written, failures)`` where ``written`` is the list of successfully
         converted ``(raw_source, json_written, intermediate_document)``
-        triples contributed by this entry, and ``failures`` is the list of
+        triples contributed by this entry (``json_written`` is ``None`` when
+        *output_dir* is ``None``), and ``failures`` is the list of
         ``(entry_path, error_message)`` pairs for file-level conversion
         errors directly attributable to this entry.
 
@@ -389,6 +396,8 @@ async def convert_one(
         a given directory level were added to that level's error tally.
     """
     if entry.is_dir():
+        if output_dir is None:
+            raise ValueError(f"output_dir is required to convert a directory entry: {entry}")
         # Recurse into subdirectory. See "Design decision" above: a fresh
         # semaphore is created inside the recursive convert_folder() call
         # rather than sharing this level's semaphore instance.
@@ -417,13 +426,12 @@ async def convert_one(
     # Determine relative folder path (None for files at root level of original input_dir)
     folder_path_str: str | None = str(_relative_prefix) if _relative_prefix else None
 
-    # Output path: mirror subdir structure inside output_dir
-    if _relative_prefix:
-        file_output_dir = output_dir / _relative_prefix
-    else:
-        file_output_dir = output_dir
-
-    output_path = file_output_dir / f"{entry.stem}.json"
+    # Output path: mirror subdir structure inside output_dir (None = in-memory only)
+    file_output_dir: Path | None = None
+    output_path: Path | None = None
+    if output_dir is not None:
+        file_output_dir = output_dir / _relative_prefix if _relative_prefix else output_dir
+        output_path = file_output_dir / f"{entry.stem}.json"
 
     if dry_run:
         logger.info(
@@ -435,13 +443,13 @@ async def convert_one(
         return [], []
 
     try:
-        # 1. Read bytes and store original file in MongoDB (if repo provided)
+        # 1. Store original file in MongoDB (if repo provided); the repo reads
+        #    it itself (streaming where supported), never materialised here.
         raw_file_id = None
         if raw_file_repo is not None:
-            raw_bytes = entry.read_bytes()
-            raw_file_id = await raw_file_repo.store(
+            raw_file_id = await raw_file_repo.store_file(
+                path=entry,
                 filename=entry.name,
-                content=raw_bytes,
                 content_type=_guess_content_type(entry),
                 folder_path=folder_path_str,
             )
@@ -465,15 +473,17 @@ async def convert_one(
                     markdown=page.markdown,
                 )
 
-        # 4. Write JSON to output (now includes page_ids and raw_file_id)
-        file_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(doc.to_json(), encoding="utf-8")
-        logger.info(
-            "Written: %s (%d page(s), folder_path=%s)",
-            output_path,
-            len(doc.pages),
-            folder_path_str,
-        )
+        # 4. Write JSON to output (now includes page_ids and raw_file_id),
+        #    unless the caller asked for an in-memory-only result.
+        if output_path is not None and file_output_dir is not None:
+            file_output_dir.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(doc.to_json(), encoding="utf-8")
+            logger.info(
+                "Written: %s (%d page(s), folder_path=%s)",
+                output_path,
+                len(doc.pages),
+                folder_path_str,
+            )
         return [(entry, output_path, doc)], []
     except ConversionError as exc:
         logger.error("Conversion error for %s: %s", entry.name, exc)
@@ -711,11 +721,10 @@ async def convert_single_file(
     # With storage: full process with MongoDB
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Read bytes and store original file
-    raw_bytes = path.read_bytes()
-    raw_file_id = await raw_file_repo.store(
+    # 1. Store original file (streamed by the repo where supported)
+    raw_file_id = await raw_file_repo.store_file(
+        path=path,
         filename=path.name,
-        content=raw_bytes,
         content_type=_guess_content_type(path),
         folder_path=None,
     )

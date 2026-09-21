@@ -77,3 +77,102 @@ class TestConvertFolderUnsupportedFormat:
         raw_source, _json_written, _doc = written[0]
         assert raw_source.name == "doc.txt"
         assert failures == []
+
+
+class TestConvertOneStreamsRawFile:
+    async def test_convert_one_uses_store_file_and_never_reads_bytes(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The raw file goes to the repo via ``store_file(path=...)`` — the
+        converter layer must never materialise it with ``Path.read_bytes``."""
+        from scinr.newton.converters.main import convert_one
+
+        src = tmp_path / "in"
+        src.mkdir()
+        doc = src / "doc.txt"
+        doc.write_text("hello", encoding="utf-8")
+
+        calls: list[dict] = []
+
+        class _Repo:
+            async def store_file(self, path, filename, content_type, folder_path):
+                calls.append({"path": path, "filename": filename})
+                return "raw-1"
+
+            async def store(self, *a, **k):  # pragma: no cover - must not be used
+                raise AssertionError("store() must not be called from convert_one")
+
+        def _boom(self):
+            raise AssertionError("Path.read_bytes must not be called")
+
+        monkeypatch.setattr(Path, "read_bytes", _boom)
+
+        written, failures = await convert_one(doc, tmp_path / "out", raw_file_repo=_Repo())
+
+        assert failures == []
+        assert calls == [{"path": doc, "filename": "doc.txt"}]
+        assert written[0][2].raw_file_id == "raw-1"
+
+    async def test_null_repo_never_opens_the_file(self, tmp_path: Path, monkeypatch):
+        from scinr.newton.converters.main import convert_one
+        from scinr.newton.storage.null import NullRawFileRepository
+
+        doc = tmp_path / "doc.txt"
+        doc.write_text("hello", encoding="utf-8")
+
+        def _boom(self):
+            raise AssertionError("Path.read_bytes must not be called")
+
+        monkeypatch.setattr(Path, "read_bytes", _boom)
+
+        written, failures = await convert_one(
+            doc, tmp_path / "out", raw_file_repo=NullRawFileRepository()
+        )
+
+        assert failures == []
+        assert written[0][2].raw_file_id == ""
+
+
+class TestConvertOneInMemoryOnly:
+    async def test_output_dir_none_writes_no_files_and_returns_none_path(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from scinr.newton.converters.main import convert_one
+
+        doc = tmp_path / "doc.txt"
+        doc.write_text("hello", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        before = set(tmp_path.rglob("*"))
+
+        written, failures = await convert_one(doc, None)
+
+        assert failures == []
+        assert len(written) == 1
+        raw_source, json_written, intermediate = written[0]
+        assert raw_source == doc
+        assert json_written is None
+        assert intermediate.pages  # the converted document is returned in memory
+        assert set(tmp_path.rglob("*")) == before  # nothing was created on disk
+
+    async def test_output_dir_none_never_serialises_the_document(self, tmp_path: Path, monkeypatch):
+        from scinr.newton.converters import base as converters_base
+        from scinr.newton.converters.main import convert_one
+
+        doc = tmp_path / "doc.txt"
+        doc.write_text("hello", encoding="utf-8")
+
+        def _boom(self, *a, **k):
+            raise AssertionError("to_json must not be called when output_dir is None")
+
+        monkeypatch.setattr(converters_base.IntermediateDocument, "to_json", _boom)
+
+        written, failures = await convert_one(doc, None)
+
+        assert failures == []
+        assert len(written) == 1
+
+    async def test_output_dir_none_is_rejected_for_a_directory_entry(self, tmp_path: Path):
+        from scinr.newton.converters.main import convert_one
+
+        with pytest.raises(ValueError, match="output_dir is required"):
+            await convert_one(tmp_path, None)

@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-09-21
+
+Memory optimization: the peak memory of each stage now depends on the size of one
+unit of work (a PDF chunk of at most ~45 MB, a batch of 500 tabular rows, one node
+in flight per LLM slot) rather than on the size of the file or the number of nodes
+in the document.
+
+### Changed
+- **Large PDFs are converted one chunk at a time.** `PdfConverter` no longer reads
+  the whole file nor materialises every chunk: it probes the size/page count, then
+  generates chunks lazily from the file (`pdf_splitter.iter_pdf_chunks`), using a
+  fresh `PdfReader` per window of pages. Live memory for a 938 MB PDF drops from
+  ~4.3 GB to ~330 MB and no longer grows with the file. `split_pdf()` /
+  `needs_splitting()` are unchanged. **Behavior change:** because chunks are now
+  produced on demand, a `PdfSplitError` (a single page heavier than
+  `mistral_ocr_safe_max_bytes`) can be detected *after* earlier chunks were already
+  sent to Mistral OCR (previously it failed before sending anything). The document
+  still always aborts, regardless of `mistral_ocr_error_strategy`. Chunk labels in
+  log/error messages are now `chunk N` (the total is not known up front); the
+  `[start, end)` page range and the `best_effort` hints are unchanged.
+- **Raw files are streamed to GridFS** instead of being read fully into memory.
+  `RawFileRepository` gains a non-abstract `store_file(path, filename, content_type,
+  folder_path)`; the default implementation reads the file and delegates to
+  `store()`, so custom backends keep working unchanged, and may override it to
+  stream. The MongoDB backend hashes (SHA-256) and counts bytes on the fly.
+- **`convert_one(output_dir=None)` writes nothing to disk** and returns
+  `(entry, None, doc)`. The pipeline now uses it when `converter_output_dir` is not
+  set, instead of serialising the whole document to a temporary directory that was
+  deleted immediately. `_process_document_unit` also releases the intermediate and
+  extracted documents as soon as their stage is done.
+- **Tabular files are streamed.** Sheets are scanned once for headers, row count and
+  a 5-row preview (`scan_tabular_file`); rows are then re-read in batches of 500
+  (`iter_sheet_batches`) when written, so the LangGraph state (`TabularFileData`)
+  no longer carries `all_rows` and the write path uses O(batch) memory. The
+  normalization path is three streaming passes (scan → LLM on unique keys → write),
+  with the row's normalization keys computed by a single function
+  (`compute_row_normalization_keys`) in both scan and write passes, and the
+  normalization LLM tasks are created lazily (at most `llm_concurrency` alive)
+  instead of one per key batch up front.
+  `NormalizationEntry.row_indices` is deprecated and no longer populated.
+  The source file must not be modified while a sheet is being processed.
+  `write_tabular_subgraph()` now takes a `row_batches` factory instead of reading
+  `sheet["all_rows"]`.
+
+### Added
+- `pdf_splitter.probe_pdf(path)` and `pdf_splitter.iter_pdf_chunks(path, ...)`:
+  path-based, lazy counterparts of `count_pdf_pages` / `split_pdf`.
+- `RawFileRepository.store_file()` (optional override, see above).
+- `tabular.reader.scan_tabular_file()` and `tabular.reader.iter_sheet_batches()`:
+  streaming counterparts of `read_tabular_file()`, which is kept and still returns
+  `all_rows`.
+- `tabular.neo4j_ops.compute_row_normalization_keys()`: the single source of a row's
+  normalization keys, shared by the scan and write passes.
+
+### Fixed
+- **Annotation (Stage 3) and entity extraction (Stage 4) no longer accumulate the
+  context, prompt and schema of every node before the LLM semaphore.** The LLM slot
+  is now taken first, so only `llm_concurrency` nodes hold that memory at once
+  (10 000 nodes: +701 MB → +15 MB in the fan-out simulation).
+- `read_csv` uses ~2.4× less memory (single streaming pass, no `StringIO` copy).
+- `read_xlsx` closes the workbook even when reading a sheet fails.
+- Raw files are no longer read into memory when `storage_backend="none"`.
+
 ## [0.3.9] - 2026-09-16
 
 ### Fixed

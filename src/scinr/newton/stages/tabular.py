@@ -178,12 +178,11 @@ async def run_tabular_pipeline(
                         raw_file_id = None
                         if _raw_file_repo is not None:
                             try:
-                                raw_bytes = f.read_bytes()
                                 _content_type = decide_content_type(f.suffix.lower())
                                 folder_path_str = str(f.parent.relative_to(input_path)) if f.parent != input_path else ""
-                                raw_file_id = await _raw_file_repo.store(
+                                raw_file_id = await _raw_file_repo.store_file(
+                                    path=f,
                                     filename=f.name,
-                                    content=raw_bytes,
                                     content_type=_content_type,
                                     folder_path=folder_path_str,
                                 )

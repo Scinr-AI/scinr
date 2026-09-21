@@ -10,7 +10,7 @@ from scinr.newton.annotation.models import AnnotationDecision
 from scinr.newton.config import get_llm, make_system_message
 from scinr.newton.tabular.models import ColumnFieldMapping, ColumnMapping
 from scinr.newton.tabular.prompts import build_tabular_decision_prompt, build_tabular_mapping_prompt
-from scinr.newton.tabular.reader import preview_to_markdown, read_tabular_file, select_preview_rows
+from scinr.newton.tabular.reader import iter_sheet_batches, preview_to_markdown, scan_tabular_file
 from scinr.newton.tabular.state import TabularFileData, TabularState
 from scinr.newton.utils.llm_repair import extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 async def load_sheets(state: TabularState) -> dict:
-    """Read the tabular file and populate state.sheets with TabularFileData.
+    """Scan the tabular file and populate state.sheets with TabularFileData.
+
+    Pass A of the streaming design: only headers, row count and a small preview
+    are kept per sheet — the data rows are re-read in batches at write time.
 
     Also ensures catalog models and theme structure exist in Neo4j (idempotent),
     mirroring the annotation pipeline's load_nodes() behaviour.
@@ -42,22 +45,21 @@ async def load_sheets(state: TabularState) -> dict:
     file_path = Path(state["file_path"])
     logger.info("load_sheets: reading %s", file_path)
     try:
-        raw_sheets = read_tabular_file(file_path)
+        scans = scan_tabular_file(file_path)
     except Exception as exc:
         errors = list(state.get("errors", []))
         errors.append(f"load_sheets: could not read {file_path}: {exc}")
         return {"sheets": [], "current_sheet_index": 0, "errors": errors}
 
     sheets: list[TabularFileData] = []
-    for sheet in raw_sheets:
-        preview = select_preview_rows(sheet)
+    for scan in scans:
         sheets.append({
-            "sheet_name": sheet["sheet_name"],
-            "headers": sheet["headers"],
-            "all_rows": sheet["all_rows"],
-            "total_rows": sheet["total_rows"],
-            "preview": preview,
-            "preview_markdown": preview_to_markdown(preview),
+            "file_path": str(file_path),
+            "sheet_name": scan["sheet_name"],
+            "headers": scan["headers"],
+            "total_rows": scan["total_rows"],
+            "preview": scan["preview"],
+            "preview_markdown": preview_to_markdown(scan["preview"]),
         })
 
     logger.info(
@@ -71,7 +73,6 @@ async def load_sheets(state: TabularState) -> dict:
         try:
             from scinr.newton.storage.factory import get_storage
             _, page_repo = get_storage()
-            file_path_obj = Path(state["file_path"])
             # Derive folder_path from doc_path (part before the last /)
             doc_path: str = state.get("doc_path", "")
             folder_path = doc_path.rsplit("/", 1)[0] if "/" in doc_path else None
@@ -432,6 +433,13 @@ async def write_tabular(state: TabularState) -> dict:
         return {"current_sheet_index": new_index}
 
     driver = get_async_driver()                         # ← singleton, NO cerrar
+    sheet_path = Path(sheet["file_path"])
+    sheet_name = sheet["sheet_name"]
+
+    def row_batches(batch_size: int):
+        # Each call is a new streaming pass over the file (one batch alive at a time).
+        return iter_sheet_batches(sheet_path, sheet_name, batch_size)
+
     sheet_page_ids = state.get("sheet_page_ids", [])
     sheet_page_id = sheet_page_ids[idx] if idx < len(sheet_page_ids) else ""
     try:
@@ -441,6 +449,7 @@ async def write_tabular(state: TabularState) -> dict:
             document_name=state["document_name"],
             resolved_version=state["resolved_version"],
             sheet=sheet,
+            row_batches=row_batches,
             sheet_index=idx,
             decision=decision,
             mapping=mapping,

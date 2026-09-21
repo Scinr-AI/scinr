@@ -98,13 +98,15 @@ async def _extract_entities(
     composite_schema: type,
     info_units: list[dict],
     node_full_id: str,
-    semaphore: asyncio.Semaphore,
     node_id: str | None = None,
     node_title: str | None = None,
 ) -> tuple[Any | None, str | None]:
     """Run the LLM extraction call for a single node.
 
-    The semaphore wraps the entire LLM + repair block.
+    The caller must already hold the LLM (Bedrock) semaphore: this function does
+    not acquire it, because ``asyncio.Semaphore`` is not reentrant and
+    ``process_single_extraction_target`` takes the slot *before* composing the
+    schema so that only ``llm_concurrency`` targets hold that memory.
 
     Parameters
     ----------
@@ -114,8 +116,6 @@ async def _extract_entities(
         List of InfoUnit dicts for this node.
     node_full_id:
         Full StructureNode.id (for logging and error messages).
-    semaphore:
-        asyncio.Semaphore controlling Bedrock concurrency.
 
     Returns
     -------
@@ -135,37 +135,36 @@ async def _extract_entities(
         HumanMessage(content=human_content),
     ]
 
-    async with semaphore:
-        result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
-        parsed = result.get("parsed")
+    result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
+    parsed = result.get("parsed")
 
-        if parsed is not None:
-            logger.info("_extract_entities: parsed successfully for node %r", node_full_id)
-            return parsed, None
+    if parsed is not None:
+        logger.info("_extract_entities: parsed successfully for node %r", node_full_id)
+        return parsed, None
 
-        # Parse failed — enter repair loop
-        current_raw = extract_raw_payload(result["raw"])
-        current_error = (
-            str(result.get("parsing_error")) if result.get("parsing_error") else "Unknown parsing error"
-        )
-        logger.warning(
-            "_extract_entities: parse failed for node %r, starting repair loop", node_full_id
-        )
+    # Parse failed — enter repair loop
+    current_raw = extract_raw_payload(result["raw"])
+    current_error = (
+        str(result.get("parsing_error")) if result.get("parsing_error") else "Unknown parsing error"
+    )
+    logger.warning(
+        "_extract_entities: parse failed for node %r, starting repair loop", node_full_id
+    )
 
-        repaired = await run_repair_loop(
-            schema=composite_schema,
-            initial_raw=current_raw,
-            initial_error=current_error,
-            context_label=node_full_id,
-        )
-        if repaired is not None:
-            logger.info("_extract_entities: repair successful for node %r", node_full_id)
-            return repaired, None
+    repaired = await run_repair_loop(
+        schema=composite_schema,
+        initial_raw=current_raw,
+        initial_error=current_error,
+        context_label=node_full_id,
+    )
+    if repaired is not None:
+        logger.info("_extract_entities: repair successful for node %r", node_full_id)
+        return repaired, None
 
-        logger.error(
-            "_extract_entities: all repair attempts exhausted for node %r", node_full_id
-        )
-        return None, f"extract_entities failed for node {node_full_id}"
+    logger.error(
+        "_extract_entities: all repair attempts exhausted for node %r", node_full_id
+    )
+    return None, f"extract_entities failed for node {node_full_id}"
 
 
 # ── Private helper: write entities ───────────────────────────────────────────
@@ -285,8 +284,9 @@ async def process_single_extraction_target(
     write entities → mark extracted.
     Intended for use with asyncio.gather() for intra-document parallelism.
 
-    The Bedrock call (extract_entities + repair loop) is executed while holding
-    ``bedrock_semaphore``, bounding total concurrent LLM calls.
+    ``bedrock_semaphore`` is held from schema composition through the LLM call
+    and repair loop, bounding both concurrent LLM calls and the number of
+    schemas/prompts alive at once. It is released before any Neo4j write.
     Neo4j writes (write_entities, mark_extracted) are each wrapped in
     ``get_neo4j_semaphore()`` to prevent connection pool saturation under
     parallel load. The semaphore is released between the two writes so other
@@ -310,18 +310,21 @@ async def process_single_extraction_target(
     driver = get_async_driver()
     neo4j_semaphore = get_neo4j_semaphore()
 
-    composite_schema, schema_error = _compose_schema(target)
-    if composite_schema is None:
-        return {"node_full_id": node_full_id, "extraction": None, "error": schema_error}
+    # The LLM slot is taken FIRST so that the composed schema, prompt and messages
+    # of a target only exist while it holds one of the ``llm_concurrency`` slots.
+    # Lock order is always LLM -> Neo4j; the Neo4j writes below run outside the slot.
+    async with bedrock_semaphore:
+        composite_schema, schema_error = _compose_schema(target)
+        if composite_schema is None:
+            return {"node_full_id": node_full_id, "extraction": None, "error": schema_error}
 
-    extraction, extract_error = await _extract_entities(
-        composite_schema,
-        target.get("info_units") or [],
-        node_full_id,
-        bedrock_semaphore,
-        node_id=target.get("node_id"),
-        node_title=target.get("node_title"),
-    )
+        extraction, extract_error = await _extract_entities(
+            composite_schema,
+            target.get("info_units") or [],
+            node_full_id,
+            node_id=target.get("node_id"),
+            node_title=target.get("node_title"),
+        )
     if extraction is None:
         return {"node_full_id": node_full_id, "extraction": None, "error": extract_error}
 

@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -789,11 +788,8 @@ async def _process_document_unit(
         shared_ingest_version: Pre-computed batch version forwarded to ``ingest_one()`` /
             ``ingest_one_from_path()``.
         converter_output_dir: Folder where Stage 0 writes intermediate JSON to disk, or ``None``
-            to keep the converted document in memory only (a fresh temporary
-            directory, scoped to and removed immediately after this unit's
-            ``convert_one()`` call via ``tempfile.TemporaryDirectory()``, is
-            created per unit in that case, since ``convert_one()`` requires a
-            concrete output directory on disk).
+            to keep the converted document in memory only (``convert_one()`` is then
+            called with ``output_dir=None`` and serialises nothing to disk).
         extraction_output_dir: Folder where Stage 1 writes ``extract-*.json`` output, or ``None``
             to keep the extracted document in memory only.
         extraction_input_dir: Root input folder for ``extraction_json`` units, used to mirror the
@@ -856,39 +852,16 @@ async def _process_document_unit(
             # ── Stage: preprocess ──────────────────────────────────────
             if "preprocess" in effective_stages and unit.kind == "raw_file":
                 relative_prefix = unit.relative_dir if unit.relative_dir != Path(".") else None
-                if converter_output_dir:
-                    written, failures = await convert_one(
-                        unit.source_path,
-                        Path(converter_output_dir),
-                        raw_file_repo=raw_file_repo,
-                        page_repo=page_repo,
-                        _relative_prefix=relative_prefix,
-                        context_instructions=context_instructions,
-                    )
-                else:
-                    # No persistent output dir requested: scope a fresh
-                    # temporary directory to just this convert_one() call so
-                    # it is always removed afterwards — on the happy path AND
-                    # if convert_one() raises — via TemporaryDirectory's own
-                    # __exit__. The old `tempfile.mkdtemp()` here was never
-                    # cleaned up, leaking one orphaned directory (with the
-                    # full converted JSON inside it) per raw_file unit into
-                    # /tmp forever. `written[...][2]` (the IntermediateDocument)
-                    # is a plain Python object already fully materialized in
-                    # memory by the time convert_one() returns, so it safely
-                    # outlives the tempdir's removal below — only the on-disk
-                    # JSON convert_one() wrote is discarded, which is fine
-                    # since the rest of this unit's chain only needs the
-                    # in-memory object, not those files.
-                    with tempfile.TemporaryDirectory() as tmp_dir_str:
-                        written, failures = await convert_one(
-                            unit.source_path,
-                            Path(tmp_dir_str),
-                            raw_file_repo=raw_file_repo,
-                            page_repo=page_repo,
-                            _relative_prefix=relative_prefix,
-                            context_instructions=context_instructions,
-                        )
+                # converter_output_dir=None -> convert_one() keeps the converted
+                # document in memory only (no JSON serialised to disk).
+                written, failures = await convert_one(
+                    unit.source_path,
+                    Path(converter_output_dir) if converter_output_dir else None,
+                    raw_file_repo=raw_file_repo,
+                    page_repo=page_repo,
+                    _relative_prefix=relative_prefix,
+                    context_instructions=context_instructions,
+                )
                 if failures:
                     stage_results["preprocess"] = DocumentResult(
                         unit.document_name_hint, 0, 1, [failures[0][1]]
@@ -901,6 +874,7 @@ async def _process_document_unit(
                     stage_results["preprocess"] = DocumentResult(unit.document_name_hint, 0, 0, [])
                     return UnitResult(current_name, stage_results, None, None)
                 intermediate_doc = written[0][2]
+                del written  # only intermediate_doc is needed from here on
                 stage_results["preprocess"] = DocumentResult(unit.document_name_hint, 1, 0, [])
 
             # ── Stage: extraction ──────────────────────────────────────
@@ -934,6 +908,9 @@ async def _process_document_unit(
                     return UnitResult(current_name, stage_results, "extraction", None)
                 current_name = doc_obj.document_name
                 stage_results["extraction"] = DocumentResult(current_name, 1, 0, [])
+            # The intermediate document is only needed by Stage 1: release it so
+            # it does not stay alive through ingestion/annotation/entity extraction.
+            intermediate_doc = None
 
             # ── Stage: ingestion ───────────────────────────────────────
             if "ingestion" in effective_stages:
@@ -962,6 +939,9 @@ async def _process_document_unit(
                     stage_results["ingestion"] = DocumentResult(current_name, 0, 1, [str(exc)])
                     return UnitResult(current_name, stage_results, "ingestion", None)
                 stage_results["ingestion"] = DocumentResult(current_name, 1, 0, [])
+            # The extracted document is only needed by Stage 2: release it before
+            # the (potentially long) annotation/entity_extraction stages.
+            doc_obj = None
 
             # ── pre_ingested passthrough (no preprocess/extraction/ingestion
             # applies to this kind — the ifs above simply never matched) ──

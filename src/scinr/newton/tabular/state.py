@@ -10,11 +10,17 @@ if TYPE_CHECKING:
 
 
 class TabularFileData(TypedDict):
-    """All data read from one sheet of a tabular file."""
+    """Metadata of one sheet of a tabular file.
 
+    Deliberately carries **no data rows**: the rows are streamed from
+    ``file_path`` in batches when the sheet is written (see
+    ``tabular.reader.iter_sheet_batches``), so the LangGraph state stays small
+    and independent of the number of rows.
+    """
+
+    file_path: str               # source file the batches are re-read from
     sheet_name: str
     headers: list
-    all_rows: list
     total_rows: int
     preview: dict                # TabularPreview at runtime
     preview_markdown: str        # GFM markdown of the preview, ready for LLM prompts

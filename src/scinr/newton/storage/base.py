@@ -7,7 +7,9 @@ pipeline can remain backend-agnostic.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from scinr.newton.storage.models import ConvertedPageRecord
 
@@ -42,7 +44,46 @@ class RawFileRepository(ABC):
         str
             El ``raw_file_id``: representación en cadena del identificador
             único asignado por el backend de almacenamiento.
+
+        Notes
+        -----
+        Los backends propios pueden sobrescribir además :meth:`store_file`
+        para subir el fichero en streaming sin materializarlo en memoria.
         """
+
+    async def store_file(
+        self,
+        path: Path,
+        filename: str,
+        content_type: str,
+        folder_path: str | None,
+    ) -> str:
+        """Persiste el fichero situado en *path* y devuelve su raw_file_id.
+
+        Implementación por defecto: lee el fichero completo y delega en
+        :meth:`store`. Los backends capaces de hacer streaming (p.ej. MongoDB/GridFS)
+        la sobrescriben para no mantener el fichero entero en memoria. No es
+        abstracto para no romper backends propios que solo implementen :meth:`store`.
+
+        Parameters
+        ----------
+        path:
+            Ruta del fichero a persistir.
+        filename, content_type, folder_path:
+            Igual que en :meth:`store`.
+
+        Returns
+        -------
+        str
+            El ``raw_file_id`` asignado por el backend.
+        """
+        content = await asyncio.to_thread(path.read_bytes)
+        return await self.store(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+            folder_path=folder_path,
+        )
 
     @abstractmethod
     async def delete(self, raw_file_id: str) -> None:
