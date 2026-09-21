@@ -6,12 +6,23 @@ máximo de páginas y de tamaño en bytes por chunk, para poder enviarlos
 por separado a APIs con límites (p.ej. Mistral OCR: máx. 1000 páginas /
 50 MB por solicitud). Toda la lógica aquí es pura y local — no hace
 llamadas de red.
+
+Hay dos APIs:
+
+* ``split_pdf(bytes, ...)`` — basada en bytes; materializa **todos** los
+  chunks en una lista. Útil para PDFs pequeños o ya en memoria.
+* ``probe_pdf(path)`` + ``iter_pdf_chunks(path, ...)`` — basada en ruta y
+  perezosa: produce **un chunk cada vez** y nunca lee el fichero completo,
+  de modo que el pico de memoria depende del tamaño de un chunk y no del
+  del archivo (un PDF de varios GB usa la misma memoria que uno de 100 MB).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 
@@ -91,6 +102,98 @@ def needs_splitting(pdf_bytes: bytes, max_pages: int, max_bytes: int) -> bool:
     if len(pdf_bytes) > max_bytes:
         return True
     return count_pdf_pages(pdf_bytes) > max_pages
+
+
+def probe_pdf(path: Path) -> tuple[int, int]:
+    """Return ``(size_bytes, total_pages)`` of the PDF at *path* without reading it whole.
+
+    Only the file size (``stat``) and the page index (via a ``PdfReader`` over
+    the file handle, which reads the cross-reference data, not the page
+    contents) are needed to decide whether the document must be split.
+
+    Raises
+    ------
+    ConversionError
+        If the file cannot be read, or pypdf cannot open it (corrupt or
+        encrypted PDF).
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ConversionError(f"Cannot read PDF file {path}: {exc}") from exc
+    try:
+        with path.open("rb") as fh:
+            total_pages = len(PdfReader(fh).pages)
+    except Exception as exc:
+        raise ConversionError(f"Cannot read PDF to count pages: {exc}") from exc
+    return size, total_pages
+
+
+def initial_window_pages(size_bytes: int, total_pages: int, max_pages: int, max_bytes: int) -> int:
+    """First-guess pages per window, from the document's average bytes per page.
+
+    Aims at ~80 % of *max_bytes* per window so that, in the common case, a
+    window already fits and is never serialised twice. Capped by *max_pages*.
+    A window that still exceeds *max_bytes* once serialised is bisected.
+    """
+    if total_pages <= 0 or size_bytes <= 0:
+        return max(1, max_pages)
+    avg_page_bytes = size_bytes / total_pages
+    return max(1, min(max_pages, int(0.8 * max_bytes / avg_page_bytes)))
+
+
+def iter_pdf_chunks(
+    path: Path,
+    max_pages: int,
+    max_bytes: int,
+    *,
+    source_name: str = "<document>",
+) -> Iterator[PdfChunk]:
+    """Lazily yield the chunks of the PDF at *path*, one at a time.
+
+    Same contract as :func:`split_pdf` (contiguous chunks covering ``[0, N)``
+    without gaps or overlaps, each within *max_pages* and *max_bytes*), but:
+
+    * the file is never read whole: a fresh ``PdfReader`` is opened on the
+      file for each window of pages and closed when the window is done
+      (pypdf caches the content of every page it reads, so reusing one reader
+      would make memory grow with the file);
+    * chunks are produced on demand — the consumer must send a chunk and drop
+      it before asking for the next one;
+    * the first window is sized from the average bytes per page (see
+      :func:`initial_window_pages`) instead of *max_pages*, so a window is not
+      serialised just to be discarded and bisected.
+
+    Parameters
+    ----------
+    path:
+        PDF file to split.
+    max_pages, max_bytes, source_name:
+        As in :func:`split_pdf`.
+
+    Raises
+    ------
+    PdfSplitError
+        If a single page exceeds ``max_bytes`` once serialised. Unlike
+        :func:`split_pdf`, this can be raised *after* earlier chunks were
+        already yielded.
+    ConversionError
+        If pypdf fails to open the document or to read/serialise any page
+        (e.g. an encrypted PDF that opens but fails when its pages are read).
+    """
+    try:
+        size_bytes, total_pages = _probe_raw(path)
+        window = initial_window_pages(size_bytes, total_pages, max_pages, max_bytes)
+        for start in range(0, total_pages, window):
+            end = min(start + window, total_pages)
+            with path.open("rb") as fh:
+                reader = PdfReader(fh)
+                yield from _iter_bisect_window(reader, start, end, max_bytes, source_name)
+    except PdfSplitError:
+        # Intencional — no envolver de nuevo.
+        raise
+    except Exception as exc:
+        raise ConversionError(f"Cannot split PDF {source_name}: {exc}") from exc
 
 
 def split_pdf(
@@ -187,6 +290,39 @@ def _bisect_window(
     return _bisect_window(reader, start, medio, max_bytes, source_name) + _bisect_window(
         reader, medio, end, max_bytes, source_name
     )
+
+
+def _probe_raw(path: Path) -> tuple[int, int]:
+    """``(size_bytes, total_pages)`` letting native errors propagate (the
+    caller wraps them with its own message)."""
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        return size, len(PdfReader(fh).pages)
+
+
+def _iter_bisect_window(
+    reader: PdfReader,
+    start: int,
+    end: int,
+    max_bytes: int,
+    source_name: str,
+) -> Iterator[PdfChunk]:
+    """Lazy version of :func:`_bisect_window`: serialise [start, end); if it
+    exceeds max_bytes, bisect it and yield each half in order."""
+    pdf_bytes = _serialize_page_range(reader, start, end)
+    if len(pdf_bytes) <= max_bytes:
+        yield PdfChunk(start, end, pdf_bytes)
+        return
+    if end - start == 1:
+        raise PdfSplitError(
+            f"La página {start} de {source_name} pesa {len(pdf_bytes)} bytes "
+            f"tras serializarse sola, lo cual excede el límite de {max_bytes} "
+            f"bytes. No puede subdividirse más."
+        )
+    del pdf_bytes  # too big: drop it before serialising the halves
+    medio = start + (end - start) // 2
+    yield from _iter_bisect_window(reader, start, medio, max_bytes, source_name)
+    yield from _iter_bisect_window(reader, medio, end, max_bytes, source_name)
 
 
 def _serialize_page_range(reader: PdfReader, start: int, end: int) -> bytes:

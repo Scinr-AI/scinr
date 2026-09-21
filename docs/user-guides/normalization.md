@@ -130,7 +130,7 @@ class NormalizationEntry:
     target_type: type[BaseModel]  # e.g. NormalizedAddress
     source_values: dict[str, object]  # e.g. {"raw_address": "123 Main St..."}
     unique_key: str             # "{target_type_name}:{md5_hash}"
-    row_indices: list[int]      # row indices from pre-scan
+    row_indices: list[int]      # deprecated: no longer populated (rows are streamed, not indexed)
 ```
 
 The **unique key** is constructed as `{target_type.__name__}:{md5_hash}` where the MD5 hash is computed from the sorted, lowercased string representation of the source values. This ensures identical source values across different rows produce the same key.

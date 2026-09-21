@@ -268,9 +268,9 @@ When `tabular_delimiter` is `None` (default), the pipeline uses Python's `csv.Sn
 
 CSV files are read with UTF-8-BOM awareness (`utf-8-sig` encoding). The reader:
 
-1. Reads the entire file content.
-2. Auto-detects delimiter via `csv.Sniffer` on first 4096 bytes.
-3. Parses all rows, skipping empty rows.
+1. Auto-detects delimiter via `csv.Sniffer` on the first 4096 characters, then rewinds.
+2. Streams the file once (it is never loaded as a whole text), skipping empty rows.
+3. Parses each row.
 4. Treats row 0 as headers, rows 1+ as data.
 5. Converts all cell values to strings (strips whitespace).
 6. **Deduplicates headers** — if duplicate column names exist, appends `_2`, `_3`, etc. to subsequent occurrences.
@@ -307,6 +307,14 @@ For LLM calls (classify_theme, decide_model, map_columns), the pipeline generate
 - **> 5 rows:** rows at indices 0, ~25%, ~50%, ~75%, and last row.
 
 The preview is rendered as a GFM Markdown table for LLM context.
+
+### 5.4 Memory: rows are streamed, not held in the graph state
+
+The pipeline never keeps a sheet's data rows in memory. `load_sheets` only *scans* each sheet (headers, row count and the preview above — a sheet with more than 5 rows is read twice to pick the preview rows), so the LangGraph state carries no rows. The rows are re-read from the source file in batches of 500 when the sheet is written, so the memory of the write path depends on the batch, not on the number of rows. With normalization enabled the file is read in three sequential passes (scan the normalization keys → normalize the unique keys → write). Memory is O(batch + unique normalization keys); time and LLM calls still grow with the number of unique values.
+
+> **The source file must not be modified while it is being processed:** it is read several times, and the passes must see the same rows.
+
+The materialising helpers `read_csv()`, `read_xlsx()` and `read_tabular_file()` still exist and return `all_rows`; the streaming API is `scan_tabular_file()` and `iter_sheet_batches()`.
 
 ---
 

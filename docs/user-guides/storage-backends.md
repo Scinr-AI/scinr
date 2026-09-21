@@ -399,6 +399,16 @@ class RawFileRepository(ABC):
         """Store a raw binary file and return its ID."""
         ...
 
+    async def store_file(
+        self,
+        path: Path,
+        filename: str,
+        content_type: str,
+        folder_path: str | None,
+    ) -> str:
+        """Optional. Store the file at `path`. Default: read it fully and call `store()`."""
+        ...
+
     @abstractmethod
     async def delete(self, raw_file_id: str) -> None:
         """Delete the binary and its metadata. Must be idempotent (no error if missing)."""
@@ -429,6 +439,8 @@ class PageRepository(ABC):
 ```
 
 > All four methods are `@abstractmethod` — a custom backend must implement `store` + `delete` on `RawFileRepository` and `store_page` + `get_pages` + `delete_pages` on `PageRepository`, or it cannot be instantiated. `delete` / `delete_pages` are used by `delete_document()` and `update_mode=True` re-ingestion.
+
+> `store_file` is **optional** (not abstract). The pipeline calls `store_file(path=...)`, whose default implementation reads the whole file and delegates to `store()`, so a backend that only implements `store()` keeps working. Override `store_file` if your backend can upload from a file handle (S3 multipart, Azure Blob, etc.): the built-in `mongodb` backend does this to stream files to GridFS without loading them into memory, which matters for large PDFs. With `storage_backend="none"` the file is never opened.
 
 ### Implementing a Custom Backend
 

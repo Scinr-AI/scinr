@@ -332,3 +332,80 @@ class TestInvalidErrorStrategyOverride:
             await converter.convert(source)
 
         assert mock_post.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 16. Memory-friendly path: the whole file is never read into memory
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingNeverReadsWholeFile:
+    async def test_split_path_does_not_call_read_bytes(self, tmp_path, mocker, monkeypatch):
+        source = _write_pdf(tmp_path, num_pages=5)
+        mocker.patch(
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            side_effect=_side_effect_from([_ok_response(2), _ok_response(2), _ok_response(1)]),
+        )
+
+        def _boom(self):
+            raise AssertionError("Path.read_bytes must not be called")
+
+        monkeypatch.setattr(Path, "read_bytes", _boom)
+
+        converter = PdfConverter(
+            api_key="dummy-test-key", safe_max_pages=2, safe_max_bytes=10_000_000
+        )
+        doc = await converter.convert(source)
+
+        assert [p.index for p in doc.pages] == [0, 1, 2, 3, 4]
+
+    async def test_fail_fast_does_not_serialise_chunks_after_the_failure(
+        self, tmp_path, mocker, monkeypatch
+    ):
+        from scinr.newton.converters import pdf_splitter
+
+        source = _write_pdf(tmp_path, num_pages=5)
+        mocker.patch(
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            side_effect=_side_effect_from(
+                [_ok_response(2), _FakeResponse(400, text="bad request")]
+            ),
+        )
+        real = pdf_splitter._serialize_page_range
+        serialised: list[tuple[int, int]] = []
+
+        def counting(reader, start, end):
+            serialised.append((start, end))
+            return real(reader, start, end)
+
+        monkeypatch.setattr(pdf_splitter, "_serialize_page_range", counting)
+
+        converter = PdfConverter(
+            api_key="dummy-test-key",
+            safe_max_pages=2,
+            safe_max_bytes=10_000_000,
+            error_strategy="fail_fast",
+        )
+        with pytest.raises(ConversionError) as exc_info:
+            await converter.convert(source)
+
+        assert "[2, 4)" in str(exc_info.value)
+        # chunks 1 and 2 were serialised; chunk 3 ([4, 5)) never was.
+        assert serialised == [(0, 2), (2, 4)]
+
+    async def test_pdf_split_error_aborts_even_in_best_effort(self, tmp_path, mocker):
+        source = _write_pdf(tmp_path, num_pages=3)
+        mock_post = mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock)
+
+        converter = PdfConverter(
+            api_key="dummy-test-key",
+            safe_max_pages=3,
+            safe_max_bytes=100,  # a single blank page already exceeds this
+            error_strategy="best_effort",
+        )
+        with pytest.raises(ConversionError, match="página 0"):
+            await converter.convert(source)
+
+        assert mock_post.call_count == 0

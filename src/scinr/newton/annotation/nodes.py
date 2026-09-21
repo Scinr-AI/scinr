@@ -133,20 +133,22 @@ async def _decide_model(
     node_id: str,
     theme: str,
     user_context: str,
-    semaphore: asyncio.Semaphore,
 ) -> tuple[AnnotationDecision | None, str | None]:
     """Run the LLM annotation decision for a single node.
 
     Resolves the theme-specific catalog, builds the prompt, calls the LLM,
-    and runs the repair loop on parse failure. The semaphore wraps the entire
-    LLM + repair block.
+    and runs the repair loop on parse failure.
+
+    The caller must already hold the LLM (Bedrock) semaphore: this function
+    does not acquire it, because ``asyncio.Semaphore`` is not reentrant and
+    ``process_single_annotation_node`` takes the slot *before* building the
+    context/prompt so that only ``llm_concurrency`` nodes hold that memory.
 
     Args:
         ctx: NodeContext-shaped dict as returned by _fetch_node_context.
         node_id: Node identifier string (for logging).
         theme: Theme path string (e.g. "pharmaceutical").
         user_context: Optional freeform context string to prepend to the human message.
-        semaphore: asyncio.Semaphore controlling Bedrock concurrency.
 
     Returns:
         (decision, error) — exactly one of the two will be non-None on failure.
@@ -166,38 +168,37 @@ async def _decide_model(
         AnnotationDecision, include_raw=True
     )
 
-    async with semaphore:
-        result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
-        parsed: AnnotationDecision | None = result["parsed"]
+    result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
+    parsed: AnnotationDecision | None = result["parsed"]
 
-        if parsed is not None:
-            logger.info(
-                "_decide_model: decision for node '%s' (theme=%s, class=%s, confidence=%s)",
-                node_id, theme_node.path, parsed.matched_model_class, parsed.confidence,
-            )
-            return parsed, None
-
-        # Parse failed — enter repair loop
-        current_raw = extract_raw_payload(result["raw"])
-        current_error = (
-            str(result["parsing_error"]) if result.get("parsing_error") else "Unknown parsing error"
+    if parsed is not None:
+        logger.info(
+            "_decide_model: decision for node '%s' (theme=%s, class=%s, confidence=%s)",
+            node_id, theme_node.path, parsed.matched_model_class, parsed.confidence,
         )
-        logger.warning(
-            "_decide_model: parse failed for node '%s', starting repair loop", node_id
-        )
+        return parsed, None
 
-        repaired = await run_repair_loop(
-            schema=AnnotationDecision,
-            initial_raw=current_raw,
-            initial_error=current_error,
-            context_label=node_id,
-        )
-        if repaired is not None:
-            logger.info("_decide_model: repair successful for node '%s'", node_id)
-            return repaired, None
+    # Parse failed — enter repair loop
+    current_raw = extract_raw_payload(result["raw"])
+    current_error = (
+        str(result["parsing_error"]) if result.get("parsing_error") else "Unknown parsing error"
+    )
+    logger.warning(
+        "_decide_model: parse failed for node '%s', starting repair loop", node_id
+    )
 
-        logger.error("_decide_model: all repair attempts exhausted for node '%s'", node_id)
-        return None, f"decide_model failed for node {node_id}"
+    repaired = await run_repair_loop(
+        schema=AnnotationDecision,
+        initial_raw=current_raw,
+        initial_error=current_error,
+        context_label=node_id,
+    )
+    if repaired is not None:
+        logger.info("_decide_model: repair successful for node '%s'", node_id)
+        return repaired, None
+
+    logger.error("_decide_model: all repair attempts exhausted for node '%s'", node_id)
+    return None, f"decide_model failed for node {node_id}"
 
 
 # ── Private helper: write decision ────────────────────────────────────────────
@@ -250,10 +251,12 @@ async def process_single_annotation_node(
     Encapsulates: fetch context → read theme → decide model → write decision.
     Intended for use with asyncio.gather() for intra-document parallelism.
 
-    The Bedrock call (decide_model + repair loop) is executed while holding
-    ``bedrock_semaphore``, bounding total concurrent Bedrock calls.
-    Neo4j reads and writes are each wrapped in ``get_neo4j_semaphore()`` to
-    prevent connection pool saturation under parallel load.
+    ``bedrock_semaphore`` is held from the start of the node (context fetch,
+    prompt building and the LLM + repair loop), bounding both the concurrent
+    Bedrock calls and the number of per-node contexts/prompts alive at once.
+    The Neo4j write happens after the slot is released. Neo4j reads and writes
+    are each wrapped in ``get_neo4j_semaphore()`` to prevent connection pool
+    saturation under parallel load.
 
     Args:
         node_data: Node dict as returned by fetch_nodes_to_annotate.
@@ -269,22 +272,30 @@ async def process_single_annotation_node(
     driver = get_async_driver()
     neo4j_semaphore = get_neo4j_semaphore()
 
-    # ── Fetch context (bounded by Neo4j semaphore) ────────────────────────────
-    # The semaphore is acquired here at the root level to bound root-node
-    # concurrency; individual session opens inside _fetch_node_context are also
-    # guarded by the same semaphore for the recursive sub-queries.
-    async with neo4j_semaphore:
-        ctx = await _fetch_node_context(node_data, driver)
-    if ctx is None:
-        return {"node_id": node_id, "decision": None, "error": f"fetch_context failed for {node_id}"}
+    # The LLM slot is taken FIRST so that the context, prompt and messages of a
+    # node only exist while it holds one of the ``llm_concurrency`` slots
+    # (otherwise every node of the document would build them up front and wait
+    # here, holding them). Lock order is always LLM -> Neo4j, never the reverse.
+    async with bedrock_semaphore:
+        # ── Fetch context (bounded by Neo4j semaphore) ────────────────────────
+        async with neo4j_semaphore:
+            ctx = await _fetch_node_context(node_data, driver)
+        if ctx is None:
+            return {
+                "node_id": node_id,
+                "decision": None,
+                "error": f"fetch_context failed for {node_id}",
+            }
 
-    theme = _read_theme(node_data)
-    decision, error = await _decide_model(ctx, node_id, theme, user_context, bedrock_semaphore)
+        theme = _read_theme(node_data)
+        decision, error = await _decide_model(ctx, node_id, theme, user_context)
 
     if decision is not None:
-        # ── Write decision (bounded by Neo4j semaphore) ───────────────────────
+        # ── Write decision (outside the LLM slot, bounded by Neo4j semaphore) ─
         async with neo4j_semaphore:
-            write_error = await _write_decision(driver, node_data["full_id"], decision, document_name, node_id)
+            write_error = await _write_decision(
+                driver, node_data["full_id"], decision, document_name, node_id
+            )
         if write_error:
             error = write_error
 

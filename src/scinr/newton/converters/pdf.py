@@ -10,7 +10,10 @@ Para PDFs que exceden los límites de la API de Mistral OCR (máx. 1000
 páginas / 50 MB por solicitud), el documento se divide automáticamente
 en chunks contiguos (ver ``pdf_splitter.py``), cada uno se envía por
 separado, y los resultados se reúnen de forma transparente preservando
-el índice de página absoluto del documento original. El manejo de
+el índice de página absoluto del documento original. La división es
+perezosa: los chunks se generan de uno en uno directamente desde el
+fichero (nunca se lee el PDF completo en memoria), por lo que el pico de
+memoria depende del tamaño de un chunk, no del del archivo. El manejo de
 errores por chunk es configurable vía ``mistral_ocr_error_strategy``
 (``"fail_fast"`` por defecto, o ``"best_effort"``).
 """
@@ -34,7 +37,7 @@ from scinr.newton.converters.base import (
     PageDimensions,
     PageImage,
 )
-from scinr.newton.converters.pdf_splitter import PdfSplitError, needs_splitting, split_pdf
+from scinr.newton.converters.pdf_splitter import iter_pdf_chunks, probe_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,9 @@ class PdfConverter(BaseConverter):
     Si el PDF excede los límites configurados de páginas o bytes, se
     divide en chunks contiguos (ver :mod:`pdf_splitter`), cada uno se
     envía por separado a la API, y las páginas resultantes se reúnen
-    preservando el índice absoluto del documento original.
+    preservando el índice absoluto del documento original. Los chunks se
+    generan de uno en uno directamente desde el fichero (``iter_pdf_chunks``),
+    de modo que solo hay un chunk en memoria a la vez.
 
     Parameters
     ----------
@@ -106,12 +111,13 @@ class PdfConverter(BaseConverter):
 
         Nota: esta estrategia solo aplica a fallos de red/API por chunk
         (reintentos agotados, errores HTTP no reintentables) sobre chunks
-        ya generados por ``split_pdf()``. NO cubre el caso en que la
-        propia partición inicial falla estructuralmente
+        ya generados por ``iter_pdf_chunks()``. NO cubre el caso en que la
+        propia partición falla estructuralmente
         (:class:`PdfSplitError`, una página individual que excede
         ``safe_max_bytes`` incluso aislada) — en ese caso el documento
         aborta siempre, independientemente del ``error_strategy``
-        configurado.
+        configurado. Como los chunks se generan bajo demanda, ese error
+        puede detectarse tras haber enviado ya chunks anteriores a la API.
     """
 
     supported_extensions: frozenset[str] = frozenset({"pdf"})
@@ -200,44 +206,52 @@ class PdfConverter(BaseConverter):
             )
 
         logger.info("Reading PDF: %s", source.name)
-        try:
-            pdf_bytes = source.read_bytes()
-        except OSError as exc:
-            raise ConversionError(f"Cannot read PDF file {source}: {exc}") from exc
+        # Only the size and the page index are read here — never the whole file.
+        size_bytes, total_pages_original = probe_pdf(source)
 
         limits = self._resolve_limits()
 
-        must_split = needs_splitting(pdf_bytes, limits.safe_max_pages, limits.safe_max_bytes)
+        must_split = (
+            size_bytes > limits.safe_max_bytes or total_pages_original > limits.safe_max_pages
+        )
 
         if not must_split:
+            # Within the API limits (<= safe_max_bytes): read it once and send it as is.
+            try:
+                with source.open("rb") as fh:
+                    pdf_bytes = fh.read()
+            except OSError as exc:
+                raise ConversionError(f"Cannot read PDF file {source}: {exc}") from exc
             pages = await self._convert_chunk(
                 pdf_bytes, api_key, source.name, page_offset=0, limits=limits
             )
+            del pdf_bytes
             logger.info("Converted %d page(s) from %s", len(pages), source.name)
             return IntermediateDocument(pages=pages)
 
-        try:
-            chunks = split_pdf(
-                pdf_bytes, limits.safe_max_pages, limits.safe_max_bytes, source_name=source.name
-            )
-        except PdfSplitError:
-            # PdfSplitError ya es una ConversionError; se deja propagar tal cual.
-            raise
         logger.info(
-            "PDF %s excede los límites seguros; dividido en %d chunk(s): %s",
+            "PDF %s excede los límites seguros (%d páginas, %d bytes); se procesará por "
+            "chunks generados de uno en uno.",
             source.name,
-            len(chunks),
-            ", ".join(f"[{c.start_page}-{c.end_page - 1}]" for c in chunks),
+            total_pages_original,
+            size_bytes,
         )
 
-        total_pages_original = chunks[-1].end_page if chunks else 0
         all_pages: list[IntermediatePage] = []
         missing_page_ranges: list[tuple[int, int]] = []
 
-        for i, chunk in enumerate(chunks):
+        # PdfSplitError (ya es una ConversionError) se deja propagar tal cual desde
+        # el generador; puede aparecer tras haber enviado chunks anteriores.
+        for i, chunk in enumerate(
+            iter_pdf_chunks(
+                source, limits.safe_max_pages, limits.safe_max_bytes, source_name=source.name
+            ),
+            start=1,
+        ):
+            start_page, end_page = chunk.start_page, chunk.end_page
             etiqueta = (
-                f"chunk {i + 1}/{len(chunks)} (páginas originales "
-                f"{chunk.start_page}-{chunk.end_page - 1} de {source.name})"
+                f"chunk {i} (páginas originales "
+                f"{start_page}-{end_page - 1} de {source.name})"
             )
             logger.info(
                 "Enviando %s: %d página(s), %d bytes",
@@ -250,7 +264,7 @@ class PdfConverter(BaseConverter):
                     chunk.pdf_bytes,
                     api_key,
                     etiqueta,
-                    page_offset=chunk.start_page,
+                    page_offset=start_page,
                     limits=limits,
                     error_label=etiqueta,
                 )
@@ -261,14 +275,17 @@ class PdfConverter(BaseConverter):
                         etiqueta,
                         exc,
                     )
-                    missing_page_ranges.append((chunk.start_page, chunk.end_page))
+                    missing_page_ranges.append((start_page, end_page))
                     continue
                 raise ConversionError(
                     f"Fallo al convertir {etiqueta}. Rango de páginas afectado: "
-                    f"[{chunk.start_page}, {chunk.end_page}) de {total_pages_original} "
+                    f"[{start_page}, {end_page}) de {total_pages_original} "
                     f"páginas totales en {source.name}. Error original: {exc}\n"
                     f"{_BEST_EFFORT_HINT}"
                 ) from exc
+            finally:
+                # Drop the chunk before the generator serialises the next one.
+                del chunk
             all_pages.extend(paginas_chunk)
 
         if not missing_page_ranges:

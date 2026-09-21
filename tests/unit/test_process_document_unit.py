@@ -652,27 +652,17 @@ class TestOnPartialFailureGatesAnnotationAndEntityExtraction:
         mock_run_entity_extraction.assert_awaited_once()
 
 
-class TestPreprocessTempDirCleanup:
-    """Regression tests for the reviewer-flagged BLOCKING bug: with
-    `converter_output_dir=None` (the documented default for
-    `run_pipeline(input_raw="files/")`), the old code created a persistent
-    directory via `tempfile.mkdtemp()` for every `raw_file` unit and never
-    removed it — one orphaned directory (holding the full converted-document
-    JSON) leaked into the filesystem's temp folder per document, forever.
-
-    The fix scopes a `tempfile.TemporaryDirectory()` context manager around
-    just the `convert_one()` call, so it is removed immediately afterwards
-    regardless of success or failure — these tests assert that directory is
-    really gone from disk once `_process_document_unit()` returns.
+class TestPreprocessInMemoryOnly:
+    """With `converter_output_dir=None` (the documented default for
+    `run_pipeline(input_raw="files/")`) Stage 0 must not serialise the converted
+    document to disk at all: `convert_one()` is called with `output_dir=None`
+    and no temporary directory is created (the old implementation serialised
+    the whole document to a temp dir that was deleted right away).
     """
 
-    async def test_no_orphaned_tempdir_left_after_successful_unit(self, monkeypatch):
-        """The directory passed to `convert_one()` (when
-        `converter_output_dir=None`) must no longer exist on disk once
-        `_process_document_unit()` returns, and no new entries are left
-        behind under the system temp root.
-        """
-        unit = DocumentUnit(
+    @staticmethod
+    def _unit() -> DocumentUnit:
+        return DocumentUnit(
             kind="raw_file",
             source_path=Path("/tmp/does-not-matter.pdf"),
             doc_path="doc1",
@@ -680,100 +670,82 @@ class TestPreprocessTempDirCleanup:
             document_name_hint="doc1",
         )
 
-        captured_out_dir: Path | None = None
+    async def test_convert_one_receives_none_and_no_tempdir_entries_appear(self, monkeypatch):
+        unit = self._unit()
+        captured: list[object] = []
 
         async def _fake_convert_one(entry, output_dir, **kwargs):
-            nonlocal captured_out_dir
-            captured_out_dir = output_dir
-            # Simulate convert_one() actually writing something to the
-            # temp dir it was handed, so the test can prove that content
-            # is gone afterwards too (not just an empty directory).
-            (output_dir / "converted.json").write_text("{}", encoding="utf-8")
-            intermediate_doc = MagicMock(name="IntermediateDocument")
-            return ([(entry, output_dir / "converted.json", intermediate_doc)], [])
+            captured.append(output_dir)
+            return ([(entry, None, MagicMock(name="IntermediateDocument"))], [])
 
-        monkeypatch.setattr(
-            "scinr.newton.converters.main.convert_one",
-            AsyncMock(side_effect=_fake_convert_one),
-        )
+        monkeypatch.setattr("scinr.newton.converters.main.convert_one", _fake_convert_one)
 
         before = set(Path(tempfile.gettempdir()).iterdir())
-
         result = await _process_document_unit(
             unit,
             **_base_kwargs(effective_stages=["preprocess"], converter_output_dir=None),
         )
-
         after = set(Path(tempfile.gettempdir()).iterdir())
 
         assert result.stage_results["preprocess"] == DocumentResult("doc1", 1, 0, [])
-        assert captured_out_dir is not None
-        assert not captured_out_dir.exists(), (
-            f"Temp dir '{captured_out_dir}' passed to convert_one() was not "
-            "cleaned up after _process_document_unit() returned."
-        )
-        assert after - before == set(), (
-            "New orphaned entries were left behind in the system temp "
-            f"directory: {after - before!r}"
-        )
-
-    async def test_no_orphaned_tempdir_left_when_convert_one_raises(self, monkeypatch):
-        """Cleanup must also happen when `convert_one()` raises an
-        unexpected exception — `TemporaryDirectory()`'s `__exit__` runs
-        regardless, unlike the old manual (and absent) `mkdtemp()` cleanup.
-        """
-        unit = DocumentUnit(
-            kind="raw_file",
-            source_path=Path("/tmp/does-not-matter.pdf"),
-            doc_path="doc1",
-            relative_dir=Path("."),
-            document_name_hint="doc1",
-        )
-
-        captured_out_dir: Path | None = None
-
-        async def _raising_convert_one(entry, output_dir, **kwargs):
-            nonlocal captured_out_dir
-            captured_out_dir = output_dir
-            raise RuntimeError("boom: unexpected converter crash")
-
-        monkeypatch.setattr(
-            "scinr.newton.converters.main.convert_one",
-            AsyncMock(side_effect=_raising_convert_one),
-        )
-
-        before = set(Path(tempfile.gettempdir()).iterdir())
-
-        result = await _process_document_unit(
-            unit,
-            **_base_kwargs(effective_stages=["preprocess"], converter_output_dir=None),
-        )
-
-        after = set(Path(tempfile.gettempdir()).iterdir())
-
-        # _process_document_unit()'s own outer catch-all must convert this
-        # into a fatal_error UnitResult, not let the exception escape.
-        assert result.fatal_error is not None
-        assert "boom" in result.fatal_error
-        assert captured_out_dir is not None
-        assert not captured_out_dir.exists()
+        assert captured == [None]
         assert after - before == set()
 
-    async def test_uses_temporarydirectory_context_manager(self, monkeypatch):
-        """Pin the mechanism itself: `_process_document_unit()` must use
-        `tempfile.TemporaryDirectory()` as a context manager (its
-        `__enter__`/`__exit__` are what guarantees cleanup, including on
-        exception) rather than a bare, uncleaned `tempfile.mkdtemp()` call.
+    async def test_explicit_converter_output_dir_is_forwarded_as_path(self, monkeypatch, tmp_path):
+        unit = self._unit()
+        captured: list[object] = []
 
-        Note: `TemporaryDirectory.__init__()` calls `mkdtemp()` internally
-        (that is how it creates the directory in the first place) — the bug
-        was never "calling `mkdtemp()` at all", it was "creating a directory
-        with no matching cleanup call". So this test asserts the *context
-        manager* protocol is exercised (`__exit__` called exactly once),
-        which is what actually guarantees the directory is removed,
-        matching the two behavioral cleanup tests above.
-        """
+        async def _fake_convert_one(entry, output_dir, **kwargs):
+            captured.append(output_dir)
+            return ([(entry, output_dir / "x.json", MagicMock())], [])
+
+        monkeypatch.setattr("scinr.newton.converters.main.convert_one", _fake_convert_one)
+
+        await _process_document_unit(
+            unit,
+            **_base_kwargs(effective_stages=["preprocess"], converter_output_dir=str(tmp_path)),
+        )
+
+        assert captured == [tmp_path]
+
+    async def test_convert_one_raising_becomes_fatal_error_without_tempdir_leak(
+        self, monkeypatch
+    ):
+        unit = self._unit()
+
+        async def _raising_convert_one(entry, output_dir, **kwargs):
+            raise RuntimeError("boom: unexpected converter crash")
+
+        monkeypatch.setattr("scinr.newton.converters.main.convert_one", _raising_convert_one)
+
+        before = set(Path(tempfile.gettempdir()).iterdir())
+        result = await _process_document_unit(
+            unit,
+            **_base_kwargs(effective_stages=["preprocess"], converter_output_dir=None),
+        )
+        after = set(Path(tempfile.gettempdir()).iterdir())
+
+        assert result.fatal_error is not None
+        assert "boom" in result.fatal_error
+        assert after - before == set()
+
+    def test_pipeline_module_no_longer_uses_tempfile(self):
         import scinr.newton.pipeline as pipeline_mod
+
+        assert not hasattr(pipeline_mod, "tempfile")
+
+
+class TestArtifactsReleasedPerStage:
+    """Each per-document artifact is dropped as soon as its stage is done, so it
+    does not stay alive through the (long) later stages. The test keeps only
+    weak references and asserts them from inside the fake next-stage calls.
+    """
+
+    async def test_intermediate_and_extracted_docs_are_freed_before_later_stages(
+        self, monkeypatch
+    ):
+        import gc
+        import weakref
 
         unit = DocumentUnit(
             kind="raw_file",
@@ -783,35 +755,68 @@ class TestPreprocessTempDirCleanup:
             document_name_hint="doc1",
         )
 
-        intermediate_doc = MagicMock(name="IntermediateDocument")
-        mock_convert_one = AsyncMock(
-            return_value=([(unit.source_path, Path("/tmp/out.json"), intermediate_doc)], [])
-        )
-        monkeypatch.setattr("scinr.newton.converters.main.convert_one", mock_convert_one)
+        class _Intermediate:
+            pass
 
-        real_temporary_directory = pipeline_mod.tempfile.TemporaryDirectory
-        instances: list[MagicMock] = []
+        class _Extracted:
+            document_name = "doc1"
 
-        def _tracking_temporary_directory(*args, **kwargs):
-            real_instance = real_temporary_directory(*args, **kwargs)
-            tracker = MagicMock(wraps=real_instance)
-            tracker.__enter__ = MagicMock(side_effect=real_instance.__enter__)
-            tracker.__exit__ = MagicMock(side_effect=real_instance.__exit__)
-            instances.append(tracker)
-            return tracker
+        refs: dict[str, weakref.ref] = {}
+        seen: dict[str, bool] = {}
 
+        async def fake_convert_one(entry, output_dir, **kwargs):
+            doc = _Intermediate()
+            refs["intermediate"] = weakref.ref(doc)
+            return ([(entry, None, doc)], [])
+
+        async def fake_extract_one_intermediate(doc, *args, **kwargs):
+            extracted = _Extracted()
+            refs["extracted"] = weakref.ref(extracted)
+            return extracted
+
+        async def fake_ingest_one(doc, *args, **kwargs):
+            gc.collect()
+            # Stage 1 is over: the intermediate document must already be gone.
+            seen["intermediate_freed_at_ingest"] = refs["intermediate"]() is None
+            return "doc1"
+
+        def _stage_result(stage: str) -> StageResult:
+            return StageResult(
+                stage=stage,
+                success=True,
+                documents=[DocumentResult("doc1", 1, 0)],
+                total_processed=1,
+                total_failed=0,
+                duration_seconds=0.0,
+            )
+
+        async def fake_run_annotation(*args, **kwargs):
+            gc.collect()
+            # Stage 2 is over: the extracted document must already be gone.
+            seen["intermediate_freed_at_annotation"] = refs["intermediate"]() is None
+            seen["extracted_freed_at_annotation"] = refs["extracted"]() is None
+            return _stage_result("annotation")
+
+        async def fake_run_entity_extraction(*args, **kwargs):
+            return _stage_result("entity_extraction")
+
+        monkeypatch.setattr("scinr.newton.converters.main.convert_one", fake_convert_one)
         monkeypatch.setattr(
-            pipeline_mod.tempfile,
-            "TemporaryDirectory",
-            MagicMock(side_effect=_tracking_temporary_directory),
+            "scinr.newton.stages.extraction.extract_one_intermediate",
+            fake_extract_one_intermediate,
+        )
+        monkeypatch.setattr("scinr.newton.ingest.loader.ingest_one", fake_ingest_one)
+        monkeypatch.setattr("scinr.newton.stages.run_annotation", fake_run_annotation)
+        monkeypatch.setattr(
+            "scinr.newton.stages.run_entity_extraction", fake_run_entity_extraction
         )
 
-        result = await _process_document_unit(
-            unit,
-            **_base_kwargs(effective_stages=["preprocess"], converter_output_dir=None),
-        )
+        result = await _process_document_unit(unit, **_base_kwargs())
 
-        assert len(instances) == 1
-        instances[0].__enter__.assert_called_once()
-        instances[0].__exit__.assert_called_once()
-        assert result.stage_results["preprocess"] == DocumentResult("doc1", 1, 0, [])
+        assert result.stopped_at is None
+        assert result.fatal_error is None
+        assert seen == {
+            "intermediate_freed_at_ingest": True,
+            "intermediate_freed_at_annotation": True,
+            "extracted_freed_at_annotation": True,
+        }

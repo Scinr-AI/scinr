@@ -21,6 +21,19 @@ class TestNullRawFileRepository:
 
         assert raw_file_id == ""
 
+    async def test_store_file_returns_sentinel_without_opening_the_file(self, tmp_path):
+        repo = NullRawFileRepository()
+        missing = tmp_path / "does-not-exist.pdf"  # opening it would raise
+
+        raw_file_id = await repo.store_file(
+            path=missing,
+            filename="doc.pdf",
+            content_type="application/pdf",
+            folder_path=None,
+        )
+
+        assert raw_file_id == ""
+
     async def test_delete_is_a_safe_noop_for_any_raw_file_id(self):
         repo = NullRawFileRepository()
 

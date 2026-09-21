@@ -197,3 +197,95 @@ class TestReadXlsx:
 
         sheets = read_tabular_file(p)
         assert sheets[0]["headers"] == ["a", "b"]
+
+
+class TestReadCsvSinglePassEdgeCases:
+    def test_row_longer_than_header_is_trimmed(self, tmp_path):
+        p = tmp_path / "long.csv"
+        p.write_text("a,b\n1,2,3,4\n5,6\n", encoding="utf-8")
+
+        sheet = read_csv(p)[0]
+
+        assert sheet["headers"] == ["a", "b"]
+        assert sheet["all_rows"] == [["1", "2"], ["5", "6"]]
+        assert sheet["total_rows"] == 2
+
+    def test_header_only_file_has_zero_data_rows(self, tmp_path):
+        p = tmp_path / "header_only.csv"
+        p.write_text("a,b,c\n", encoding="utf-8")
+
+        sheet = read_csv(p)[0]
+
+        assert sheet["headers"] == ["a", "b", "c"]
+        assert sheet["all_rows"] == []
+        assert sheet["total_rows"] == 0
+
+    def test_quoted_fields_with_embedded_newlines(self, tmp_path):
+        p = tmp_path / "multiline.csv"
+        p.write_text('id,note\n1,"line one\nline two"\n2,plain\n', encoding="utf-8")
+
+        sheet = read_csv(p)[0]
+
+        assert sheet["all_rows"] == [["1", "line one\nline two"], ["2", "plain"]]
+
+    def test_file_larger_than_sniff_sample_keeps_all_rows(self, tmp_path):
+        """The delimiter sniff reads 4096 chars then rewinds: no data may be lost."""
+        p = tmp_path / "big.csv"
+        n = 2000  # ~ tens of KB, far above the 4096-char sniff sample
+        lines = ["id;name;value"] + [f"{i};name_{i};{i * 3}" for i in range(n)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        sheet = read_csv(p)[0]
+
+        assert sheet["headers"] == ["id", "name", "value"]
+        assert sheet["total_rows"] == n
+        assert sheet["all_rows"][0] == ["0", "name_0", "0"]
+        assert sheet["all_rows"][-1] == [str(n - 1), f"name_{n - 1}", str((n - 1) * 3)]
+
+    def test_bom_is_stripped_after_the_sniff_rewind(self, tmp_path):
+        p = tmp_path / "bom_big.csv"
+        body = "\n".join(f"{i},x{i}" for i in range(1500))
+        p.write_bytes(b"\xef\xbb\xbf" + f"id,name\n{body}\n".encode())
+
+        sheet = read_csv(p)[0]
+
+        assert sheet["headers"] == ["id", "name"]
+        assert sheet["total_rows"] == 1500
+
+
+class TestReadXlsxClosesWorkbook:
+    def test_workbook_is_closed_when_iter_rows_raises(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import openpyxl
+
+        ws = MagicMock()
+        ws.title = "Sheet1"
+        ws.iter_rows.side_effect = RuntimeError("boom while reading rows")
+        wb = MagicMock()
+        wb.worksheets = [ws]
+        monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: wb)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            read_xlsx(tmp_path / "any.xlsx")
+
+        wb.close.assert_called_once()
+
+    def test_workbook_is_closed_on_success(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import openpyxl
+
+        ws = MagicMock()
+        ws.title = "S"
+        ws.iter_rows.return_value = iter([("h1", "h2"), (None, None), ("a", 1)])
+        wb = MagicMock()
+        wb.worksheets = [ws]
+        monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: wb)
+
+        sheets = read_xlsx(tmp_path / "any.xlsx")
+
+        assert sheets == [
+            {"sheet_name": "S", "headers": ["h1", "h2"], "all_rows": [["a", "1"]], "total_rows": 1}
+        ]
+        wb.close.assert_called_once()

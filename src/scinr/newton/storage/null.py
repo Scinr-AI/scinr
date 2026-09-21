@@ -5,6 +5,8 @@ These implementations satisfy the RawFileRepository and PageRepository interface
 without performing any I/O. They are used as the default when no storage backend
 is configured, eliminating the need for None checks throughout the codebase.
 """
+from pathlib import Path
+
 from scinr.newton.storage.base import PageRepository, RawFileRepository
 from scinr.newton.storage.models import ConvertedPageRecord
 
@@ -20,6 +22,15 @@ class NullRawFileRepository(RawFileRepository):
         folder_path: str | None = None,
     ) -> str:
         return ""  # raw_file_id empty string — documented no-storage sentinel
+
+    async def store_file(
+        self,
+        path: Path,
+        filename: str,
+        content_type: str,
+        folder_path: str | None = None,
+    ) -> str:
+        return ""  # same sentinel as store(); never opens *path*
 
     async def delete(self, raw_file_id: str) -> None:
         return None  # no-op: nothing is ever stored, so nothing to delete

@@ -30,4 +30,6 @@ class NormalizationEntry:
     target_type: type[BaseModel]
     source_values: dict[str, object]
     unique_key: str  # "{target_type_name}:{md5_hash}"
-    row_indices: list[int] = field(default_factory=list)  # row indices from pre-scan (pre-escaneo)
+    # Deprecated: no longer populated by the tabular pipeline (the streaming write path
+    # recomputes each row's key instead of storing row indices, which was O(rows)).
+    row_indices: list[int] = field(default_factory=list)
