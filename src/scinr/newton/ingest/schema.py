@@ -7,12 +7,16 @@ unique constraints, regular indexes, and fulltext indexes are in place.
 Schema overview
 ---------------
 Unique constraints (MERGE targets):
-    :Document(path, version)  — composite key
-    :StructureNode(id)
+    :Document(tenant_id, path, version)  — composite key; the tenant is part of
+                              the document identity (``"__public__"`` for public
+                              documents, see ``utils/tenancy.py``)
+    :StructureNode(id)        — id is tenant-prefixed (see ``ingest/nodes.py``)
     :InfoUnit(uid)
     :ExtractionResult(uid)
+    :ModelInstance(uid)       — uid hashes the tenant (``utils/uid.py``)
     :ModelField(name, model)  — composite key; prevents cross-model field node sharing
-    :LabeledEntity(label, normalized_value)  — NODE KEY
+    :LabeledEntity(uid)       — uid hashes (tenant, label, normalized_value)
+    :Entity(uid)              — uid hashes (tenant, normalized_value)
     :EntityLabel(label)       — schema-level singleton per entity label string
 
 Node existence constraints:
@@ -29,9 +33,31 @@ Regular indexes (query performance):
     :Document(job_id)
     :StructureNode(role)
     :StructureNode(source_page_ids)
+    :StructureNode(tenant_id)
+    :StructureNode(created_by_user_id)
+    :StructureNode(job_id)
     :LabeledEntity(label)
+    :LabeledEntity(tenant_id)
+    :Entity(tenant_id)
     :ExtractionResult(node_full_id)
+    :ExtractionResult(tenant_id)
+    :ExtractionResult(created_by_user_id)
+    :ExtractionResult(job_id)
     :ModelInstance(model_class)
+    :ModelInstance(tenant_id)
+    :InfoUnit(tenant_id)
+    :ModelDecision(tenant_id)
+
+Composite tenant indexes (tenant-scoped filters on a second property):
+    :ModelInstance(tenant_id, model_class)
+    :Document(tenant_id, latest)
+    :Document(tenant_id, name)
+    :StructureNode(tenant_id, role)
+    :LabeledEntity(tenant_id, label)
+
+    The single-property indexes above are kept: a query over all tenants
+    (``tenant_id=None``) has no tenant predicate and cannot use a composite
+    index, which Neo4j only uses when every indexed property is constrained.
 
 Fulltext indexes (semantic search):
     infoUnitDescription  → :InfoUnit(description)
@@ -48,15 +74,27 @@ from scinr.newton.exceptions import ConfigurationError
 
 logger = logging.getLogger(__name__)
 
+DOCUMENT_KEY_CONSTRAINT = "constraint_document_tenant_path_version"
+"""Name of the ``(tenant_id, path, version)`` uniqueness constraint on :Document
+(lower-case, so it can be searched for in a lower-cased ``ConstraintError``)."""
+
+_LEGACY_CONSTRAINTS = (
+    # Name-only unique constraint, replaced by (path, version).
+    "constraint_document_name",
+    # (path, version), replaced by DOCUMENT_KEY_CONSTRAINT when the tenant
+    # became part of the document identity.
+    "constraint_document_path_version",
+)
+
 # ---------------------------------------------------------------------------
 # DDL statements — all use IF NOT EXISTS so they are idempotent
 # ---------------------------------------------------------------------------
 
 _UNIQUE_CONSTRAINTS: list[tuple[str, str]] = [
     (
-        "constraint_document_path_version",
-        "CREATE CONSTRAINT constraint_document_path_version IF NOT EXISTS "
-        "FOR (d:Document) REQUIRE (d.path, d.version) IS UNIQUE",
+        DOCUMENT_KEY_CONSTRAINT,
+        f"CREATE CONSTRAINT {DOCUMENT_KEY_CONSTRAINT} IF NOT EXISTS "
+        "FOR (d:Document) REQUIRE (d.tenant_id, d.path, d.version) IS UNIQUE",
     ),
     (
         "constraint_structure_node_id",
@@ -167,9 +205,34 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "FOR (n:StructureNode) ON (n.source_page_ids)",
     ),
     (
+        "idx_structure_node_tenant_id",
+        "CREATE INDEX idx_structure_node_tenant_id IF NOT EXISTS "
+        "FOR (n:StructureNode) ON (n.tenant_id)",
+    ),
+    (
+        "idx_structure_node_created_by_user_id",
+        "CREATE INDEX idx_structure_node_created_by_user_id IF NOT EXISTS "
+        "FOR (n:StructureNode) ON (n.created_by_user_id)",
+    ),
+    (
+        "idx_structure_node_job_id",
+        "CREATE INDEX idx_structure_node_job_id IF NOT EXISTS "
+        "FOR (n:StructureNode) ON (n.job_id)",
+    ),
+    (
         "idx_labeled_entity_label",
         "CREATE INDEX idx_labeled_entity_label IF NOT EXISTS "
         "FOR (le:LabeledEntity) ON (le.label)",
+    ),
+    (
+        "idx_labeled_entity_tenant_id",
+        "CREATE INDEX idx_labeled_entity_tenant_id IF NOT EXISTS "
+        "FOR (le:LabeledEntity) ON (le.tenant_id)",
+    ),
+    (
+        "idx_entity_tenant_id",
+        "CREATE INDEX idx_entity_tenant_id IF NOT EXISTS "
+        "FOR (e:Entity) ON (e.tenant_id)",
     ),
     (
         "idx_extraction_result_node",
@@ -177,9 +240,67 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "FOR (e:ExtractionResult) ON (e.node_full_id)",
     ),
     (
+        "idx_extraction_result_tenant_id",
+        "CREATE INDEX idx_extraction_result_tenant_id IF NOT EXISTS "
+        "FOR (e:ExtractionResult) ON (e.tenant_id)",
+    ),
+    (
+        "idx_extraction_result_created_by_user_id",
+        "CREATE INDEX idx_extraction_result_created_by_user_id IF NOT EXISTS "
+        "FOR (e:ExtractionResult) ON (e.created_by_user_id)",
+    ),
+    (
+        "idx_extraction_result_job_id",
+        "CREATE INDEX idx_extraction_result_job_id IF NOT EXISTS "
+        "FOR (e:ExtractionResult) ON (e.job_id)",
+    ),
+    (
         "idx_model_instance_model_class",
         "CREATE INDEX idx_model_instance_model_class IF NOT EXISTS "
         "FOR (mi:ModelInstance) ON (mi.model_class)",
+    ),
+    (
+        "idx_model_instance_tenant_id",
+        "CREATE INDEX idx_model_instance_tenant_id IF NOT EXISTS "
+        "FOR (mi:ModelInstance) ON (mi.tenant_id)",
+    ),
+    (
+        "idx_info_unit_tenant_id",
+        "CREATE INDEX idx_info_unit_tenant_id IF NOT EXISTS "
+        "FOR (u:InfoUnit) ON (u.tenant_id)",
+    ),
+    (
+        "idx_model_decision_tenant_id",
+        "CREATE INDEX idx_model_decision_tenant_id IF NOT EXISTS "
+        "FOR (md:ModelDecision) ON (md.tenant_id)",
+    ),
+    # -- Composite tenant indexes ------------------------------------------
+    # Neo4j uses one index per node, so "tenant T and property P" with two
+    # single indexes seeks on one and filters every node for the other.
+    (
+        "idx_model_instance_tenant_model_class",
+        "CREATE INDEX idx_model_instance_tenant_model_class IF NOT EXISTS "
+        "FOR (mi:ModelInstance) ON (mi.tenant_id, mi.model_class)",
+    ),
+    (
+        "idx_document_tenant_latest",
+        "CREATE INDEX idx_document_tenant_latest IF NOT EXISTS "
+        "FOR (d:Document) ON (d.tenant_id, d.latest)",
+    ),
+    (
+        "idx_document_tenant_name",
+        "CREATE INDEX idx_document_tenant_name IF NOT EXISTS "
+        "FOR (d:Document) ON (d.tenant_id, d.name)",
+    ),
+    (
+        "idx_structure_node_tenant_role",
+        "CREATE INDEX idx_structure_node_tenant_role IF NOT EXISTS "
+        "FOR (n:StructureNode) ON (n.tenant_id, n.role)",
+    ),
+    (
+        "idx_labeled_entity_tenant_label",
+        "CREATE INDEX idx_labeled_entity_tenant_label IF NOT EXISTS "
+        "FOR (le:LabeledEntity) ON (le.tenant_id, le.label)",
     ),
 ]
 
@@ -203,8 +324,11 @@ def setup_schema(driver: Driver) -> None:
     Uses ``IF NOT EXISTS`` clauses so this function can be safely called
     multiple times without raising errors on an already-configured database.
 
-    Also drops the legacy ``constraint_document_name`` unique constraint if it
-    exists (replaced by the ``(path, version)`` composite constraint).
+    Also drops the legacy :Document constraints if they exist
+    (``constraint_document_name`` and ``constraint_document_path_version``,
+    both superseded by the ``(tenant_id, path, version)`` composite
+    constraint). The old ``(path, version)`` one must go: it would reject two
+    tenants ingesting the same path.
 
     Args:
         driver: An open, authenticated :class:`neo4j.Driver` instance.
@@ -216,7 +340,10 @@ def setup_schema(driver: Driver) -> None:
     with driver.session(database=cfg.neo4j_database) as session:
         try:
             record = session.run(
-                "CALL dbms.components() YIELD versions RETURN versions[0] AS version"
+                # Since 2025.x the procedure also lists the "Cypher" component
+                # (versions ["5", "25"]): keep only the kernel row.
+                "CALL dbms.components() YIELD name, versions "
+                "WHERE name = 'Neo4j Kernel' RETURN versions[0] AS version"
             ).single()
             if record:
                 version_str = str(record["version"])
@@ -239,15 +366,16 @@ def setup_schema(driver: Driver) -> None:
         except Exception as exc:
             logger.warning("Could not verify Neo4j version: %s", exc)
 
-    # Drop legacy name-only unique constraint if it exists (replaced by path+version composite)
+    # Drop legacy :Document constraints if they exist (see _LEGACY_CONSTRAINTS)
     with driver.session(database=cfg.neo4j_database) as session:
-        try:
-            session.execute_write(lambda tx: tx.run(
-                "DROP CONSTRAINT constraint_document_name IF EXISTS"
-            ))
-            logger.info("Dropped legacy constraint_document_name if it existed.")
-        except Exception as exc:
-            logger.warning("Could not drop constraint_document_name: %s", exc)
+        for legacy in _LEGACY_CONSTRAINTS:
+            try:
+                session.execute_write(
+                    lambda tx, q=f"DROP CONSTRAINT {legacy} IF EXISTS": tx.run(q)
+                )
+                logger.info("Dropped legacy %s if it existed.", legacy)
+            except Exception as exc:
+                logger.warning("Could not drop %s: %s", legacy, exc)
 
     with driver.session(database=cfg.neo4j_database) as session:
         for name, cypher in _UNIQUE_CONSTRAINTS:

@@ -284,9 +284,15 @@ def _factory(rows: list[list[str]], counter: list[int] | None = None):
     return row_batches
 
 
+class _FakeResult:
+    async def single(self):
+        # write_tabular_subgraph checks the owning :Document was matched.
+        return {"created": 1}
+
+
 class _FakeTx:
     async def run(self, *a, **k):
-        return None
+        return _FakeResult()
 
     async def commit(self):
         return None
@@ -425,9 +431,10 @@ class TestStandardWritePathStreams:
             sheet_index=0,
             decision=decision,
             mapping=_MAPPING,
+            tenant_id="acme",
         )
 
-        assert table_id == "doc::1::table_1"
+        assert table_id == "acme::doc::1::table_1"
         assert [c["n"] for c in recorded_batches] == [500, 500, 500, 500]
         assert [c["start"] for c in recorded_batches] == [0, 500, 1000, 1500]
         assert all(c["n"] < len(rows) for c in recorded_batches)

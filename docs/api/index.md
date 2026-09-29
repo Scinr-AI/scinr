@@ -10,7 +10,7 @@ Welcome to the `scinr.newton` API reference. All API documentation is auto-gener
 - [Normalization](normalization.md): ``NormalizationEngine`` and normalization utilities.
 - [Results](results.md): ``PipelineResult``, ``StageResult``, ``DocumentResult``, ``DeletionResult``.
 - [Exceptions](exceptions.md): ``ScinrError`` hierarchy.
-- [Deletion](deletion.md): ``delete_document()`` — permanent document removal with cascade and garbage collection.
+- [Deletion](deletion.md): ``delete_document()`` — permanent document removal with cascade and garbage collection, always scoped to one tenant (``tenant_id`` is mandatory; ``None`` / ``"__public__"`` = public documents).
 - [Converters](converters.md): Document format converters.
 - [Storage](storage.md): Storage backends.
 - [Navigation](navigation.md): Read-only, engine-abstracted graph traversal — documents, structure nodes, model instances, entities.

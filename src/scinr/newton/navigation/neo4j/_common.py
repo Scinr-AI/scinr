@@ -13,13 +13,15 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
-from scinr.newton.exceptions import GraphConnectionError
+from scinr.newton.exceptions import GraphConnectionError, NavigationError
 from scinr.newton.navigation.base import (
     DEFAULT_MAX_DEPTH,
     INSTANCE_CONTAINMENT_DEPTH,
 )
-from scinr.newton.navigation.models import DocumentRef
 from scinr.newton.navigation.neo4j._safe import resolve_depth
+from scinr.newton.navigation.scope import Scope, ScopeKind
+from scinr.newton.utils.redaction import redact_secrets
+from scinr.newton.utils.tenancy import PUBLIC_TENANT
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +39,6 @@ STRUCTURAL_REL_HINT: tuple[str, ...] = (
     "HAS_FIELD", "AGGREGATES", "BELONGS_TO_THEME", "PRODUCES_ENTITY",
     "HAS_SUBTOPIC",
 )
-
-
-def selector_path(document: str | DocumentRef) -> str:
-    """Return the ``path`` string of a document selector."""
-    if isinstance(document, DocumentRef):
-        return document.path
-    if isinstance(document, str):
-        return document
-    raise TypeError(f"document selector must be a path str or DocumentRef, got {type(document).__name__}")
 
 
 class _Neo4jRuntime:
@@ -86,7 +79,7 @@ class _Neo4jRuntime:
         except GraphConnectionError:
             raise
         except Exception as exc:  # noqa: BLE001 — normalise any driver error
-            raise GraphConnectionError(f"Neo4j is not reachable: {exc}") from exc
+            raise GraphConnectionError(f"Neo4j is not reachable: {redact_secrets(str(exc))}") from exc
 
     def _database(self) -> str | None:
         if self._database_override is not None:
@@ -135,7 +128,7 @@ class _Neo4jRuntime:
             from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
             if isinstance(exc, (ServiceUnavailable,)):
-                raise GraphConnectionError(str(exc)) from exc
+                raise GraphConnectionError(redact_secrets(str(exc))) from exc
             if isinstance(exc, Neo4jError):
                 raise
             raise
@@ -169,10 +162,84 @@ class _Neo4jRuntime:
 
         ``version`` given → pin it; omitted → ``latest = true``. The caller
         always passes ``path=$path`` and (when relevant) ``version=$version``.
+
+        The pattern carries no tenant: a :Document is keyed by
+        ``(tenant_id, path, version)``, so the same path can match one document
+        per tenant. Callers add the tenant with :meth:`_scope_where` /
+        :meth:`_doc_where`, and single-document methods first resolve which
+        tenant they mean with :meth:`_single_document_scope`.
         """
         if version is None:
             return f"({alias}:Document {{path: $path, latest: true}})"
         return f"({alias}:Document {{path: $path, version: $version}})"
+
+    @staticmethod
+    def _scope_where(
+        alias: str,
+        clauses: list[str],
+        params: dict[str, Any],
+        scope: Scope,
+        kind: ScopeKind = "scalar",
+        *,
+        tenant: bool = True,
+    ) -> None:
+        """Append the scope predicates on *alias* to *clauses* / *params* (in place).
+
+        Plain property predicates on the denormalized tenant / provenance
+        properties written at ingestion — never a traversal up to ``:Document``.
+        *kind* tells how the node stores its provenance (see
+        :data:`~scinr.newton.navigation.scope.ScopeKind`).
+        """
+        clauses.extend(scope.clauses(alias, kind, tenant=tenant))
+        params.update(scope.params(tenant=tenant))
+
+    @staticmethod
+    def _doc_where(
+        alias: str, params: dict[str, Any], scope: Scope, kind: ScopeKind = "tenant_only"
+    ) -> str:
+        """``WHERE`` text applying the scope to a matched anchor *alias*.
+
+        The default (tenant only) pins a document to the scope's tenant; pass
+        ``kind="scalar"`` to filter the anchor by user/job as well.
+        """
+        clauses = scope.clauses(alias, kind)
+        params.update(scope.params())
+        return f"WHERE {' AND '.join(clauses)} " if clauses else ""
+
+    async def _single_document_scope(
+        self, path: str, version: int | None, scope: Scope
+    ) -> Scope:
+        """Pin *scope* to the one tenant a single-document method means.
+
+        With a single tenant in scope nothing is queried. Otherwise the
+        tenants that hold *path* (latest, or *version*) are listed:
+        one or none → the scope as is; a tenant plus the public one under
+        ``include_public`` → that tenant (it shadows the public document);
+        anything else is ambiguous → :class:`NavigationError`.
+        """
+        if scope.tenants is not None and len(scope.tenants) == 1:
+            return scope
+        clauses: list[str] = ["d.version = $version" if version is not None else "d.latest = true"]
+        params: dict[str, Any] = {"path": path}
+        if version is not None:
+            params["version"] = int(version)
+        self._scope_where("d", clauses, params, scope, "tenant_only")
+        rows = await self._read(
+            f"MATCH (d:Document {{path: $path}}) WHERE {' AND '.join(clauses)} "
+            "RETURN d.tenant_id AS tenant_id",
+            **params,
+        )
+        held = [r["tenant_id"] for r in rows]
+        if len(held) <= 1:
+            return scope
+        if scope.include_public and scope.tenants is not None:
+            own = [t for t in held if t is not None and t != PUBLIC_TENANT]
+            if len(own) == 1:
+                return scope.with_tenant(own[0])
+        raise NavigationError(
+            f"document path {path!r} exists in several tenants "
+            f"({sorted(str(t) for t in held)}); pass tenant_id to pick one"
+        )
 
     @staticmethod
     def _limit_clause(limit: int | None, skip: int = 0) -> str:

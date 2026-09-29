@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from scinr.newton.converters.base import ConversionError, IntermediateDocument, IntermediatePage
+from scinr.newton.utils.redaction import redact_uri
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,7 @@ class ApiJsonConverter:
             If the HTTP request fails or the response cannot be parsed.
         """
         logger.info(
-            "Fetching JSON API '%s' from %s", self._config.document_name, url
+            "Fetching JSON API '%s' from %s", self._config.document_name, redact_uri(url)
         )
         items = self._fetch_all_items(url)
         logger.info(
@@ -394,19 +395,19 @@ class ApiJsonConverter:
             )
         except httpx.RequestError as exc:
             raise ConversionError(
-                f"Network error fetching {url}: {exc}"
+                f"Network error fetching {redact_uri(url)}: {exc}"
             ) from exc
 
         if response.is_error:
             raise ConversionError(
-                f"HTTP {response.status_code} fetching {url}: {response.text}"
+                f"HTTP {response.status_code} fetching {redact_uri(url)}: {response.text}"
             )
 
         try:
             return response.json()
         except Exception as exc:
             raise ConversionError(
-                f"Cannot parse response from {url} as JSON: {exc}"
+                f"Cannot parse response from {redact_uri(url)} as JSON: {exc}"
             ) from exc
 
     def _extract_items(self, data: Any) -> list[dict]:

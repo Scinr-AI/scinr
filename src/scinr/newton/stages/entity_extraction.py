@@ -16,6 +16,9 @@ async def run_entity_extraction(
     document_name: str,
     parallel_docs: int = 1,
     only_unextracted: bool = False,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> StageResult:
     """Run the entity extraction agent for an already-annotated document.
 
@@ -24,13 +27,20 @@ async def run_entity_extraction(
     Parameters
     ----------
     document_name:
-        Name of the document node already annotated in Neo4j.
+        Name of the document node already annotated in Neo4j. Used to select
+        the document only when *doc_path* is not given (then every latest
+        document of *tenant_id* with that name is processed).
     parallel_docs:
         Maximum number of leaf documents to extract concurrently when
         *document_name* refers to a folder.
     only_unextracted:
         When True, only process StructureNodes without a :HAS_EXTRACTION
         relationship.
+    tenant_id:
+        Owner of the document (``None`` = public document). Only that tenant's
+        documents are read or written.
+    doc_path:
+        Path of the document — with *tenant_id*, the preferred selector.
 
     Returns
     -------
@@ -52,6 +62,8 @@ async def run_entity_extraction(
         document_name,
         parallel_docs=parallel_docs,
         only_unextracted=only_unextracted,
+        tenant_id=tenant_id,
+        doc_path=doc_path,
     )
 
     duration = time.monotonic() - t0

@@ -25,6 +25,45 @@ Conventions
   instance, are stored lower-cased and accent-stripped by ingestion).
 * List methods take ``limit: int | None = None`` and ``skip: int = 0`` and order
   deterministically. Dynamic filters are only applied when supplied.
+
+Scope: tenant, user, job
+------------------------
+Every method except the global catalogue ones (``list_catalog_models``,
+``get_catalog_graph``, ``list_themes``, ``list_relationship_types``,
+``list_node_labels``) and ``execute_raw`` takes four keyword-only filters::
+
+    tenant_id: str | None = None                            # None = all tenants
+    include_public: bool = False                            # add public documents
+    created_by_user_id: str | Sequence[str] | None = None   # IN
+    job_id: str | Sequence[str] | None = None               # IN
+
+``tenant_id=None`` means **no tenant filter** (every tenant, public and legacy
+data included); ``"__public__"`` means only public documents; ``"acme"`` only
+that tenant, or ``acme`` plus public with ``include_public=True``. The user /
+job filters take one value or several (any-of), combine by AND with the tenant,
+and an empty list is an error. The stored tenant is exposed as is — a public
+document reports ``tenant_id == "__public__"``. See :mod:`navigation.scope`.
+
+Because the default is "all", an API layer that forgets to pass the tenant
+exposes everything: prefer :meth:`GraphNavigator.scoped`, which fixes the scope
+once and rejects calls that try to widen it.
+
+How the filters apply depends on the method:
+
+* Methods that return a **list** return every match in scope (a path that
+  exists in two tenants yields both documents, each ref carrying its tenant).
+* Methods that return **one document or tree** (``get_one_document``,
+  ``get_latest_version``, ``get_document_tree``, ``get_document_parent``,
+  ``get_document_ancestors``, ``get_document_stats``,
+  ``get_document_model_profile``, ``get_annotation_coverage``) raise
+  ``NavigationError`` when the path exists in several tenants of the scope;
+  with ``include_public=True`` a tenant's document shadows the public one.
+* By-id lookups (``get_structure_node``, ``get_model_instance``, …) only resolve
+  inside the scope: another tenant's id behaves as if it did not exist.
+* In nested results (trees, spines) the user/job filters apply to the anchor
+  only, so no node is orphaned; flat lists filter every element.
+* A ``DocumentRef`` passed as a selector carries its own tenant; an explicit,
+  different *tenant_id* raises ``NavigationError``.
 """
 
 from __future__ import annotations
@@ -59,12 +98,15 @@ from scinr.newton.navigation.models import (
     NodeDescription,
     NodePath,
     NodeSelector,
+    OriginalFile,
+    PageText,
     PathResult,
     ProposedModelRef,
     RelTypeStat,
     RoleStat,
     ScoredInfoUnit,
     StructureNodeRef,
+    StructureNodesSourcePages,
     StructureTree,
     Subgraph,
     ThemeRef,
@@ -128,6 +170,36 @@ class GraphNavigator(ABC):
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
+    def scoped(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> Any:
+        """Return a view of this navigator with the scope fixed once.
+
+        Every scope-aware method of the returned object gets the given filters
+        filled in; a call that passes a *different* ``tenant_id``, asks for
+        ``include_public`` when the view does not, or names user / job values
+        outside the view's raises ``NavigationError`` (it can narrow, never
+        widen). ``execute_raw`` is refused. Lifecycle (``connect`` / ``close``)
+        is shared with this navigator.
+
+        Recommended for any multi-user API layer: the unscoped default is
+        "all tenants", so forgetting a filter would expose everything.
+        """
+        from scinr.newton.navigation.scoped import ScopedNavigator
+
+        return ScopedNavigator(
+            self,
+            tenant_id=tenant_id,
+            include_public=include_public,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        )
+
     # -- raw escape hatch (optional capability) ---------------------------
 
     async def execute_raw(
@@ -185,6 +257,10 @@ class GraphNavigator(ABC):
         only_leaves: bool = False,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[DocumentRef]:
         """List "parent" documents — those with no incoming ``IS_COMPOSED_OF``.
 
@@ -197,12 +273,29 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def count_root_documents(
-        self, *, latest_only: bool = True, only_folders: bool = False, only_leaves: bool = False
+        self,
+        *,
+        latest_only: bool = True,
+        only_folders: bool = False,
+        only_leaves: bool = False,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> int:
         """Count the documents :meth:`list_root_documents` would return."""
 
     @abstractmethod
-    async def get_one_document(self, path: str, version: int) -> DocumentRef | None:
+    async def get_one_document(
+        self,
+        path: str,
+        version: int,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> DocumentRef | None:
         """Return the document with exactly this ``(path, version)`` composite key.
 
         Both arguments are mandatory — this is the unique key. No "latest"
@@ -225,6 +318,10 @@ class GraphNavigator(ABC):
         where: _Where = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[DocumentRef]:
         """Find documents by any combination of filters. **Always** a list.
 
@@ -260,7 +357,16 @@ class GraphNavigator(ABC):
         """
 
     @abstractmethod
-    async def document_exists(self, path: str, *, version: int | None = None) -> bool:
+    async def document_exists(
+        self,
+        path: str,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> bool:
         """Return whether a document exists at *path* (any version, or a specific one)."""
 
     @abstractmethod
@@ -272,6 +378,10 @@ class GraphNavigator(ABC):
         version: int | None = None,
         is_folder: bool | None = None,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[DocumentRef]:
         """Walk ``IS_COMPOSED_OF`` downward from *path* — **child documents only**.
 
@@ -280,19 +390,42 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_document_tree(
-        self, path: str, *, depth: int | None = None, version: int | None = None
+        self,
+        path: str,
+        *,
+        depth: int | None = None,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentTree | None:
         """Return the nested ``IS_COMPOSED_OF`` subtree rooted at *path*."""
 
     @abstractmethod
     async def get_document_parent(
-        self, path: str, *, version: int | None = None
+        self,
+        path: str,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentRef | None:
         """Return the immediate folder-parent of *path*, or ``None`` for a root."""
 
     @abstractmethod
     async def get_document_ancestors(
-        self, path: str, *, version: int | None = None, depth: int | None = None
+        self,
+        path: str,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentTree | None:
         """Return the ancestor lineage of *path* as a single-spine tree.
 
@@ -303,25 +436,64 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_document_leaves(
-        self, path: str, *, version: int | None = None, depth: int | None = None
+        self,
+        path: str,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[DocumentRef]:
         """Return descendants of *path* with no outgoing ``IS_COMPOSED_OF``."""
 
     @abstractmethod
-    async def list_document_versions(self, path: str) -> list[DocumentRef]:
+    async def list_document_versions(
+        self,
+        path: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[DocumentRef]:
         """Return every version at *path*, ascending by ``version``."""
 
     @abstractmethod
-    async def get_latest_version(self, path: str) -> DocumentRef | None:
+    async def get_latest_version(
+        self,
+        path: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> DocumentRef | None:
         """Return the ``latest=true`` document at *path*, or ``None``."""
 
     @abstractmethod
-    async def get_version_chain(self, path: str) -> list[DocumentRef]:
+    async def get_version_chain(
+        self,
+        path: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[DocumentRef]:
         """Return the versions at *path* ordered by the ``HAS_NEWER_VERSION`` chain."""
 
     @abstractmethod
     async def get_document_stats(
-        self, path: str, *, version: int | None = None
+        self,
+        path: str,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentStats | None:
         """Return aggregate counts (nodes by role, instances by class, …) for a document."""
 
@@ -342,6 +514,10 @@ class GraphNavigator(ABC):
         depth: int | None = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return structure nodes of *document*, flat, ordered by appearance.
 
@@ -361,18 +537,55 @@ class GraphNavigator(ABC):
         version: int | None = None,
         roles: Sequence[str] | None = None,
         depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> int:
         """Count the structure nodes :meth:`get_structure_nodes` would return."""
 
     @abstractmethod
     async def get_root_structure_nodes(
-        self, document: _Selector, *, version: int | None = None
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return only the ``HAS_STRUCTURE`` (top-level) nodes of *document*."""
 
     @abstractmethod
-    async def get_structure_node(self, node_id: str) -> StructureNodeRef | None:
+    async def get_structure_node(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> StructureNodeRef | None:
         """Return the structure node with this composite ``id``, or ``None``."""
+
+    @abstractmethod
+    async def get_structure_nodes_by_ids(
+        self,
+        node_ids: Sequence[str],
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[StructureNodeRef]:
+        """Return the structure nodes with these composite ``id`` s, in one lookup.
+
+        Only the nodes found in the scope are returned, without duplicates and
+        in request order (an empty list does not query). Use
+        ``StructureNodeRef.source_page_ids`` for a node's page ids without
+        reading storage.
+        """
 
     @abstractmethod
     async def get_child_nodes(
@@ -382,36 +595,86 @@ class GraphNavigator(ABC):
         depth: int | None = 1,
         roles: Sequence[str] | None = None,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Walk ``HAS_CHILD`` downward from *node_id*. Flat list."""
 
     @abstractmethod
     async def get_structure_subtree(
-        self, node_id: str, *, depth: int | None = None, include_info_units: bool = False
+        self,
+        node_id: str,
+        *,
+        depth: int | None = None,
+        include_info_units: bool = False,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> StructureTree | None:
         """Return the nested ``HAS_CHILD`` subtree rooted at *node_id*."""
 
     @abstractmethod
-    async def get_parent_node(self, node_id: str) -> StructureNodeRef | None:
+    async def get_parent_node(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> StructureNodeRef | None:
         """Return the ``HAS_CHILD`` parent of *node_id*, or ``None`` for a root node."""
 
     @abstractmethod
     async def get_node_ancestors(
-        self, node_id: str, *, depth: int | None = None
+        self,
+        node_id: str,
+        *,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return the ancestors of *node_id*, ordered root → immediate parent."""
 
     @abstractmethod
-    async def get_node_path(self, node_id: str) -> NodePath | None:
+    async def get_node_path(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> NodePath | None:
         """Return the document plus the node chain from its root down to *node_id*."""
 
     @abstractmethod
-    async def get_document_of_node(self, node_id: str) -> DocumentRef | None:
+    async def get_document_of_node(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> DocumentRef | None:
         """Return the document that owns *node_id* (by traversal, not id-parsing)."""
 
     @abstractmethod
     async def get_sibling_nodes(
-        self, node_id: str, *, include_self: bool = False
+        self,
+        node_id: str,
+        *,
+        include_self: bool = False,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return the nodes sharing a parent with *node_id*."""
 
@@ -427,6 +690,10 @@ class GraphNavigator(ABC):
         where: _Where = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Search structure nodes across all documents.
 
@@ -437,13 +704,28 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_nodes_by_theme(
-        self, theme: str, *, document: _Selector | None = None, limit: int | None = None
+        self,
+        theme: str,
+        *,
+        document: _Selector | None = None,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return structure nodes carrying ``theme``."""
 
     @abstractmethod
     async def describe_node(
-        self, node_id: str, *, include_source_text: bool = False
+        self,
+        node_id: str,
+        *,
+        include_source_text: bool = False,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> NodeDescription | None:
         """Return an aggregate view of *node_id*: info units, decision, extraction, …."""
 
@@ -453,13 +735,28 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_info_units(
-        self, node_id: str, *, order_by: str = "order"
+        self,
+        node_id: str,
+        *,
+        order_by: str = "order",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[InfoUnitRef]:
         """Return the info units of one structure node."""
 
     @abstractmethod
     async def count_info_units(
-        self, document: _Selector, *, version: int | None = None, depth: int | None = None
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> int:
         """Count the info units of *document*."""
 
@@ -471,15 +768,35 @@ class GraphNavigator(ABC):
         field: Literal["title", "description", "both"] = "both",
         document: _Selector | None = None,
         limit: int = 25,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ScoredInfoUnit]:
         """Relevance-search info units by ``title`` / ``description``."""
 
     @abstractmethod
-    async def get_info_unit(self, uid: str) -> InfoUnitRef | None:
+    async def get_info_unit(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> InfoUnitRef | None:
         """Return the info unit with this ``uid``, or ``None``."""
 
     @abstractmethod
-    async def get_node_for_info_unit(self, uid: str) -> StructureNodeRef | None:
+    async def get_node_for_info_unit(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> StructureNodeRef | None:
         """Return the structure node that owns info unit *uid*."""
 
     # ===================================================================
@@ -487,7 +804,15 @@ class GraphNavigator(ABC):
     # ===================================================================
 
     @abstractmethod
-    async def get_model_decision(self, node_id: str) -> ModelDecisionRef | None:
+    async def get_model_decision(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> ModelDecisionRef | None:
         """Return the model decision for *node_id*, or ``None`` if unannotated."""
 
     @abstractmethod
@@ -498,12 +823,24 @@ class GraphNavigator(ABC):
         version: int | None = None,
         matched_only: bool | None = None,
         depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelDecisionWithNode]:
         """Return the model decisions of *document*, each carrying its node."""
 
     @abstractmethod
     async def get_document_model_profile(
-        self, document: _Selector, *, version: int | None = None, depth: int | None = None
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentModelProfile | None:
         """Return how *document* was semantically catalogued — a roll-up of the
         ``matched`` and ``complementary`` model classes across all its
@@ -512,25 +849,54 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_nodes_by_annotated_model(
-        self, model_class: str, *, document: _Selector | None = None
+        self,
+        model_class: str,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return structure nodes whose decision matched ``model_class``."""
 
     @abstractmethod
     async def get_unannotated_nodes(
-        self, document: _Selector, *, version: int | None = None, depth: int | None = None
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return structure nodes of *document* with no ``HAS_MODEL_DECISION``."""
 
     @abstractmethod
     async def get_proposed_models(
-        self, *, document: _Selector | None = None
+        self,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ProposedModelRef]:
         """Return proposed (new) models with their fields and source node."""
 
     @abstractmethod
     async def get_annotation_coverage(
-        self, document: _Selector, *, version: int | None = None, depth: int | None = None
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> AnnotationCoverage | None:
         """Return annotated / unannotated / matched / proposed counts and ratio."""
 
@@ -539,7 +905,15 @@ class GraphNavigator(ABC):
     # ===================================================================
 
     @abstractmethod
-    async def get_extraction_result(self, node_id: str) -> ExtractionResultRef | None:
+    async def get_extraction_result(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> ExtractionResultRef | None:
         """Return the extraction result for *node_id*, or ``None``."""
 
     @abstractmethod
@@ -551,6 +925,10 @@ class GraphNavigator(ABC):
         model_class: str | None = None,
         depth: int | None = None,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ExtractionResultWithNode]:
         """Return the extraction results of *document*, each carrying its node."""
 
@@ -563,6 +941,10 @@ class GraphNavigator(ABC):
         where: _Where = None,
         depth: int | None = None,
         direct_only: bool = False,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return the ``:ModelInstance`` nodes extracted at *node_id*.
 
@@ -572,6 +954,13 @@ class GraphNavigator(ABC):
         ``where=`` filters the instances by property
         (``{property_name: value | Op}``, values matched verbatim); see
         :mod:`scinr.newton.navigation.filters`.
+
+        The scope filters act on the instance's own denormalized provenance
+        (``tenant_id`` scalar; user / job match its accumulated
+        ``created_by_user_ids`` / ``job_ids`` arrays) — no traversal back up to
+        ``:Document`` is performed, so this stays cheap regardless of corpus
+        size. See ``entity_extraction/graph_mapper.py`` for how these are
+        written at ingestion time.
         """
 
     @abstractmethod
@@ -585,6 +974,10 @@ class GraphNavigator(ABC):
         depth: int | None = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return every ``:ModelInstance`` extracted anywhere in *document* (deduped).
 
@@ -592,6 +985,9 @@ class GraphNavigator(ABC):
         (``{property_name: value | Op}``, values matched verbatim) — e.g.
         ``where={"status": "active"}``. See
         :mod:`scinr.newton.navigation.filters`.
+
+        The scope filters act on the instance's own provenance — see
+        :meth:`get_node_model_instances`.
         """
 
     @abstractmethod
@@ -603,11 +999,15 @@ class GraphNavigator(ABC):
         model_class: str | None = None,
         where: _Where = None,
         depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> int:
         """Count the instances :meth:`get_document_model_instances` would return.
 
         Accepts the same ``where=`` property filter (see
-        :mod:`scinr.newton.navigation.filters`).
+        :mod:`scinr.newton.navigation.filters`) and the same scope filters.
         """
 
     @abstractmethod
@@ -620,6 +1020,10 @@ class GraphNavigator(ABC):
         order_by: str | None = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return ``:ModelInstance`` nodes of ``model_class``, filtered by ``where=``.
 
@@ -630,6 +1034,17 @@ class GraphNavigator(ABC):
                 (instance-key / entity values are stored lower-cased &
                 accent-stripped by ingestion; see
                 :func:`scinr.newton.utils.uid.normalize_key`).
+            tenant_id: Tenant scope (see the module docstring). It is a scalar
+                per instance — folded into the ``uid`` at ingestion, see
+                :func:`scinr.newton.utils.uid.make_instance_uid`. A plain indexed
+                property match, **not** a traversal up to ``:Document`` — unlike
+                *document*, its cost does not depend on corpus size.
+            include_public: Add the public instances to *tenant_id*'s.
+            created_by_user_id: One user or several; matched against the
+                instance's accumulated ``created_by_user_ids`` array (a
+                dedup-merged instance can carry several).
+            job_id: One job or several; matched against the accumulated
+                ``job_ids`` array, same semantics as *created_by_user_id*.
             order_by: Instance property to sort by (validated as an identifier);
                 defaults to ``uid``.
 
@@ -655,31 +1070,67 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def count_model_instances_by_class(
-        self, model_class: str, *, where: _Where = None, document: _Selector | None = None
+        self,
+        model_class: str,
+        *,
+        where: _Where = None,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> int:
         """Count the instances :meth:`get_model_instances_by_class` would return.
 
         Accepts the same ``where=`` property filter (see
-        :mod:`scinr.newton.navigation.filters`).
+        :mod:`scinr.newton.navigation.filters`) and the same scope filters.
         """
 
     @abstractmethod
-    async def get_model_instance(self, uid: str) -> ModelInstanceRef | None:
+    async def get_model_instance(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> ModelInstanceRef | None:
         """Return the ``:ModelInstance`` with this ``uid``, or ``None``."""
 
     @abstractmethod
     async def get_model_instance_by_key(
-        self, model_class: str, key_fields: Mapping[str, str]
+        self,
+        model_class: str,
+        key_fields: Mapping[str, str],
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> ModelInstanceRef | None:
         """Return the instance whose deterministic ``instance_key`` uid matches.
 
         *key_fields* maps each ``instance_key`` field name to its value. Values
         are normalised (NFKD, accent-stripped, lower-cased, whitespace-collapsed)
-        before the uid is rebuilt — same as ingestion.
+        before the uid is rebuilt — same as ingestion. The uid embeds the tenant
+        (see :func:`scinr.newton.utils.uid.make_instance_uid`), so the lookup
+        cannot span "all tenants": pass a concrete *tenant_id* (or
+        ``"__public__"``); ``tenant_id=None`` raises ``NavigationError``. With
+        ``include_public=True`` the tenant's instance is tried first, then the
+        public one.
         """
 
     @abstractmethod
-    async def get_structure_nodes_for_model_instance(self, uid: str) -> list[StructureNodeRef]:
+    async def get_structure_nodes_for_model_instance(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[StructureNodeRef]:
         """Return the structure node(s) that own instance *uid* via containment.
 
         Always a list: a deduplicated ``instance_key`` instance can belong to
@@ -687,12 +1138,26 @@ class GraphNavigator(ABC):
         """
 
     @abstractmethod
-    async def get_documents_for_model_instance(self, uid: str) -> list[DocumentRef]:
+    async def get_documents_for_model_instance(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[DocumentRef]:
         """Return the document(s) that contain instance *uid*. Always a list."""
 
     @abstractmethod
     async def get_extraction_results_for_model_instance(
-        self, uid: str
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ExtractionResultRef]:
         """Return the extraction result(s) that reach instance *uid*. Always a list."""
 
@@ -704,6 +1169,10 @@ class GraphNavigator(ABC):
         rel_type: str | None = None,
         depth: int | None = 1,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return ``:ModelInstance`` nodes with an edge **into** *uid* (any rel type).
 
@@ -718,6 +1187,10 @@ class GraphNavigator(ABC):
         rel_type: str | None = None,
         depth: int | None = 1,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return ``:ModelInstance`` nodes reached by an edge **out of** *uid* (any rel type).
 
@@ -726,7 +1199,14 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_model_instance_subtree(
-        self, uid: str, *, depth: int | None = None
+        self,
+        uid: str,
+        *,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> ModelInstanceTree | None:
         """Return the outgoing-edge subtree rooted at instance *uid*."""
 
@@ -737,6 +1217,10 @@ class GraphNavigator(ABC):
         *,
         direction: Literal["out", "in", "both"] = "both",
         rel_type: str | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRelation]:
         """Return every edge between *uid* and another ``:ModelInstance``.
 
@@ -747,19 +1231,40 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_related_model_instances(
-        self, uid: str, rel_type: str, *, direction: Literal["out", "in"] = "out"
+        self,
+        uid: str,
+        rel_type: str,
+        *,
+        direction: Literal["out", "in"] = "out",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return instances linked to *uid* by ``rel_type`` in ``direction``."""
 
     @abstractmethod
     async def find_shell_model_instances(
-        self, *, model_class: str | None = None, limit: int | None = None
+        self,
+        *,
+        model_class: str | None = None,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return likely "shell" instances (only key properties populated)."""
 
     @abstractmethod
     async def list_model_instance_relationship_types(
-        self, *, document: _Selector | None = None
+        self,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[RelTypeStat]:
         """Return distinct ``(source model, rel_type, target model, count)`` triples
         for **non-containment** edges between model instances.
@@ -771,13 +1276,28 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_model_instance_entities(
-        self, uid: str, *, label: str | None = None
+        self,
+        uid: str,
+        *,
+        label: str | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[LabeledEntityRef]:
         """Return labeled entities that instance *uid* ``REFERENCES``."""
 
     @abstractmethod
     async def get_node_entities(
-        self, node_id: str, *, label: str | None = None, depth: int | None = None
+        self,
+        node_id: str,
+        *,
+        label: str | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[LabeledEntityRef]:
         """Return labeled entities referenced by any model instance under *node_id*.
 
@@ -794,11 +1314,28 @@ class GraphNavigator(ABC):
         version: int | None = None,
         depth: int | None = None,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[LabeledEntityRef]:
-        """Return labeled entities referenced anywhere in *document*."""
+        """Return labeled entities referenced anywhere in *document*.
+
+        *created_by_user_id* / *job_id* further narrow by the entity's own
+        accumulated provenance arrays (an entity reached from this document can
+        still have been touched by other jobs/users within the same tenant — see
+        :meth:`get_labeled_entities`).
+        """
 
     @abstractmethod
-    async def list_entity_labels(self) -> list[EntityLabelStat]:
+    async def list_entity_labels(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[EntityLabelStat]:
         """Return each distinct ``:LabeledEntity`` label with its node count."""
 
     @abstractmethod
@@ -811,6 +1348,10 @@ class GraphNavigator(ABC):
         where: _Where = None,
         limit: int | None = None,
         skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[LabeledEntityRef]:
         """Find labeled entities by label / value / normalised value / ``where=``.
 
@@ -818,21 +1359,49 @@ class GraphNavigator(ABC):
         ``:LabeledEntity`` node — e.g.
         ``where={"label": In(["Country", "ProcedureType"])}``. See
         :mod:`scinr.newton.navigation.filters`.
+
+        The scope filters act on the entity's own denormalized provenance —
+        same semantics as :meth:`get_model_instances_by_class`; no traversal
+        to ``:Document``.
         """
 
     @abstractmethod
-    async def get_labeled_entity(self, uid: str) -> LabeledEntityRef | None:
+    async def get_labeled_entity(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> LabeledEntityRef | None:
         """Return the labeled entity with this ``uid``, or ``None``."""
 
     @abstractmethod
     async def get_model_instances_referencing_entity(
-        self, uid: str, *, model_class: str | None = None, limit: int | None = None
+        self,
+        uid: str,
+        *,
+        model_class: str | None = None,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelInstanceRef]:
         """Return instances that ``REFERENCES`` labeled entity *uid* (reverse lookup)."""
 
     @abstractmethod
     async def get_nodes_referencing_entity(
-        self, uid: str, *, depth: int | None = None, limit: int | None = None
+        self,
+        uid: str,
+        *,
+        depth: int | None = None,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
         """Return structure nodes whose model instances reference entity *uid*.
 
@@ -847,6 +1416,10 @@ class GraphNavigator(ABC):
         *,
         direction: Literal["out", "in", "both"] = "both",
         rel_type: str | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[EntityRelation]:
         """Return Level-2 ``field_relationships`` edges of labeled entity *uid*.
 
@@ -856,12 +1429,28 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_related_entities(
-        self, uid: str, rel_type: str, *, direction: Literal["out", "in"] = "out"
+        self,
+        uid: str,
+        rel_type: str,
+        *,
+        direction: Literal["out", "in"] = "out",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[LabeledEntityRef]:
         """Return labeled entities linked to *uid* by ``rel_type``."""
 
     @abstractmethod
-    async def get_triples(self, node_id: str) -> list[Triple]:
+    async def get_triples(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[Triple]:
         """Return subject–predicate–object triples extracted from *node_id*.
 
         The predicate edge is optional: a subject entity with no predicate edge
@@ -871,7 +1460,14 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def get_entity_triples(
-        self, value_or_uid: str, *, direction: Literal["out", "in", "both"] = "both"
+        self,
+        value_or_uid: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[Triple]:
         """Return triples touching the ``:Entity`` identified by value or uid."""
 
@@ -895,13 +1491,26 @@ class GraphNavigator(ABC):
 
     @abstractmethod
     async def list_model_classes_in_use(
-        self, *, document: _Selector | None = None
+        self,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelClassStat]:
         """Return each distinct ``ModelInstance.model_class`` with its count."""
 
     @abstractmethod
     async def get_model_properties(
-        self, model_class: str, *, document: _Selector | None = None
+        self,
+        model_class: str,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> dict[str, list[str]]:
         """Return ``{"declared": [...], "observed": [...]}`` property names for
         ``model_class`` — the catalog-declared ``:ModelField`` names and the
@@ -909,7 +1518,15 @@ class GraphNavigator(ABC):
         """
 
     @abstractmethod
-    async def list_node_roles(self, *, document: _Selector | None = None) -> list[RoleStat]:
+    async def list_node_roles(
+        self,
+        *,
+        document: _Selector | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[RoleStat]:
         """Return each distinct ``StructureNode.role`` with its count."""
 
     @abstractmethod
@@ -930,7 +1547,14 @@ class GraphNavigator(ABC):
         """Return the engine-native node-type names in the graph."""
 
     @abstractmethod
-    async def get_graph_summary(self) -> GraphSummary:
+    async def get_graph_summary(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> GraphSummary:
         """Return whole-graph counts by node type and (structural) relationship type."""
 
     # ===================================================================
@@ -947,6 +1571,10 @@ class GraphNavigator(ABC):
         target_types: Sequence[str] | None = None,
         depth: int | None = 1,
         limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[GraphNode]:
         """Return nodes adjacent to *selector* along the given edges."""
 
@@ -958,6 +1586,10 @@ class GraphNavigator(ABC):
         *,
         max_hops: int = 6,
         edge_types: Sequence[str] | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> PathResult | None:
         """Return a shortest path between two nodes, or ``None``."""
 
@@ -969,5 +1601,120 @@ class GraphNavigator(ABC):
         depth: int = 2,
         edge_types: Sequence[str] | None = None,
         max_nodes: int = 500,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> Subgraph:
         """Return a bounded neighbourhood of *selector* as ``{nodes, edges}``."""
+
+    # ===================================================================
+    # I. Source text & original files (graph + storage backend)
+    # ===================================================================
+    #
+    # Concrete: they only combine the public graph methods above with the
+    # storage repositories (``navigation.pages``), so graph backends need not
+    # implement them. On a ``ScopedNavigator`` they receive the view's scope.
+
+    async def get_structure_nodes_source_pages(
+        self,
+        node_ids: Sequence[str],
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> StructureNodesSourcePages:
+        """Return the verbatim converted markdown pages behind structure nodes
+        *node_ids* (``StructureNodeRef.id``, not the short local ``node_id``).
+
+        One graph lookup for all nodes and one storage read per stored tenant
+        of the nodes; a page shared by several nodes is returned once, in
+        ``pages``. Missing / out-of-scope nodes, nodes without pages and
+        pages not found (or of another tenant) are reported in the envelope's
+        status groups instead of raising. See
+        :func:`scinr.newton.navigation.pages.get_structure_nodes_source_pages`.
+
+        Raises:
+            StorageError: If there are pages to read and no persistent storage
+                backend is configured.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_structure_nodes_source_pages(
+            self, node_ids, tenant_id=tenant_id, include_public=include_public,
+            created_by_user_id=created_by_user_id, job_id=job_id,
+        )
+
+    async def get_info_unit_source_text(
+        self,
+        uid: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[PageText]:
+        """Return the source pages behind the structure node owning info unit *uid*.
+
+        Raises:
+            StorageError: If no persistent storage backend is configured.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_info_unit_source_text(
+            self, uid, tenant_id=tenant_id, include_public=include_public,
+            created_by_user_id=created_by_user_id, job_id=job_id,
+        )
+
+    async def get_document_source_text(
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[PageText]:
+        """Return every converted page of *document* (latest, or *version*),
+        ordered by page index.
+
+        Raises:
+            StorageError: If no persistent storage backend is configured.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_document_source_text(
+            self, document, version=version, tenant_id=tenant_id,
+            include_public=include_public, created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        )
+
+    async def get_document_original(
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> OriginalFile | None:
+        """Return the original uploaded file of *document* (latest, or *version*):
+        its ``RawFileRecord`` plus a single-use stream of the binary.
+
+        ``None`` when the document is not found in the scope, has no stored
+        original, or its original does not belong to the document's tenant.
+
+        Raises:
+            StorageError: If no persistent storage backend is configured, or
+                the binary is missing from the backend.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_document_original(
+            self, document, version=version, tenant_id=tenant_id,
+            include_public=include_public, created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        )

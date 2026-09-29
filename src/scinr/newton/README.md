@@ -170,26 +170,30 @@ All stage functions are async and importable from `scinr.newton`:
 
 **Module:** `scinr.newton.ingest.deletion`
 
-#### `delete_document(path, version=None)`
+#### `delete_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None)`
 
-Async function. Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `--update` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
+Async function. Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `update_mode=True` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
 
 ```python
 import asyncio
 from scinr.newton import delete_document
 
-result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a"))        # deletes every version
-result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", version=2))  # deletes only version 2
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", tenant_id="acme"))             # every version
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", version=2, tenant_id="acme"))  # only version 2
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", tenant_id=None))               # the public document
+result = asyncio.run(delete_document(job_id="job-123", tenant_id="acme"))                      # a whole ingestion run
 print(result.found, result.documents_deleted, result.structure_nodes_deleted)
 
 # Inside an already-running event loop, use await instead:
-result = await delete_document("ModuloA/SubModulo/doc_a")
+result = await delete_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
 ```
+
+`tenant_id` is **mandatory** (keyword-only, no default — omitting it raises `TypeError`) because the tenant is part of the document identity: two tenants can own documents at the same path. `tenant_id=None` (or `"__public__"`) explicitly targets public documents; there is no way to delete across tenants. Exactly one of `path` / `job_id` selects the documents within that tenant (`job_id` and `created_by_user_id` accept one value or a list); `version` and `created_by_user_id` are optional extra filters.
 
 Behavior:
 
 1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
-2. Read-only check: finds every `(:Document {path: $path})` matching `version` (or all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
+2. Read-only check: finds every `:Document` of the tenant matching the selector (`path` or `job_id`) and the optional filters (all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
 3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the Neo4j driver is still closed via the `finally` block).
 4. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
 5. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
@@ -253,8 +257,11 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 
 | Field | Type | Description |
 |---|---|---|
-| `path` | `str` | The Document `path` that was targeted for deletion. |
+| `path` | `str \| None` | The Document `path` that was targeted for deletion, or `None` when selected by `job_id`. |
 | `version` | `int \| None` | The specific version requested, or `None` if all versions were targeted. |
+| `job_id` | `str \| None` | The `job_id` selector that was targeted, or `None` when selected by `path`. |
+| `tenant_id` | `str \| None` | The tenant the deletion was scoped to (always applied), or `None` for public documents. |
+| `created_by_user_id` | `str \| None` | The `created_by_user_id` filter applied, or `None` if none was requested. |
 | `found` | `bool` | `True` if at least one matching Document existed before deletion. When `False`, all counters below are 0 and no delete or GC queries were executed. |
 | `versions_deleted` | `list[int]` | Sorted list of integer versions that matched and were deleted. Empty when `found` is `False`. |
 | `documents_deleted` | `int` | Number of `:Document` nodes deleted (the matched Document(s) plus any reached via `IS_COMPOSED_OF*`). |
@@ -327,11 +334,7 @@ Normalises every supported file format into a uniform intermediate JSON envelope
 
 Converters are registered in `src/scinr/newton/converters/registry.py` (keyed by file extension), so the pipeline auto-selects the right converter for each file. When a storage backend is configured, Stage 0 also stores the raw binary and converted pages in MongoDB.
 
-```bash
-# CLI
-newton --stage preprocess --input-raw files/ --input data/json/
-
-# Library API
+```python
 result, docs = asyncio.run(run_preprocess("files/", output_dir="data/json/"))
 ```
 
@@ -355,11 +358,7 @@ Reads the paged JSON and processes pages through a **sliding window** (default 2
 
 A **2-phase extraction + repair loop** handles malformed LLM output: if Pydantic validation fails, a dedicated repair model retries up to 3 times with escalating temperatures (`0.0 → 0.3 → 0.6`). The repair logic is shared across all LLM stages via `src/scinr/newton/utils/llm_repair.py`.
 
-```bash
-# CLI
-newton --stage extract --input data/json/ --output data/output/ --parallel-docs 4
-
-# Library API
+```python
 result, docs = asyncio.run(run_extraction(input_folder="data/json/", output_folder="data/output/", parallel_docs=4))
 ```
 
@@ -379,19 +378,15 @@ Key behaviours:
 - **Folder hierarchy** — when a `folder_path` is present, ancestor `(:Document)` nodes are created and connected via `[:IS_COMPOSED_OF]` relationships, mirroring the source directory tree inside the graph.
 - **Versioning** — each ingest increments the `version` counter and sets `latest=true` on the new node while all previous versions become `latest=false`.
 
-```bash
-# CLI — ingest from output folder
-newton --stage ingest --output data/output/
-
-# CLI — update in-place (no new version created)
-newton --stage ingest --output data/output/ --update
-
-# CLI — link as successor of another document
-newton --stage all --input-raw files/new/ --input data/json/ --output data/output/ --replaces "OldDocumentName"
-
-# Library API
+```python
+# Ingest from output folder
 result = asyncio.run(run_ingestion(output_folder="data/output/"))
+
+# Update in-place (no new version created)
 result = asyncio.run(run_ingestion(output_folder="data/output/", update_mode=True))
+
+# Link as successor of another document
+result = asyncio.run(run_pipeline(input_raw="files/new/", replaces="OldDocumentName"))
 ```
 
 ---
@@ -413,19 +408,14 @@ For each node the agent reads the theme assigned during Stage 1, then makes a st
 
 The **ThemeRegistry** auto-discovers all `src/scinr/newton/models/*/catalog.py` files at startup and presents their `THEME_DESCRIPTION` and `SELECTABLE_MODELS` to the LLM — no code changes needed when a new domain is added.
 
-```bash
-# CLI — annotate all nodes
-newton --stage annotate --document "MyDocument"
-
-# CLI — resume (skip already-annotated nodes)
-newton --stage annotate --document "MyDocument" --only-unannotated
-
-# CLI — manual override (assign a fixed model without LLM)
-newton --stage annotate --document "MyDocument" --manual --model "Triple"
-
-# Library API
+```python
+# Annotate all nodes
 result = asyncio.run(run_annotation("MyDocument"))
+
+# Resume (skip already-annotated nodes)
 result = asyncio.run(run_annotation("MyDocument", only_unannotated=True))
+
+# Manual override (assign a fixed model without LLM)
 result = asyncio.run(run_annotation("MyDocument", manual=True, model_class="Triple"))
 ```
 
@@ -450,15 +440,11 @@ The **`compose_schema`** step dynamically constructs a composite Pydantic model 
 - Fields with `field_relationships` metadata generate typed Neo4j relationships between entity nodes.
 - Nodes without a model decision fall back to the `Triple` (RDF) model.
 
-```bash
-# CLI — extract entities for all annotated nodes
-newton --stage entity_extract --document "MyDocument"
-
-# CLI — resume (skip nodes that already have an ExtractionResult)
-newton --stage entity_extract --document "MyDocument" --only-unextracted --parallel-docs 4
-
-# Library API
+```python
+# Extract entities for all annotated nodes
 result = asyncio.run(run_entity_extraction("MyDocument"))
+
+# Resume (skip nodes that already have an ExtractionResult)
 result = asyncio.run(run_entity_extraction("MyDocument", only_unextracted=True, parallel_docs=4))
 ```
 
@@ -478,58 +464,17 @@ Ingests tabular files directly into Neo4j, bypassing Stages 0–4. For each shee
 3. Maps sheet columns to model fields via LLM.
 4. Writes `(:Document)-[:HAS_STRUCTURE]->(:StructureNode:Table)-[:HAS_CHILD]->(:StructureNode:Row)` subgraph.
 
-```bash
-# CLI — ingest all CSV/XLSX files in a folder
-newton --stage tabular --input-raw files/data/
-
-# CLI — update mode (wipe and re-ingest)
-newton --stage tabular --input-raw files/data/ --update
-
-# Library API
+```python
+# Ingest all CSV/XLSX files in a folder
 result = asyncio.run(run_tabular_pipeline("files/data/"))
+
+# Update mode (wipe and re-ingest)
 result = asyncio.run(run_tabular_pipeline("files/data/", update_mode=True))
 ```
 
-The tabular pipeline is also automatically invoked by `--stage all` (and `run_pipeline()` with `input_raw`) when CSV/XLSX/XLS files are present in the input directory.
+The tabular pipeline is also automatically invoked by `run_pipeline()` with `input_raw` when CSV/XLSX/XLS files are present in the input directory.
 
 > When two or more columns map to the same model field, values are combined/deduplicated (only for `str` and `list[str]` fields — other field types keep the last value and log a warning). See the [Tabular Pipeline guide, §7.4](../../../docs/user-guides/tabular-pipeline.md#74-combining-values-when-multiple-columns-map-to-the-same-field) for details.
-
----
-
-### CLI Reference
-
-The CLI entry point is `scinr.newton.cli:main_sync`, registered as `newton` via `pyproject.toml`:
-
-```bash
-newton --stage <STAGE> [options]
-```
-
-| `--stage` choice | Equivalent `run_pipeline()` stages | Description |
-|---|---|---|
-| `all` | `["preprocess", "extraction", "ingestion", "annotation", "entity_extraction"]` | Full pipeline |
-| `preprocess` | `["preprocess"]` | Stage 0 only |
-| `extract` | `["extraction"]` | Stage 1 only |
-| `ingest` | `["ingestion"]` | Stage 2 only |
-| `annotate` | `["annotation"]` | Stage 3 only |
-| `entity_extract` | `["entity_extraction"]` | Stage 4 only |
-| `tabular` | `["tabular"]` | Tabular bypass only |
-
-Key CLI flags:
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--input` | `DIR` | `data/json/` | Input folder for Stage 1 (intermediate JSON files) |
-| `--input-raw` | `DIR` | — | Raw source files folder for Stage 0 / tabular |
-| `--output` | `DIR` | `data/output/` | Output folder for Stage 1/2 |
-| `--document` | `NAME` | — | Document name for Stage 3/4. Required with `--stage annotate` and `--stage entity_extract` |
-| `--update` | flag | off | Update mode: re-ingest into the latest version without creating a new one |
-| `--replaces` | `DOC_NAME` | — | Name of existing document being superseded |
-| `--parallel-docs` | `N` | `1` | Concurrent documents across stages |
-| `--only-unannotated` | flag | off | Stage 3 only: skip already-annotated nodes |
-| `--only-unextracted` | flag | off | Stage 4 only: skip already-extracted nodes |
-| `--manual` | flag | off | Stage 3 only: assign fixed model without LLM. Requires `--model` |
-| `--model` | `CLASS_NAME` | — | CamelCase model class name for `--manual` annotation |
-| `--context` | `TEXT` | — | Free-text context instructions passed to Stage 0 and Stage 3 LLMs |
 
 ---
 
@@ -601,12 +546,12 @@ RETURN s.node_id, s.title, s.theme;
 
 Every ingest run auto-increments the `version` counter and marks only the newest node as `latest=true`.
 
-| Scenario | CLI flag / API param | Behaviour |
+| Scenario | API param | Behaviour |
 |---|---|---|
 | First ingest | *(none)* | Creates version 1 with `latest=true`. |
-| Re-ingest (correction) | `--update` / `update_mode=True` | Wipes and re-ingests into the existing latest version; no new version node created. |
+| Re-ingest (correction) | `update_mode=True` | Wipes and re-ingests into the existing latest version; no new version node created. |
 | New version | *(none, run again)* | Creates version N+1, links via `HAS_NEWER_VERSION`, sets `latest=true`. |
-| Document supersedes another | `--replaces <name>` / `replaces="name"` | Links the new document as the successor of the named existing document. The old document's `latest=True` version becomes `latest=False`. |
+| Document supersedes another | `replaces="name"` | Links the new document as the successor of the named existing document. The old document's `latest=True` version becomes `latest=False`. |
 
 ---
 
@@ -664,6 +609,8 @@ configure(
 ```
 
 > **Breaking change:** `RawFileRepository.delete(raw_file_id)` and `PageRepository.delete_pages(raw_file_id)` are new required abstract methods, added so that `delete_document()` (see [Document Deletion](#document-deletion)) can clean up documental storage before deleting the corresponding Neo4j nodes. Any pre-existing `storage_backend="custom"` implementation must add both methods. Both must be idempotent: `delete()` must not raise if the `raw_file_id` no longer exists, and `delete_pages()` must return `0` (not raise) if no pages match.
+
+> **Breaking change (multi-tenancy):** `RawFileRepository.get` / `open` / `open_with_record` / `list_raw_files` and `PageRepository.get_pages_by_ids` are new required abstract methods, writes take keyword-only `tenant_id` / `created_by_user_id` / `job_id`, and reads / deletes take the navigation scope (`tenant_id`, `include_public`, `created_by_user_id`, `job_id`; `None` = all tenants). See `docs/user-guides/storage-backends.md#multi-tenancy`.
 
 The storage backend abstraction lives in `src/scinr/newton/storage/base.py` and `src/scinr/newton/storage/factory.py`. Additional backends (e.g. PostgreSQL, S3) can be added by implementing the base interface.
 

@@ -19,7 +19,7 @@ Usage (navigation only — no LLM required):
     from scinr.newton.navigation import graph_navigator
     configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
 
-Usage (CLI mode / .env file):
+Usage (environment variables / .env file):
     configure()  # Reads everything from environment variables
 """
 
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -123,6 +123,7 @@ class ScinrConfig:
     mongodb_raw_files_collection: str = "raw_files"
     mongodb_pages_collection: str = "converted_pages"
     mongodb_gridfs_bucket: str = "raw_binaries"
+    mongodb_ensure_indexes: bool = True
     custom_storage: tuple | None = None  # (RawFileRepository, PageRepository)
     # Converters
     extra_converters: dict[str, type] = field(default_factory=dict)
@@ -154,6 +155,25 @@ class ScinrConfig:
     normalization_batch_size: int = 5
     normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
 
+    def __repr__(self) -> str:
+        # The generated dataclass repr would print the secrets verbatim — and it
+        # ends up in tracebacks that capture locals, debuggers and error reports.
+        from scinr.newton.utils.redaction import MASK, redact_uri
+
+        parts = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.name in _SECRET_FIELDS and value:
+                value = MASK
+            elif f.name in _URI_FIELDS:
+                value = redact_uri(value)
+            parts.append(f"{f.name}={value!r}")
+        return f"{type(self).__name__}({', '.join(parts)})"
+
+
+_SECRET_FIELDS = frozenset({"neo4j_password", "mistral_api_key"})
+_URI_FIELDS = frozenset({"neo4j_uri", "mongodb_uri"})
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
@@ -176,9 +196,7 @@ def get_config() -> ScinrConfig:
             "Call configure() before using any pipeline function:\n"
             "\n"
             "  from scinr.newton import configure\n"
-            "  configure(llm=your_llm, neo4j_uri=..., neo4j_user=..., neo4j_password=..., neo4j_database=...)\n"
-            "\n"
-            "For CLI usage with environment variables, scinr-ingest handles this automatically."
+            "  configure(llm=your_llm, neo4j_uri=..., neo4j_user=..., neo4j_password=..., neo4j_database=...)"
         )
     return _config  # type: ignore[return-value]
 
@@ -210,6 +228,7 @@ def configure(
     mongodb_raw_files_collection: str | None = None,
     mongodb_pages_collection: str | None = None,
     mongodb_gridfs_bucket: str | None = None,
+    mongodb_ensure_indexes: bool | None = None,
     custom_storage: tuple | None = None,
     # Converters
     extra_converters: dict[str, type] | None = None,
@@ -267,6 +286,10 @@ def configure(
         mongodb_raw_files_collection: Collection for raw file metadata.
         mongodb_pages_collection: Collection for converted pages.
         mongodb_gridfs_bucket: GridFS bucket name for binary files.
+        mongodb_ensure_indexes: Create the MongoDB indexes automatically the first time
+            `get_storage()` is used in the process. Set to `False` when the database user
+            lacks the `createIndex` privilege and indexes are managed by operations.
+            Env: `MONGODB_ENSURE_INDEXES`. Default: `True`.
         custom_storage: Tuple `(RawFileRepository, PageRepository)` when `storage_backend='custom'`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
@@ -336,7 +359,14 @@ def configure(
     global _config
 
     # Setup logging first
+    root_had_handlers = bool(logging.getLogger().handlers)
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
+    if not root_had_handlers:
+        # The handler basicConfig just created is ours: make it mask credentials.
+        # An application's own handlers are left alone (see redact_handlers()).
+        from scinr.newton.utils.logging_config import redact_handlers
+
+        redact_handlers()
 
     # Resolved early (moved up from its original position below) because the
     # Bedrock client construction just below needs it to size its connection
@@ -603,6 +633,11 @@ def configure(
         ),
         mongodb_gridfs_bucket=(
             mongodb_gridfs_bucket or os.getenv("MONGODB_GRIDFS_BUCKET", "raw_binaries")
+        ),
+        mongodb_ensure_indexes=(
+            mongodb_ensure_indexes
+            if mongodb_ensure_indexes is not None
+            else os.getenv("MONGODB_ENSURE_INDEXES", "true").lower() == "true"
         ),
         custom_storage=custom_storage,
         extra_converters=extra_converters or {},

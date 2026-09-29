@@ -174,6 +174,8 @@ async def extract_one_intermediate(
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``
         written here and later persisted on the :Document node at ingestion.
+        Each ``None`` falls back to the value stamped on the intermediate
+        document at conversion.
 
     Returns
     -------
@@ -218,9 +220,13 @@ async def extract_one_intermediate(
         doc_path=doc_path,
         raw_file_id=doc.raw_file_id or "",
         context_instructions=context_instructions,
-        tenant_id=tenant_id,
-        created_by_user_id=created_by_user_id,
-        job_id=job_id,
+        # The caller's values win; otherwise inherit the owner stamped at
+        # conversion (the same one written on the stored raw file).
+        tenant_id=tenant_id if tenant_id is not None else doc.tenant_id,
+        created_by_user_id=(
+            created_by_user_id if created_by_user_id is not None else doc.created_by_user_id
+        ),
+        job_id=job_id if job_id is not None else doc.job_id,
     )
     llm = get_llm()
 
@@ -280,6 +286,8 @@ async def extract_one_file(
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``
         written here and later persisted on the :Document node at ingestion.
+        Each ``None`` falls back to the value stamped on the intermediate
+        document at conversion.
 
     Returns
     -------
@@ -324,9 +332,13 @@ async def extract_one_file(
         doc_path=doc_path,
         raw_file_id=raw.get("raw_file_id") or "",
         context_instructions=context_instructions,
-        tenant_id=tenant_id,
-        created_by_user_id=created_by_user_id,
-        job_id=job_id,
+        # The caller's values win; otherwise inherit the owner stamped at
+        # conversion (the same one written on the stored raw file).
+        tenant_id=tenant_id if tenant_id is not None else raw.get("tenant_id"),
+        created_by_user_id=(
+            created_by_user_id if created_by_user_id is not None else raw.get("created_by_user_id")
+        ),
+        job_id=job_id if job_id is not None else raw.get("job_id"),
     )
     llm = get_llm()
 

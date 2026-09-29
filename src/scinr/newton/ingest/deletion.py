@@ -3,7 +3,7 @@ ingest/deletion.py — Full document deletion (Document node + cascade + GC).
 
 Unlike ``delete_document_content()`` in ``ingest/nodes.py`` (which only wipes
 structure/annotation data for a single version to support in-place
-re-ingestion via ``--update``, keeping the :Document node itself), the
+re-ingestion via ``update_mode=True``, keeping the :Document node itself), the
 public :func:`delete_document` here removes the :Document node(s) as well
 as their entire composed/structural subtree, and then runs a two-pass
 global garbage collector to remove any resulting orphaned :Entity,
@@ -17,9 +17,12 @@ it raises, the Neo4j cascade delete never runs.
 
 Public API
 ----------
-    result = await delete_document(path, version=None)      # by path
-    result = await delete_document(job_id="job-123")        # by ingestion run
-    # optional AND filters in either mode: tenant_id=, created_by_user_id=
+    result = await delete_document(path, tenant_id="acme")               # by path
+    result = await delete_document(job_id="job-123", tenant_id="acme")   # by ingestion run
+    result = await delete_document(path, tenant_id=None)                 # public document
+    # tenant_id is mandatory (keyword-only, no default): every deletion is
+    # scoped to exactly one tenant, or to the public documents.
+    # optional AND filters in either mode: version=, created_by_user_id=
     # opens its own driver
 """
 
@@ -27,11 +30,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 
 from scinr.newton.config import get_config
 from scinr.newton.ingest.config import get_driver
 from scinr.newton.results import DeletionResult
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
+from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
@@ -39,37 +44,59 @@ GC_MAX_PASSES = 7
 """Maximum number of iterations run for each garbage-collection pass."""
 
 
+def _as_list(name: str, value: str | Sequence[str] | None) -> list[str] | None:
+    """Normalize a ``str | Sequence[str] | None`` filter to a list (``None`` = no filter)."""
+    if value is None:
+        return None
+    values = [value] if isinstance(value, str) else list(value)
+    if not values:
+        raise ValueError(f"{name} must not be an empty list (omit it for no filter).")
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Cypher queries
 # ---------------------------------------------------------------------------
 
-# delete_document() argument names that select :Document nodes, in a fixed
-# order. Each name is also the node property it filters on (equality). The
-# names are a hard-coded whitelist — never user input — so interpolating
-# them into the query string below carries no injection risk.
-_FILTERABLE_FIELDS = ("path", "job_id", "version", "tenant_id", "created_by_user_id")
+# delete_document() argument names that optionally narrow the :Document
+# selection, in a fixed order. Each name is also the node property it filters
+# on (equality). The names are a hard-coded whitelist — never user input — so
+# interpolating them into the query string below carries no injection risk.
+# tenant_id is deliberately NOT here: it is never optional (see below).
+# ``job_id`` and ``created_by_user_id`` match with ``IN`` (a list of values);
+# the others with equality.
+_IN_FIELDS = frozenset({"job_id", "created_by_user_id"})
+_FILTERABLE_FIELDS = ("path", "job_id", "version", "created_by_user_id")
 
 
 def _build_doc_match(filters: dict) -> tuple[str, dict]:
-    """Build the ``MATCH (d:Document) WHERE ...`` selection prefix from only
-    the *filters* values that are actually set (not ``None``), together with
-    the matching parameter dict.
+    """Build the ``MATCH (d:Document) WHERE ...`` selection prefix, together
+    with the matching parameter dict.
+
+    The tenant condition is **always** emitted: ``filters["tenant_id"]`` must
+    hold the stored tenant key (``utils.tenancy.tenant_key()`` applied, so
+    never ``None`` — ``"__public__"`` selects public documents). Every other
+    filter produces a condition only when it is set (not ``None``).
 
     Emitting a condition **only** for each supplied filter keeps the WHERE a
     plain conjunction of equality predicates, so Neo4j can use the
-    per-property :Document indexes (notably ``idx_document_job_id``) instead
-    of falling back to a full label scan — which an
-    ``$x IS NULL OR d.x = $x`` disjunction would force.
+    :Document indexes (the ``(tenant_id, path, version)`` constraint index,
+    ``idx_document_job_id``) instead of falling back to a full label scan —
+    which an ``$x IS NULL OR d.x = $x`` disjunction would force.
 
     ``delete_document()`` guarantees at least one of ``path`` / ``job_id`` is
-    set, so the condition list is never empty.
+    set on top of the tenant.
     """
-    conditions: list[str] = []
-    params: dict = {}
+    tenant = filters.get("tenant_id")
+    if tenant is None:
+        raise ValueError("_build_doc_match requires the stored tenant key in filters['tenant_id'].")
+    conditions: list[str] = ["d.tenant_id = $tenant_id"]
+    params: dict = {"tenant_id": tenant}
     for name in _FILTERABLE_FIELDS:
         value = filters.get(name)
         if value is not None:
-            conditions.append(f"d.{name} = ${name}")
+            op = "IN" if name in _IN_FIELDS else "="
+            conditions.append(f"d.{name} {op} ${name}")
             params[name] = value
     return f"MATCH (d:Document)\nWHERE {' AND '.join(conditions)}\n", params
 
@@ -82,7 +109,7 @@ WITH collect(DISTINCT d) + collect(DISTINCT cd) AS nodes
 UNWIND nodes AS n
 WITH DISTINCT n
 WHERE n IS NOT NULL AND n.raw_file_id IS NOT NULL AND n.raw_file_id <> ''
-RETURN DISTINCT n.raw_file_id AS raw_file_id
+RETURN DISTINCT n.raw_file_id AS raw_file_id, n.tenant_id AS tenant_id
 """
 
 _CASCADE_DELETE_TAIL = """
@@ -153,8 +180,9 @@ def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
         An open, authenticated Neo4j driver instance.
     filters:
         The target-selection parameter dict (``path``, ``version``,
-        ``tenant_id``, ``created_by_user_id``, ``job_id``); only its non-None
-        entries become WHERE conditions via :func:`_build_doc_match`.
+        ``tenant_id``, ``created_by_user_id``, ``job_id``); ``tenant_id`` (the
+        stored key) always becomes a WHERE condition, the others only when
+        not None — see :func:`_build_doc_match`.
     """
 
     def _do_delete() -> dict[str, int]:
@@ -261,42 +289,53 @@ def _fetch_existing_versions(driver, filters: dict) -> list[int]:
     return sorted(v for v in raw_versions if v is not None)
 
 
-def _fetch_raw_file_ids(driver, filters: dict) -> list[str]:
-    """Run the read-only raw_file_ids query and return the distinct list of
-    non-empty ``raw_file_id`` values for the target Document(s) and every
-    descendant reached via ``IS_COMPOSED_OF*`` — the same scope used by the
-    cascade delete query below.
+def _fetch_raw_file_ids(driver, filters: dict) -> list[tuple[str, str | None]]:
+    """Run the read-only raw_file_ids query and return the distinct
+    ``(raw_file_id, tenant_id)`` pairs — non-empty ``raw_file_id`` values and
+    the stored tenant of the node carrying each — for the target Document(s)
+    and every descendant reached via ``IS_COMPOSED_OF*``: the same scope used
+    by the cascade delete query below.
 
     Wrapped in with_neo4j_retry_sync for consistency with the other queries
     in this module. *filters* is the full target-selection parameter dict
     (see :func:`_run_cascade_delete`).
     """
 
-    def _do_query() -> list[str]:
+    def _do_query() -> list[tuple[str, str | None]]:
         cfg = get_config()
         match_clause, params = _build_doc_match(filters)
         with driver.session(database=cfg.neo4j_database) as session:
             result = session.run(match_clause + _RAW_FILE_IDS_TAIL, **params)
-            return [record["raw_file_id"] for record in result]
+            return [(record["raw_file_id"], record["tenant_id"]) for record in result]
 
     return with_neo4j_retry_sync(_do_query)
 
 
-async def _delete_storage_for_raw_file_ids(raw_file_ids: list[str]) -> tuple[int, int]:
+async def _delete_storage_for_raw_file_ids(
+    raw_file_ids: list[tuple[str, str | None]],
+) -> tuple[int, int]:
     """Delete storage records (raw binaries + converted pages) for every
-    given raw_file_id, via the configured storage backend.
+    given ``(raw_file_id, tenant_id)`` pair, via the configured storage backend.
+
+    Each delete is scoped to the tenant of the graph node that carries the
+    id, so a ``raw_file_id`` forged to point at another tenant's upload
+    deletes nothing. No user / job filter here: ``delete_document``'s filters
+    already selected the Documents in the graph, and their original must go
+    even when another job of the same tenant uploaded it. A legacy node
+    without ``tenant_id`` deletes unfiltered (its records have no tenant
+    either).
 
     Fail-fast: no exception raised here is caught — any unexpected error
     (e.g. StorageError, a dropped connection) propagates to the caller so
     that the Neo4j cascade delete is never reached. Backend implementations
     are expected to be idempotent for "already gone" cases (missing
-    metadata, missing GridFS binary, invalid ObjectId, no matching pages)
-    and to not raise for those.
+    metadata, missing GridFS binary, invalid ObjectId, no matching pages,
+    out of scope) and to not raise for those.
 
     Parameters
     ----------
     raw_file_ids:
-        Distinct, non-empty raw_file_id values to delete storage for.
+        Distinct ``(raw_file_id, stored tenant_id)`` pairs to delete storage for.
 
     Returns
     -------
@@ -311,9 +350,9 @@ async def _delete_storage_for_raw_file_ids(raw_file_ids: list[str]) -> tuple[int
     raw_file_repo, page_repo = get_storage()
     raw_files_deleted = 0
     converted_pages_deleted = 0
-    for rid in raw_file_ids:
-        converted_pages_deleted += await page_repo.delete_pages(rid)
-        await raw_file_repo.delete(rid)
+    for rid, tenant in raw_file_ids:
+        converted_pages_deleted += await page_repo.delete_pages(rid, tenant_id=tenant)
+        await raw_file_repo.delete(rid, tenant_id=tenant)
         raw_files_deleted += 1
     return raw_files_deleted, converted_pages_deleted
 
@@ -327,9 +366,9 @@ async def delete_document(
     path: str | None = None,
     version: int | None = None,
     *,
-    tenant_id: str | None = None,
-    created_by_user_id: str | None = None,
-    job_id: str | None = None,
+    tenant_id: str | None,
+    created_by_user_id: str | Sequence[str] | None = None,
+    job_id: str | Sequence[str] | None = None,
 ) -> DeletionResult:
     """Completely delete Document node(s), their entire cascade, and orphans.
 
@@ -345,19 +384,29 @@ async def delete_document(
 
     Target selection
     ----------------
-    Exactly one of *path* or *job_id* must be provided (``ValueError``
-    otherwise):
+    *tenant_id* is **mandatory** (keyword-only, no default — omitting it is a
+    ``TypeError``) and always applied: the deletion never leaves that
+    tenant's documents. ``tenant_id=None`` explicitly means "public
+    documents" (stored as ``"__public__"``, and ``tenant_id="__public__"``
+    means the same); there is no way to delete across tenants. Because every tenant has its own folder documents, the
+    ``IS_COMPOSED_OF*`` cascade below stays within the tenant too.
 
-    - *path*: delete the Document at that ``path`` (all versions, or only
-      *version* when given).
-    - *job_id*: delete every Document whose ``job_id`` property equals this
-      value — across all paths and versions of that ingestion run.
+    On top of the tenant, exactly one of *path* or *job_id* must be provided
+    (``ValueError`` otherwise):
 
-    *tenant_id* and *created_by_user_id*, when given, are additional AND
-    filters applied on top of either selector. A filter left as ``None``
-    means "do not filter on this property" (it does **not** mean "the
-    property must be null"). *version* is also accepted as an extra filter
-    in *job_id* mode.
+    - *path*: delete the tenant's Document at that ``path`` (all versions,
+      or only *version* when given).
+    - *job_id*: delete every Document of the tenant whose ``job_id``
+      property is any of these values (one ``str`` or several) — across all
+      paths and versions of those ingestion runs.
+
+    *created_by_user_id* (one ``str`` or several, matched with ``IN``), when
+    given, is an additional AND filter applied on top of either selector. Left as ``None`` it means "do not filter on this
+    property" (it does **not** mean "the property must be null"). *version*
+    is also accepted as an extra filter in *job_id* mode.
+
+    Who may delete a public document is an authorization decision for the
+    calling API layer; this function only enforces the scope.
 
     Before any Neo4j deletion happens, this also deletes the documental
     storage records (raw binary + converted Markdown pages) for every
@@ -388,21 +437,27 @@ async def delete_document(
 
     Raises
     ------
+    TypeError
+        If *tenant_id* is not passed.
     ValueError
-        If neither or both of *path* and *job_id* are provided.
+        If neither or both of *path* and *job_id* are provided, or
+        *tenant_id* is empty, or *job_id* / *created_by_user_id* is an
+        empty list.
     """
     if (path is None) == (job_id is None):
         raise ValueError(
             "delete_document requires exactly one of 'path' or 'job_id' "
             f"(got path={path!r}, job_id={job_id!r})."
         )
+    job_ids = _as_list("job_id", job_id)
+    user_ids = _as_list("created_by_user_id", created_by_user_id)
 
     filters = {
         "path": path,
         "version": version,
-        "tenant_id": tenant_id,
-        "created_by_user_id": created_by_user_id,
-        "job_id": job_id,
+        "tenant_id": tenant_key(tenant_id),
+        "created_by_user_id": user_ids,
+        "job_id": job_ids,
     }
     selector_repr = ", ".join(f"{k}={v!r}" for k, v in filters.items() if v is not None)
 

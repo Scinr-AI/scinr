@@ -20,6 +20,9 @@ async def run_annotation(
     parallel_docs: int = 1,
     only_unannotated: bool = False,
     context_instructions_override: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> StageResult:
     """Run the annotation stage for an already-ingested document.
 
@@ -31,7 +34,9 @@ async def run_annotation(
     Parameters
     ----------
     document_name:
-        Name of the document node already present in Neo4j.
+        Name of the document node already present in Neo4j. Used to select the
+        document only when *doc_path* is not given (then every latest document
+        of *tenant_id* with that name is processed).
     manual:
         If True, run in manual override mode instead of the LLM agent.
     model_class:
@@ -44,6 +49,11 @@ async def run_annotation(
         relationship. Ignored when *manual* is True.
     context_instructions_override:
         When provided, use this context string instead of fetching from Neo4j.
+    tenant_id:
+        Owner of the document (``None`` = public document). Only that tenant's
+        documents are read or written.
+    doc_path:
+        Path of the document — with *tenant_id*, the preferred selector.
 
     Returns
     -------
@@ -64,7 +74,9 @@ async def run_annotation(
     t0 = time.monotonic()
 
     if manual:
-        count = await run_manual_annotation(document_name, model_class)
+        count = await run_manual_annotation(
+            document_name, model_class, tenant_id=tenant_id, doc_path=doc_path
+        )
         logger.info(
             "Manual annotation complete: assigned '%s' to %d nodes in '%s'",
             model_class, count, document_name,
@@ -88,6 +100,8 @@ async def run_annotation(
         parallel_docs=parallel_docs,
         only_unannotated=only_unannotated,
         context_instructions_override=context_instructions_override,
+        tenant_id=tenant_id,
+        doc_path=doc_path,
     )
 
     duration = time.monotonic() - t0

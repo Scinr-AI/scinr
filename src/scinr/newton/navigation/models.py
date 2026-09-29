@@ -11,9 +11,13 @@ All models are frozen: navigation is read-only and its results are snapshots.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from scinr.newton.storage.models import RawFileRecord
 
 
 class _Base(BaseModel):
@@ -497,6 +501,64 @@ class PageText(_Base):
     page_id: str
     index: int | None = None
     markdown: str
+    raw_file_id: str | None = None
+    filename: str | None = None
+    folder_path: str | None = None
+
+
+class StructureNodeSourcePages(_Base):
+    """The source pages of one structure node inside a
+    :class:`StructureNodesSourcePages` (ids only; the pages themselves are in
+    the envelope's ``pages``)."""
+
+    structure_node_id: str
+    # Found pages, ordered by page index.
+    page_ids: list[str] = Field(default_factory=list)
+    # ``source_page_ids`` missing from storage or outside the node's tenant.
+    not_found_page_ids: list[str] = Field(default_factory=list)
+
+
+class StructureNodesSourcePages(_Base):
+    """Source pages of several structure nodes (see
+    ``navigation.pages.get_structure_nodes_source_pages``).
+
+    A page shared by several nodes appears once in ``pages``.
+    """
+
+    # In request order; only the nodes that have ``source_page_ids``.
+    nodes: list[StructureNodeSourcePages] = Field(default_factory=list)
+    # page_id -> page, each page once.
+    pages: dict[str, PageText] = Field(default_factory=dict)
+    # Ids that do not exist or are outside the scope (not told apart).
+    not_found_structure_nodes: list[str] = Field(default_factory=list)
+    # In scope, but with empty ``source_page_ids``.
+    structure_nodes_without_pages: list[str] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OriginalFile:
+    """The original uploaded file behind a document (see
+    ``navigation.pages.get_document_original``).
+
+    Not a Pydantic snapshot like the other models: it holds an open,
+    single-use stream of the binary. Consume it with ``async for chunk in
+    original.stream`` (constant memory) or :meth:`read` (whole file).
+    """
+
+    record: RawFileRecord
+    stream: AsyncIterator[bytes]
+
+    @property
+    def filename(self) -> str:
+        return self.record.filename
+
+    @property
+    def content_type(self) -> str:
+        return self.record.content_type
+
+    async def read(self) -> bytes:
+        """Read the whole (remaining) stream into memory."""
+        return b"".join([chunk async for chunk in self.stream])
 
 
 # Resolve forward references for the self/cross-referential trees.
@@ -519,5 +581,5 @@ __all__ = [
     "CatalogFieldRef", "CatalogModelRef", "CatalogRelation", "CatalogGraph", "ThemeRef",
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
-    "PageText",
+    "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",
 ]

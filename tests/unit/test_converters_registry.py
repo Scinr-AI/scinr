@@ -1,7 +1,7 @@
 """
 tests/unit/test_converters_registry.py — Unit tests for scinr.newton.converters.registry
 
-Imports directly from submodules to avoid triggering the CLI import chain.
+Imports directly from submodules to avoid triggering the package's heavy import chain.
 """
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
 """
 tests/unit/test_config.py — Unit tests for scinr.newton.config
 
-Imports are done from submodules directly to avoid triggering the CLI
-import chain (which calls get_config() at module load time).
+Imports are done from submodules directly to avoid triggering the package's
+heavy import chain.
 """
 from __future__ import annotations
 

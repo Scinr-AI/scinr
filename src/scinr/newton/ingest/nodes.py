@@ -7,6 +7,14 @@ Pydantic model instances. The insertion strategy is:
   MERGE — nodes with a unique composite key (Document, StructureNode) or a
           deterministic uid (InfoUnit). Prevents duplicates on re-ingestion.
 
+The tenant is part of every document's identity: a :Document is keyed by
+``(tenant_id, path, version)``, and every ``MATCH``/``MERGE`` of a :Document
+here includes the tenant. Two tenants ingesting the same path get fully
+independent documents, folders, versions and structure. All functions in this
+module take the **stored** tenant key (``utils.tenancy.tenant_key()`` already
+applied — ``"__public__"`` for a public document); ``insert_document_graph()``
+is the one that normalizes ``doc.tenant_id``.
+
 Relationships are established with MATCH … MERGE to avoid duplicates while
 being tolerant of re-runs.
 
@@ -16,8 +24,10 @@ Child nodes (InfoUnit) are only created when their parent node already exists
 ``insert_document_graph`` receives the resolved integer version externally
 (via *resolved_version*) rather than reading it from ``doc.version``.
 
-StructureNode composite id:  ``{doc_path}::{version}::{ancestor_path/node_id}``
-InfoUnit uid:                ``info_unit_id`` field (16-char SHA-256 hex)
+StructureNode composite id:  ``{tenant_key}::{doc_path}::{version}::{ancestor_path/node_id}``
+                             (see :func:`make_structure_node_id`)
+InfoUnit uid:                ``info_unit_id`` field (16-char SHA-256 hex), derived
+                             from the parent StructureNode id — so it is tenant-scoped too
 """
 
 from __future__ import annotations
@@ -32,8 +42,26 @@ from scinr.newton.models.document_structure import (
     NodeRole,
     StructureNode,
 )
+from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
+
+
+def make_structure_node_id(tenant_id: str, doc_path: str, version: int, node_path: str) -> str:
+    """Composite ``id`` of a :StructureNode: ``{tenant}::{doc_path}::{version}::{node_path}``.
+
+    The tenant prefix keeps two tenants' structure apart when they ingest the
+    same path, and every id derived from this one (InfoUnit, ModelDecision,
+    ExtractionResult uids, tabular Row ids) inherits it.
+
+    Args:
+        tenant_id: Stored tenant key (``utils.tenancy.tenant_key()`` applied).
+        doc_path: Relative path of the owning document.
+        version: Integer version of the owning document.
+        node_path: Slash-separated ``node_id`` chain from the root node down to
+            (and including) this node, e.g. ``"5_3/5_3_1"``.
+    """
+    return f"{tenant_id}::{doc_path}::{version}::{node_path}"
 
 
 def _make_uid(*parts: str) -> str:
@@ -68,17 +96,21 @@ assert set(ROLE_TO_LABEL.keys()) == {e.value for e in NodeRole}, (
 # ---------------------------------------------------------------------------
 
 
-def get_next_version(session, doc_path: str) -> int:
-    """Query Neo4j for the highest existing version of *doc_path* and return next.
+def get_next_version(session, doc_path: str, tenant_id: str) -> int:
+    """Query Neo4j for the highest existing version of *doc_path* within
+    *tenant_id* and return next. Versions are numbered per tenant.
 
-    Returns 1 if no document with that path exists yet.
+    Returns 1 if the tenant has no document with that path yet.
 
     Args:
         session: An open Neo4j session (not a transaction).
         doc_path: Relative path of the document.
+        tenant_id: Stored tenant key.
     """
     result = session.run(
-        "MATCH (d:Document {path: $path}) RETURN max(d.version) AS max_version",
+        "MATCH (d:Document {tenant_id: $tenant_id, path: $path}) "
+        "RETURN max(d.version) AS max_version",
+        tenant_id=tenant_id,
         path=doc_path,
     )
     record = result.single()
@@ -86,27 +118,30 @@ def get_next_version(session, doc_path: str) -> int:
     return (max_version + 1) if max_version is not None else 1
 
 
-def get_current_latest_version(session, doc_path: str) -> int | None:
-    """Return the version of the current ``latest=true`` Document at *doc_path*.
+def get_current_latest_version(session, doc_path: str, tenant_id: str) -> int | None:
+    """Return the version of *tenant_id*'s current ``latest=true`` Document at *doc_path*.
 
-    Returns ``None`` if no document with that path exists.
+    Returns ``None`` if the tenant has no document with that path.
 
     Args:
         session: An open Neo4j session (not a transaction).
         doc_path: Relative path of the document.
+        tenant_id: Stored tenant key.
     """
     result = session.run(
-        "MATCH (d:Document {path: $path, latest: true}) RETURN d.version AS version",
+        "MATCH (d:Document {tenant_id: $tenant_id, path: $path, latest: true}) "
+        "RETURN d.version AS version",
+        tenant_id=tenant_id,
         path=doc_path,
     )
     record = result.single()
     return record["version"] if record else None
 
 
-def delete_document_content(tx, doc_path: str, version: int) -> None:
+def delete_document_content(tx, doc_path: str, version: int, tenant_id: str) -> None:
     """Delete all structure and annotation data for a specific document version.
 
-    Used by the ``--update`` flow to wipe the existing content before re-inserting.
+    Used by the ``update_mode=True`` flow to wipe the existing content before re-inserting.
     Deletes in leaf-first order to avoid orphan nodes:
 
     1. InfoUnits
@@ -119,9 +154,13 @@ def delete_document_content(tx, doc_path: str, version: int) -> None:
         tx: An open Neo4j transaction.
         doc_path: Relative path of the document.
         version: Integer version number of the document to wipe.
+        tenant_id: Stored tenant key of the document to wipe.
     """
-    _base = "MATCH (d:Document {path: $path, version: $version})-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)"
-    params = {"path": doc_path, "version": version}
+    _base = (
+        "MATCH (d:Document {tenant_id: $tenant_id, path: $path, version: $version})"
+        "-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)"
+    )
+    params = {"tenant_id": tenant_id, "path": doc_path, "version": version}
 
     # 1. InfoUnits
     tx.run(f"{_base}-[:HAS_INFO_UNIT]->(iu:InfoUnit) DETACH DELETE iu", **params)
@@ -143,7 +182,8 @@ def delete_document_content(tx, doc_path: str, version: int) -> None:
     tx.run(f"{_base} DETACH DELETE n", **params)
 
     logger.info(
-        "delete_document_content: wiped structure for path=%s version=%d",
+        "delete_document_content: wiped structure for tenant=%s path=%s version=%d",
+        tenant_id,
         doc_path,
         version,
     )
@@ -162,11 +202,12 @@ def insert_document(
     raw_file_id: str = "",
     is_folder: bool = False,
     context_instructions: str | None = None,
-    tenant_id: str | None = None,
+    *,
+    tenant_id: str,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> None:
-    """MERGE a :Document node keyed by (path, version).
+    """MERGE a :Document node keyed by (tenant_id, path, version).
 
     Sets name, path, version, load_date, latest, is_folder,
     context_instructions, tenant_id, created_by_user_id, and job_id.
@@ -181,8 +222,7 @@ def insert_document(
         is_folder: True for folder-parent documents; False for leaf documents.
         context_instructions: Optional free-text user-provided ingestion context. When None, the
             property is stored as null in Neo4j (i.e. effectively absent).
-        tenant_id: Optional caller-supplied multi-tenant owner id. Always written
-            (stored as null when None).
+        tenant_id: Stored tenant key — part of the node's identity (MERGE key).
         created_by_user_id: Optional caller-supplied id of the user that launched the
             ingestion. Always written (stored as null when None).
         job_id: Optional caller-supplied ingestion job/run id. Always written
@@ -193,13 +233,12 @@ def insert_document(
 
     tx.run(
         """
-        MERGE (d:Document {path: $path, version: $version})
+        MERGE (d:Document {tenant_id: $tenant_id, path: $path, version: $version})
         SET d.name                 = $name,
             d.load_date            = $load_date,
             d.is_folder            = $is_folder,
             d.raw_file_id          = $raw_file_id,
             d.context_instructions = $context_instructions,
-            d.tenant_id            = $tenant_id,
             d.created_by_user_id   = $created_by_user_id,
             d.job_id               = $job_id,
             d.latest               = true
@@ -215,28 +254,34 @@ def insert_document(
         created_by_user_id=created_by_user_id,
         job_id=job_id,
     )
-    logger.debug("Merged Document node: path=%s version=%s", doc_path, version)
+    logger.debug(
+        "Merged Document node: tenant=%s path=%s version=%s", tenant_id, doc_path, version
+    )
 
 
-def handle_versioning(tx, doc_path: str, new_version: int) -> None:
+def handle_versioning(tx, doc_path: str, new_version: int, tenant_id: str) -> None:
     """Find the previous latest version of a document and link it to the new version.
 
-    If a Document with the same path exists with latest=True (and a different version),
-    it is marked latest=False and linked via HAS_NEWER_VERSION to the newly created version.
+    If *tenant_id* has a Document with the same path and latest=True (and a
+    different version), it is marked latest=False and linked via
+    HAS_NEWER_VERSION to the newly created version. Another tenant's document
+    at the same path is never touched.
 
     Args:
         tx: An open Neo4j transaction.
         doc_path: Relative path identifying this document location.
         new_version: The integer version number of the newly created Document node.
+        tenant_id: Stored tenant key.
     """
     tx.run(
         """
-        MATCH (old:Document {path: $path, latest: true})
+        MATCH (old:Document {tenant_id: $tenant_id, path: $path, latest: true})
         WHERE old.version <> $new_version
-        MATCH (new:Document {path: $path, version: $new_version})
+        MATCH (new:Document {tenant_id: $tenant_id, path: $path, version: $new_version})
         SET old.latest = false
         MERGE (old)-[:HAS_NEWER_VERSION]->(new)
         """,
+        tenant_id=tenant_id,
         path=doc_path,
         new_version=new_version,
     )
@@ -251,11 +296,15 @@ def insert_folder_document_hierarchy(
     tx,
     folder_path: str,
     version: int,
-    tenant_id: str | None = None,
+    *,
+    tenant_id: str,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> None:
     """Create all ancestor folder-parent Document nodes for a given path.
+
+    Folders belong to one tenant: each tenant gets its own folder nodes (keyed
+    by ``(tenant_id, path, version)``) even when two tenants use the same path.
 
     Given a path like "ModuloA/SubModulo/doc", creates::
 
@@ -273,8 +322,7 @@ def insert_folder_document_hierarchy(
         folder_path: Relative folder path (e.g. "ModuloA/SubModulo"). Use the doc_path's
             parent: e.g. if doc_path="ModuloA/SubModulo/doc", pass "ModuloA/SubModulo".
         version: Integer version number shared across this ingestion run.
-        tenant_id: Optional caller-supplied multi-tenant owner id. Always written on
-            every folder-parent node (stored as null when None).
+        tenant_id: Stored tenant key — part of every folder node's identity.
         created_by_user_id: Optional caller-supplied id of the user that launched the
             ingestion. Always written (stored as null when None).
         job_id: Optional caller-supplied ingestion job/run id. Always written
@@ -290,11 +338,10 @@ def insert_folder_document_hierarchy(
 
         tx.run(
             """
-            MERGE (f:Document {path: $path, version: $version})
+            MERGE (f:Document {tenant_id: $tenant_id, path: $path, version: $version})
             SET f.name               = $name,
                 f.load_date          = $load_date,
                 f.is_folder          = true,
-                f.tenant_id          = $tenant_id,
                 f.created_by_user_id = $created_by_user_id,
                 f.job_id             = $job_id,
                 f.latest             = true
@@ -310,17 +357,18 @@ def insert_folder_document_hierarchy(
         logger.debug("Merged folder Document: path=%s version=%s", current_path, version)
 
         # Handle versioning for this folder level too
-        handle_versioning(tx, current_path, version)
+        handle_versioning(tx, current_path, version, tenant_id)
 
         # Link parent → child if depth > 0
         if depth > 0:
             parent_path = "/".join(parts[:depth])
             tx.run(
                 """
-                MATCH (parent:Document {path: $parent_path, version: $version})
-                MATCH (child:Document {path: $child_path, version: $version})
+                MATCH (parent:Document {tenant_id: $tenant_id, path: $parent_path, version: $version})
+                MATCH (child:Document {tenant_id: $tenant_id, path: $child_path, version: $version})
                 MERGE (parent)-[:IS_COMPOSED_OF]->(child)
                 """,
+                tenant_id=tenant_id,
                 parent_path=parent_path,
                 child_path=current_path,
                 version=version,
@@ -336,13 +384,15 @@ def link_leaf_to_folder(
     tx,
     doc_path: str,
     version: int,
+    tenant_id: str,
 ) -> None:
-    """Link a leaf document to its immediate folder parent (if any).
+    """Link a leaf document to its immediate folder parent (if any) of the same tenant.
 
     Args:
         tx: An open Neo4j transaction.
         doc_path: Full relative path of the leaf document (e.g. "ModuloA/SubModulo/doc_a").
         version: Integer version number.
+        tenant_id: Stored tenant key.
     """
     # folder_path is everything before the last "/"
     if "/" not in doc_path:
@@ -352,10 +402,11 @@ def link_leaf_to_folder(
 
     tx.run(
         """
-        MATCH (parent:Document {path: $folder_path, version: $version})
-        MATCH (leaf:Document {path: $doc_path, version: $version})
+        MATCH (parent:Document {tenant_id: $tenant_id, path: $folder_path, version: $version})
+        MATCH (leaf:Document {tenant_id: $tenant_id, path: $doc_path, version: $version})
         MERGE (parent)-[:IS_COMPOSED_OF]->(leaf)
         """,
+        tenant_id=tenant_id,
         folder_path=folder_path,
         doc_path=doc_path,
         version=version,
@@ -390,19 +441,24 @@ def insert_info_unit(
         info_unit: The :class:`~scinr.newton.models.document_structure.InfoUnit`
             to persist.
         parent_node_id: The composite Neo4j ``id`` of the parent :StructureNode
-            (``"{doc_path}::{version}::{ancestor_path/node_id}"``).
-            For example ``"Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested) or
-            ``"Amox 500 mg/0000/m3::2::5_3"`` (root-level node).
+            (``"{tenant_key}::{doc_path}::{version}::{ancestor_path/node_id}"``).
+            For example ``"acme::Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested) or
+            ``"__public__::Amox 500 mg/0000/m3::2::5_3"`` (root-level node of a
+            public document). The InfoUnit uid is hashed from it, so it is
+            tenant-scoped as well.
     """
     uid = _make_uid(parent_node_id, info_unit.title, info_unit.description)
     tx.run(
         """
         MATCH (n:StructureNode {id: $node_id})
         MERGE (u:InfoUnit {uid: $uid})
-        SET  u.info_unit_id = $info_unit_id,
-                      u.title        = $title,
-                      u.description  = $description,
-                      u.order        = $order
+        SET  u.info_unit_id       = $info_unit_id,
+             u.title              = $title,
+             u.description        = $description,
+             u.order              = $order,
+             u.tenant_id          = n.tenant_id,
+             u.created_by_user_id = n.created_by_user_id,
+             u.job_id             = n.job_id
         MERGE (n)-[:HAS_INFO_UNIT]->(u)
         """,
         node_id=parent_node_id,
@@ -431,6 +487,10 @@ def insert_structure_node(
     version: int,
     parent_id: str | None = None,
     node_path: str = "",
+    *,
+    tenant_id: str,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """MERGE a :StructureNode (with its role label), attach it to its parent,
     then recursively insert children and info units.
@@ -439,16 +499,17 @@ def insert_structure_node(
     and the role-specific label derived from :data:`ROLE_TO_LABEL`
     (e.g. ``:Section``, ``:Table``).
 
-    The composite ``id`` is ``"{doc_path}::{version}::{ancestor_path/node_id}"``.
-    For root-level nodes (no ancestor path) it reduces to
-    ``"{doc_path}::{version}::{node_id}"``.
+    The composite ``id`` is
+    ``"{tenant_key}::{doc_path}::{version}::{ancestor_path/node_id}"`` (see
+    :func:`make_structure_node_id`). For root-level nodes (no ancestor path) it
+    reduces to ``"{tenant_key}::{doc_path}::{version}::{node_id}"``.
 
-    Examples: ``"Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested),
-    ``"Amox 500 mg/0000/m3::2::5_3"`` (root-level node).
+    Examples: ``"acme::Amox 500 mg/0000/m3::2::5_3/5_3_1"`` (nested),
+    ``"__public__::Amox 500 mg/0000/m3::2::5_3"`` (root-level node, public document).
 
     Relationship rules:
 
-    - ``parent_id is None``  → ``(:Document {path: doc_path, version: version})-[:HAS_STRUCTURE]->(:StructureNode)``
+    - ``parent_id is None``  → ``(:Document {tenant_id, path: doc_path, version})-[:HAS_STRUCTURE]->(:StructureNode)``
     - ``parent_id is not None`` → ``(:StructureNode {id: parent_id})-[:HAS_CHILD]->(:StructureNode)``
 
     Args:
@@ -461,11 +522,19 @@ def insert_structure_node(
             when this node is a direct child of the :Document node.
         node_path: Slash-separated ancestor ``node_id`` values leading up to (but NOT
             including) the current node.  Empty string for root-level nodes.
+        tenant_id: Stored tenant key of the owning :Document. Prefixes the
+            composite id, selects the :Document to attach to, and is written
+            onto the node.
+        tenant_id, created_by_user_id, job_id: Denormalized copies of the owning
+            :Document's provenance, written verbatim onto every :StructureNode
+            (scalar — a StructureNode belongs to exactly one Document, never
+            merged across documents). Lets navigation filter structure nodes by
+            tenant/user/job without a traversal back up to :Document.
     """
     role_val = node.role if isinstance(node.role, str) else node.role.value
     role_label = ROLE_TO_LABEL[role_val]
     current_node_path = f"{node_path}/{node.node_id}" if node_path else node.node_id
-    composite_id = f"{doc_path}::{version}::{current_node_path}"
+    composite_id = make_structure_node_id(tenant_id, doc_path, version, current_node_path)
 
     # MERGE on id only, then SET the role label separately.  Including
     # role_label in the MERGE pattern would cause a constraint violation when
@@ -475,12 +544,15 @@ def insert_structure_node(
         f"""
         MERGE (n:StructureNode {{id: $id}})
         SET   n:{role_label},
-              n.node_id          = $node_id,
-              n.role             = $role,
-              n.appearance_order = $appearance_order,
-              n.title            = $title,
-              n.theme            = $theme,
-              n.source_page_ids  = $source_page_ids
+              n.node_id            = $node_id,
+              n.role               = $role,
+              n.appearance_order   = $appearance_order,
+              n.title              = $title,
+              n.theme              = $theme,
+              n.source_page_ids    = $source_page_ids,
+              n.tenant_id          = $tenant_id,
+              n.created_by_user_id = $created_by_user_id,
+              n.job_id             = $job_id
         """,
         id=composite_id,
         node_id=node.node_id,
@@ -489,6 +561,9 @@ def insert_structure_node(
         appearance_order=node.appearance_order,
         theme=getattr(node, "theme", "default"),
         source_page_ids=node.source_page_ids,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
     logger.debug("Merged StructureNode %s (role=%s)", composite_id, role_val)
 
@@ -496,10 +571,11 @@ def insert_structure_node(
     if parent_id is None:
         tx.run(
             """
-            MATCH (d:Document {path: $doc_path, version: $version})
+            MATCH (d:Document {tenant_id: $tenant_id, path: $doc_path, version: $version})
             MATCH (n:StructureNode {id: $node_id})
             MERGE (d)-[:HAS_STRUCTURE]->(n)
             """,
+            tenant_id=tenant_id,
             doc_path=doc_path,
             version=version,
             node_id=composite_id,
@@ -538,6 +614,9 @@ def insert_structure_node(
             version=version,
             parent_id=composite_id,
             node_path=current_node_path,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
 
 
@@ -576,17 +655,24 @@ def insert_document_graph(
         update_mode: If True, existing structure for this version is deleted before
             re-insertion. No new version is created; no HAS_NEWER_VERSION link.
 
-    The caller-supplied provenance metadata (``doc.tenant_id``,
-    ``doc.created_by_user_id``, ``doc.job_id``) is read straight off *doc* and
-    written verbatim onto every :Document node this call creates — the leaf
-    node and every ancestor folder-parent node — always SET (stored as null
-    when the field is None), mirroring ``doc.context_instructions``.
+    ``doc.tenant_id`` is normalized here, once, with
+    :func:`~scinr.newton.utils.tenancy.tenant_key` (``None`` → ``"__public__"``)
+    and the stored key selects/creates every :Document of this call (leaf and
+    folder parents), prefixes every StructureNode id and is copied onto every
+    node below. *doc* itself is not modified. ``doc.created_by_user_id`` and
+    ``doc.job_id`` are written verbatim (null when None), mirroring
+    ``doc.context_instructions``.
+
+    Raises:
+        ValueError: If ``doc.tenant_id`` is empty.
     """
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
+    tenant = tenant_key(doc.tenant_id)
 
     logger.info(
-        "Inserting document graph for '%s' (path=%s, version=%d, update=%s, %d root nodes)",
+        "Inserting document graph for '%s' (tenant=%s, path=%s, version=%d, update=%s, %d root nodes)",
         doc.document_name,
+        tenant,
         doc_path,
         resolved_version,
         update_mode,
@@ -595,7 +681,7 @@ def insert_document_graph(
 
     # 1. Wipe existing structure when updating in-place
     if update_mode:
-        delete_document_content(tx, doc_path, resolved_version)
+        delete_document_content(tx, doc_path, resolved_version, tenant)
 
     # 2. Create all ancestor folder-parent nodes (if any)
     if "/" in doc_path:
@@ -604,7 +690,7 @@ def insert_document_graph(
             tx,
             folder_path,
             resolved_version,
-            tenant_id=doc.tenant_id,
+            tenant_id=tenant,
             created_by_user_id=doc.created_by_user_id,
             job_id=doc.job_id,
         )
@@ -618,17 +704,17 @@ def insert_document_graph(
         doc.raw_file_id,
         is_folder=False,
         context_instructions=doc.context_instructions,
-        tenant_id=doc.tenant_id,
+        tenant_id=tenant,
         created_by_user_id=doc.created_by_user_id,
         job_id=doc.job_id,
     )
 
     # 4. Handle versioning (only for normal loads, not updates)
     if not update_mode:
-        handle_versioning(tx, doc_path, resolved_version)
+        handle_versioning(tx, doc_path, resolved_version, tenant)
 
     # 5. Link leaf to its immediate folder parent
-    link_leaf_to_folder(tx, doc_path, resolved_version)
+    link_leaf_to_folder(tx, doc_path, resolved_version, tenant)
 
     # 6. Insert all StructureNodes
     for root_node in doc.document_structure:
@@ -638,6 +724,9 @@ def insert_document_graph(
             doc_path=doc_path,
             version=resolved_version,
             parent_id=None,
+            tenant_id=tenant,
+            created_by_user_id=doc.created_by_user_id,
+            job_id=doc.job_id,
         )
 
     logger.info(

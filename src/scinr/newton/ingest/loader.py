@@ -1,47 +1,46 @@
 """
-ingest/loader.py — Entry point for loading JSON extractions into Neo4j.
+ingest/loader.py — Loading JSON extractions into Neo4j.
 
-Usage (CLI):
-    python -m ingest.loader --file data/output/extract-my_doc.json
-    python -m ingest.loader --folder data/output/
-    python -m ingest.loader          # defaults to data/output/
-
-    Add --update to overwrite the latest version instead of creating a new one.
-
-Usage (library):
-    from ingest.loader import load_file, load_folder, load_documents
+Usage:
+    from scinr.newton.ingest.config import get_driver
+    from scinr.newton.ingest.loader import load_file, load_folder, load_documents
 
     driver = get_driver()
     load_file(Path("data/output/extract-my_doc.json"), driver)
     load_folder(Path("data/output/"), driver)
     load_documents([doc1, doc2], driver)  # in-memory mode
+
+The synchronous ``load_*`` functions are the graph-writing primitives: they do
+**not** verify that a document's ``raw_file_id`` belongs to its tenant (the
+storage repositories are async). The public entry points — ``ingest_one``,
+``ingest_one_from_path`` and ``stages.run_ingestion`` — run that check (``ingest.raw_file_check``) first; call those, or the check itself,
+rather than the ``load_*`` functions on untrusted input.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from neo4j.exceptions import ConstraintError
 
 from scinr.newton.config import get_config
 from scinr.newton.exceptions import IngestionError
-from scinr.newton.ingest.config import get_driver
 from scinr.newton.ingest.nodes import (
     get_current_latest_version,
     get_next_version,
     insert_document_graph,
 )
-from scinr.newton.ingest.schema import setup_schema
+from scinr.newton.ingest.schema import DOCUMENT_KEY_CONSTRAINT
 from scinr.newton.models.document_structure import Document
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
+from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_FOLDER = Path("data/output")
 _FILE_GLOB = "extract-*.json"
 
 
@@ -58,7 +57,9 @@ def _apply_metadata_overrides(
     (e.g. a value baked into an ``extract-*.json`` at extraction time)
     untouched. The resulting ``doc.tenant_id`` / ``doc.created_by_user_id`` /
     ``doc.job_id`` are then always written to Neo4j by
-    ``insert_document_graph`` (null when still None).
+    ``insert_document_graph`` (null when still None). ``doc.tenant_id`` keeps
+    its public-API form (``None`` = public); ``insert_document_graph``
+    normalizes it to the stored key.
     """
     if tenant_id is not None:
         doc.tenant_id = tenant_id
@@ -90,12 +91,26 @@ def _extract_all_paths(leaf_doc_paths: list[str]) -> list[str]:
     return list(all_paths)
 
 
+def _batch_tenants(tenant_id: str | None, baked: Iterable[str | None]) -> list[str | None]:
+    """Effective tenant(s) of a batch, in public-API form: the caller-supplied
+    *tenant_id* when given (it overrides every document's own value — see
+    ``_apply_metadata_overrides``), otherwise each document's *baked* value."""
+    if tenant_id is not None:
+        return [tenant_id]
+    return list(dict.fromkeys(baked))
+
+
 def _resolve_batch_version(
     session,
     all_paths: list[str],
     update_mode: bool,
+    tenant_ids: Iterable[str | None],
 ) -> int:
     """Compute a single shared integer version for a batch of documents.
+
+    Versions are numbered per tenant, so only the batch's own tenants'
+    documents are considered — another tenant's documents at the same paths
+    never bump (or, in update mode, select) this batch's version.
 
     In normal mode:  max existing version across all paths + 1  (or 1 if none).
     In update mode:  max current latest version across all paths (or 1 if none).
@@ -109,19 +124,28 @@ def _resolve_batch_version(
     update_mode:
         True → return the current latest version (no increment).
         False → return the next version (increment).
+    tenant_ids:
+        Tenant(s) the batch's documents will be written under, in public-API
+        form (``None`` = public). Usually one; several only when documents
+        carry different tenants baked into their ``extract-*.json``.
     """
     if not all_paths:
         return 1
 
+    stored_tenants = sorted({tenant_key(t) for t in tenant_ids})
     if update_mode:
         result = session.run(
-            "MATCH (d:Document {latest: true}) WHERE d.path IN $paths "
+            "MATCH (d:Document {latest: true}) "
+            "WHERE d.tenant_id IN $tenant_ids AND d.path IN $paths "
             "RETURN max(d.version) AS max_version",
+            tenant_ids=stored_tenants,
             paths=all_paths,
         )
     else:
         result = session.run(
-            "MATCH (d:Document) WHERE d.path IN $paths RETURN max(d.version) AS max_version",
+            "MATCH (d:Document) WHERE d.tenant_id IN $tenant_ids AND d.path IN $paths "
+            "RETURN max(d.version) AS max_version",
+            tenant_ids=stored_tenants,
             paths=all_paths,
         )
 
@@ -134,7 +158,12 @@ def _resolve_batch_version(
         return (max_version + 1) if max_version is not None else 1
 
 
-def resolve_batch_version_sync(driver, all_paths: list[str], update_mode: bool) -> int:
+def resolve_batch_version_sync(
+    driver,
+    all_paths: list[str],
+    update_mode: bool,
+    tenant_ids: Iterable[str | None],
+) -> int:
     """Public wrapper around _resolve_batch_version(): opens its own read
     session and delegates to the existing private function, without
     duplicating any logic. Intended to be called via asyncio.to_thread()
@@ -150,10 +179,13 @@ def resolve_batch_version_sync(driver, all_paths: list[str], update_mode: bool) 
     update_mode:
         True → return the current latest version (no increment).
         False → return the next version (increment).
+    tenant_ids:
+        Tenant(s) the batch will be written under (public-API form, ``None``
+        = public) — see ``_resolve_batch_version``.
     """
     cfg = get_config()
     with driver.session(database=cfg.neo4j_database) as session:
-        return _resolve_batch_version(session, all_paths, update_mode)
+        return _resolve_batch_version(session, all_paths, update_mode, tenant_ids)
 
 
 def _read_doc_path(path: Path) -> str | None:
@@ -167,6 +199,15 @@ def _read_doc_path(path: Path) -> str | None:
             folder_path = raw.get("folder_path")
             doc_path = f"{folder_path}/{name}" if folder_path else name
         return doc_path
+    except Exception:
+        return None
+
+
+def _read_tenant_id(path: Path) -> str | None:
+    """Read *only* the tenant_id baked into an extract-*.json file (``None``
+    when absent or unreadable — the file then fails later, on full validation)."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("tenant_id")
     except Exception:
         return None
 
@@ -220,6 +261,7 @@ def load_file(
     doc = Document.model_validate_json(path.read_text(encoding="utf-8"))
     _apply_metadata_overrides(doc, tenant_id, created_by_user_id, job_id)
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
+    tenant = tenant_key(doc.tenant_id)
 
     logger.info(
         "Validated document '%s' (path=%s, %d root nodes)",
@@ -235,9 +277,9 @@ def load_file(
         cfg = get_config()
         with driver.session(database=cfg.neo4j_database) as session:
             if update_mode:
-                resolved_version = get_current_latest_version(session, doc_path) or 1
+                resolved_version = get_current_latest_version(session, doc_path, tenant) or 1
             else:
-                resolved_version = get_next_version(session, doc_path)
+                resolved_version = get_next_version(session, doc_path, tenant)
 
     logger.info(
         "Resolved version for '%s': %d (update_mode=%s)",
@@ -261,7 +303,7 @@ def load_file(
                 except ConstraintError as exc:
                     tx.rollback()
                     if (
-                        "constraint_document_path_version" in str(exc).lower()
+                        DOCUMENT_KEY_CONSTRAINT in str(exc).lower()
                         or "version" in str(exc).lower()
                     ):
                         raise IngestionError(
@@ -319,9 +361,10 @@ def load_files(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
+    tenants = _batch_tenants(tenant_id, (_read_tenant_id(f) for f in files))
     cfg = get_config()
     with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode)
+        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
@@ -395,6 +438,7 @@ def _load_document_object(
     """
     _apply_metadata_overrides(doc, tenant_id, created_by_user_id, job_id)
     doc_path = doc.doc_path if doc.doc_path else doc.document_name
+    tenant = tenant_key(doc.tenant_id)
 
     logger.info(
         "Loading in-memory document '%s' (path=%s, %d root node(s))",
@@ -409,9 +453,9 @@ def _load_document_object(
         cfg = get_config()
         with driver.session(database=cfg.neo4j_database) as session:
             if update_mode:
-                resolved_version = get_current_latest_version(session, doc_path) or 1
+                resolved_version = get_current_latest_version(session, doc_path, tenant) or 1
             else:
-                resolved_version = get_next_version(session, doc_path)
+                resolved_version = get_next_version(session, doc_path, tenant)
 
     logger.info(
         "Resolved version for '%s': %d (update_mode=%s)",
@@ -435,7 +479,7 @@ def _load_document_object(
                 except ConstraintError as exc:
                     tx.rollback()
                     if (
-                        "constraint_document_path_version" in str(exc).lower()
+                        DOCUMENT_KEY_CONSTRAINT in str(exc).lower()
                         or "version" in str(exc).lower()
                     ):
                         raise IngestionError(
@@ -502,8 +546,18 @@ async def ingest_one(
     -------
     str
         The document_name of the successfully ingested document.
+
+    Raises
+    ------
+    IngestionError
+        If ``doc.raw_file_id`` is set but is not a stored raw file of the
+        document's effective tenant (see ``ingest.raw_file_check``). Nothing is
+        written to Neo4j in that case.
     """
     from scinr.newton.config import get_neo4j_sync_semaphore
+    from scinr.newton.ingest.raw_file_check import verify_document
+
+    await verify_document(doc, tenant_id)
 
     semaphore = get_neo4j_sync_semaphore()
     async with semaphore:
@@ -555,8 +609,18 @@ async def ingest_one_from_path(
     -------
     str
         The document_name of the successfully ingested document.
+
+    Raises
+    ------
+    IngestionError
+        If the file's ``raw_file_id`` is set but is not a stored raw file of the
+        document's effective tenant (see ``ingest.raw_file_check``). Nothing is
+        written to Neo4j in that case.
     """
     from scinr.newton.config import get_neo4j_sync_semaphore
+    from scinr.newton.ingest.raw_file_check import verify_json_file
+
+    await verify_json_file(path, tenant_id)
 
     semaphore = get_neo4j_sync_semaphore()
     async with semaphore:
@@ -612,9 +676,10 @@ def load_documents(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [doc.doc_path if doc.doc_path else doc.document_name for doc in documents]
     all_paths = _extract_all_paths(leaf_doc_paths)
+    tenants = _batch_tenants(tenant_id, (doc.tenant_id for doc in documents))
     cfg = get_config()
     with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode)
+        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
@@ -704,9 +769,10 @@ def load_folder(
     # Collect all doc_paths (leaves + ancestor folders) for batch version resolution
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in json_files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
+    tenants = _batch_tenants(tenant_id, (_read_tenant_id(f) for f in json_files))
     cfg = get_config()
     with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode)
+        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
 
     logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
@@ -741,62 +807,3 @@ def load_folder(
             "\n".join(f"  {p}: {e}" for p, e in errors.items()),
         )
     return doc_names
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    """Command-line interface for the scinr-ingest ingestion module."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    )
-
-    parser = argparse.ArgumentParser(
-        prog="ingest.loader",
-        description="Ingest scinr JSON extraction files into Neo4j.",
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--file",
-        metavar="PATH",
-        help="Path to a single JSON extraction file to ingest.",
-    )
-    group.add_argument(
-        "--folder",
-        metavar="DIR",
-        help=(
-            f"Path to a folder of JSON extraction files to ingest (recursive). "
-            f"Defaults to '{_DEFAULT_FOLDER}' when neither --file nor --folder is given."
-        ),
-    )
-    parser.add_argument(
-        "--update",
-        action="store_true",
-        default=False,
-        help=(
-            "Update mode: wipe existing structure of the latest version and re-insert. "
-            "Does not create a new version. Use to fix errors in the last ingest."
-        ),
-    )
-
-    args = parser.parse_args()
-
-    driver = get_driver()
-    try:
-        setup_schema(driver)
-
-        if args.file:
-            load_file(Path(args.file), driver, update_mode=args.update)
-        else:
-            folder = Path(args.folder) if args.folder else _DEFAULT_FOLDER
-            load_folder(folder, driver, update_mode=args.update)
-    finally:
-        driver.close()
-
-
-if __name__ == "__main__":
-    main()

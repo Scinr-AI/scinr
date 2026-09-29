@@ -2,7 +2,7 @@
 tests/integration/test_converters.py — Integration tests for file converters.
 
 These tests exercise the full converter pipeline without network, Neo4j, or LLM.
-Imports directly from submodules to avoid triggering the CLI import chain.
+Imports directly from submodules to avoid triggering the package's heavy import chain.
 """
 from __future__ import annotations
 

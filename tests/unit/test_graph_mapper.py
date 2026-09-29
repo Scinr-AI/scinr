@@ -25,9 +25,13 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock
 
-from pydantic import create_model
+from pydantic import BaseModel, Field, create_model
 
-from scinr.newton.entity_extraction.graph_mapper import _stringify_if_dict, _write_model_fields
+from scinr.newton.entity_extraction.graph_mapper import (
+    _merge_labeled_entity,
+    _stringify_if_dict,
+    _write_model_fields,
+)
 
 
 def test_stringify_if_dict_flattens_dict() -> None:
@@ -117,3 +121,134 @@ async def test_write_model_fields_writes_flattened_scalar_values_for_mixed_list(
     )
     assert set_calls[0].kwargs["mixed_field"] == ["a: 1", "plain"]
     assert set_calls[0].kwargs["parent_uid"] == "test-uid"
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenant isolation — tenant_id is folded into the uid of every
+# merge-deduplicated node (ModelInstance with instance_key, LabeledEntity,
+# Entity), and provenance is written on every node.
+# ---------------------------------------------------------------------------
+
+
+class _Country(BaseModel):
+    code: str = Field(json_schema_extra={"instance_key": True})
+    name: str = Field(json_schema_extra={"entity_label": "CountryName"})
+
+
+class _Wrapper(BaseModel):
+    country: _Country
+    related: list[str] = Field(json_schema_extra={"instance_relationships": [
+        {"target_model": "_Country", "join_via": {"related": "code"}, "rel_type": "RELATED"}
+    ]})
+
+
+async def _merged_uids(tenant_id: str | None, user: str = "u1", job: str = "j1") -> tuple[dict, list]:
+    """Run _write_model_fields for the same content and return
+    {cypher-kind: uid} for every MERGE'd node plus the raw calls."""
+    session = AsyncMock()
+    await _write_model_fields(
+        session=session,
+        instance=_Wrapper(country=_Country(code="ES", name="Spain"), related=["FR"]),
+        parent_uid="er",
+        parent_label="ExtractionResult",
+        field_path_prefix="",
+        entity_nodes={},
+        depth=0,
+        tenant_id=tenant_id,
+        created_by_user_id=user,
+        job_id=job,
+    )
+    uids: dict[str, str] = {}
+    for call in session.run.call_args_list:
+        q, kw = call.args[0], call.kwargs
+        if "MERGE (child:ModelInstance" in q:
+            uids["mi_child"] = kw["child_uid"]
+        elif "MERGE (tgt:ModelInstance" in q:
+            uids["mi_target"] = kw["tgt_uid"]
+        elif "MERGE (le:LabeledEntity" in q:
+            uids["labeled_entity"] = kw["uid"]
+    return uids, session.run.call_args_list
+
+
+async def test_same_content_different_tenants_never_share_merged_nodes() -> None:
+    a, _ = await _merged_uids("tenant_A")
+    b, _ = await _merged_uids("tenant_B")
+    assert set(a) == {"mi_child", "mi_target", "labeled_entity"}
+    for kind in a:
+        assert a[kind] != b[kind], f"{kind} collides across tenants"
+
+
+async def test_same_tenant_different_job_dedups_to_same_nodes() -> None:
+    first, _ = await _merged_uids("tenant_A", user="u1", job="j1")
+    second, _ = await _merged_uids("tenant_A", user="u2", job="j2")
+    assert first == second
+
+
+async def test_merged_nodes_write_provenance_on_create_and_on_match() -> None:
+    _, calls = await _merged_uids("tenant_A", user="u1", job="j1")
+    merges = [c for c in calls if "MERGE (child:ModelInstance" in c.args[0]
+              or "MERGE (tgt:ModelInstance" in c.args[0]
+              or "MERGE (le:LabeledEntity" in c.args[0]]
+    assert len(merges) == 3
+    for c in merges:
+        q = c.args[0]
+        on_match = q.split("ON MATCH", 1)[1]
+        assert ".tenant_id = $tenant_id" in on_match
+        assert ".created_by_user_ids = CASE" in on_match
+        assert ".job_ids = CASE" in on_match
+        assert c.kwargs["tenant_id"] == "tenant_A"
+        assert c.kwargs["created_by_user_id"] == "u1"
+        assert c.kwargs["job_id"] == "j1"
+
+
+async def test_labeled_entity_is_merged_by_tenant_scoped_uid() -> None:
+    """MERGE must match on the tenant-scoped uid, not on (label, normalized_value) —
+    otherwise two tenants' entities would still collapse onto one node."""
+    session = AsyncMock()
+    uid_a = await _merge_labeled_entity(session, "CountryName", "Spain", tenant_id="tenant_A")
+    uid_b = await _merge_labeled_entity(session, "CountryName", "Spain", tenant_id="tenant_B")
+    assert uid_a != uid_b
+    for call in session.run.call_args_list:
+        assert "MERGE (le:LabeledEntity {uid: $uid})" in call.args[0]
+
+
+# ---------------------------------------------------------------------------
+# Labelled lookups — every MATCH on the parent / relationship source carries
+# its label, so it is a seek on the uid constraint, not a whole-graph scan.
+# ---------------------------------------------------------------------------
+
+
+async def test_parent_matches_carry_the_parent_label() -> None:
+    _, calls = await _merged_uids("tenant_A")
+    parent_matches = [c.args[0] for c in calls if "MATCH (parent" in c.args[0]]
+    assert parent_matches, "expected MATCHes on the parent node"
+    for q in parent_matches:
+        assert "MATCH (parent:ExtractionResult {uid: $parent_uid})" in q or (
+            "MATCH (parent:ModelInstance {uid: $parent_uid})" in q
+        ), q
+    # The nested _Country hangs from a ModelInstance parent (its REFERENCES write).
+    assert any("MATCH (parent:ModelInstance {uid: $parent_uid})" in q for q in parent_matches)
+    assert any("MATCH (parent:ExtractionResult {uid: $parent_uid})" in q for q in parent_matches)
+
+
+async def test_instance_relationship_source_carries_its_label() -> None:
+    _, calls = await _merged_uids("tenant_A")
+    src_matches = [c.args[0] for c in calls if "MATCH (src" in c.args[0]]
+    assert len(src_matches) == 1
+    # _Wrapper is the root model: the relationship source is the ExtractionResult.
+    assert "MATCH (src:ExtractionResult {uid: $src_uid})" in src_matches[0]
+
+
+async def test_write_model_fields_rejects_unknown_parent_label() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="parent label"):
+        await _write_model_fields(
+            session=AsyncMock(),
+            instance=_Country(code="ES", name="Spain"),
+            parent_uid="x",
+            parent_label="Document) DETACH DELETE (n",
+            field_path_prefix="",
+            entity_nodes={},
+            depth=0,
+        )

@@ -95,8 +95,8 @@ class TestConvertOneStreamsRawFile:
         calls: list[dict] = []
 
         class _Repo:
-            async def store_file(self, path, filename, content_type, folder_path):
-                calls.append({"path": path, "filename": filename})
+            async def store_file(self, path, filename, content_type, folder_path, **owner):
+                calls.append({"path": path, "filename": filename, **owner})
                 return "raw-1"
 
             async def store(self, *a, **k):  # pragma: no cover - must not be used
@@ -110,7 +110,15 @@ class TestConvertOneStreamsRawFile:
         written, failures = await convert_one(doc, tmp_path / "out", raw_file_repo=_Repo())
 
         assert failures == []
-        assert calls == [{"path": doc, "filename": "doc.txt"}]
+        assert calls == [
+            {
+                "path": doc,
+                "filename": "doc.txt",
+                "tenant_id": None,
+                "created_by_user_id": None,
+                "job_id": None,
+            }
+        ]
         assert written[0][2].raw_file_id == "raw-1"
 
     async def test_null_repo_never_opens_the_file(self, tmp_path: Path, monkeypatch):
@@ -176,3 +184,80 @@ class TestConvertOneInMemoryOnly:
 
         with pytest.raises(ValueError, match="output_dir is required"):
             await convert_one(tmp_path, None)
+
+
+class TestConvertStampsTheOwner:
+    """convert_one / convert_folder write the tenant + provenance on the stored
+    raw file and pages, and stamp them on the IntermediateDocument."""
+
+    class _Raw:
+        def __init__(self) -> None:
+            self.owners: list[dict] = []
+
+        async def store_file(self, path, filename, content_type, folder_path, **owner):
+            self.owners.append(owner)
+            return f"raw-{len(self.owners)}"
+
+    class _Pages:
+        def __init__(self) -> None:
+            self.owners: list[dict] = []
+
+        async def store_page(self, raw_file_id, filename, folder_path, page_index, markdown, **owner):
+            self.owners.append(owner)
+            return f"page-{len(self.owners)}"
+
+    _OWNER = {"tenant_id": "acme", "created_by_user_id": "u1", "job_id": "j1"}
+
+    async def test_convert_one(self, tmp_path: Path):
+        from scinr.newton.converters.main import convert_one
+
+        src = tmp_path / "doc.txt"
+        src.write_text("hello", encoding="utf-8")
+        raw, pages = self._Raw(), self._Pages()
+
+        written, failures = await convert_one(
+            src, None, raw_file_repo=raw, page_repo=pages, **self._OWNER
+        )
+
+        assert failures == []
+        doc = written[0][2]
+        assert (doc.tenant_id, doc.created_by_user_id, doc.job_id) == ("acme", "u1", "j1")
+        assert raw.owners == [self._OWNER]
+        assert pages.owners and all(o == self._OWNER for o in pages.owners)
+
+    async def test_convert_folder_forwards_the_owner_through_recursion(self, tmp_path: Path):
+        from scinr.newton.converters.main import convert_folder
+
+        src = tmp_path / "in"
+        (src / "sub" / "deeper").mkdir(parents=True)
+        (src / "a.txt").write_text("a", encoding="utf-8")
+        (src / "sub" / "b.txt").write_text("b", encoding="utf-8")
+        (src / "sub" / "deeper" / "c.txt").write_text("c", encoding="utf-8")
+        raw, pages = self._Raw(), self._Pages()
+
+        written, failures = await convert_folder(
+            src, tmp_path / "out", raw_file_repo=raw, page_repo=pages, **self._OWNER
+        )
+
+        assert failures == []
+        assert len(written) == 3
+        assert all(w[2].tenant_id == "acme" and w[2].job_id == "j1" for w in written)
+        assert raw.owners == [self._OWNER] * 3
+        # The owner is serialized into the intermediate JSON.
+        import json
+
+        for _src, json_path, _doc in written:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            assert (data["tenant_id"], data["created_by_user_id"], data["job_id"]) == (
+                "acme", "u1", "j1",
+            )
+
+    async def test_default_is_public(self, tmp_path: Path):
+        from scinr.newton.converters.main import convert_one
+
+        src = tmp_path / "doc.txt"
+        src.write_text("hello", encoding="utf-8")
+        raw = self._Raw()
+        written, _ = await convert_one(src, None, raw_file_repo=raw)
+        assert written[0][2].tenant_id is None
+        assert raw.owners == [{"tenant_id": None, "created_by_user_id": None, "job_id": None}]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from scinr.newton.navigation.models import (
@@ -14,7 +15,25 @@ from scinr.newton.navigation.models import (
     ThemeRef,
 )
 from scinr.newton.navigation.neo4j import _map
-from scinr.newton.navigation.neo4j._common import _Neo4jRuntime, selector_path
+from scinr.newton.navigation.neo4j._common import _Neo4jRuntime
+from scinr.newton.navigation.scope import Scope, make_scope, resolve_selector
+
+#: Labels that carry ``tenant_id`` (and how they store their provenance) — the
+#: ones a scoped :meth:`get_graph_summary` counts.
+_SCOPED_LABELS: tuple[tuple[str, str], ...] = (
+    ("Document", "scalar"),
+    ("StructureNode", "scalar"),
+    ("InfoUnit", "scalar"),
+    ("ModelDecision", "scalar"),
+    ("ProposedModel", "scalar"),
+    ("ProposedField", "scalar"),
+    ("ExtractionResult", "scalar"),
+    ("ModelInstance", "array"),
+    ("LabeledEntity", "array"),
+    ("Entity", "array"),
+)
+#: Global catalogue labels (no tenant): reported unfiltered.
+_CATALOG_LABELS: tuple[str, ...] = ("CatalogModel", "ModelField", "EntityLabel", "Theme")
 
 
 class _IntrospectionMixin(_Neo4jRuntime):
@@ -63,38 +82,62 @@ class _IntrospectionMixin(_Neo4jRuntime):
         )
 
     async def list_model_classes_in_use(
-        self, *, document: str | DocumentRef | None = None
+        self,
+        *,
+        document: str | DocumentRef | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelClassStat]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
         cd = self._containment_depth(None)
         params: dict[str, Any] = {}
-        clause = ""
+        clauses: list[str] = []
         if document is not None:
-            clause = (
-                f"WHERE EXISTS {{ MATCH (mi)<-[hr*1..{cd}]-(:ExtractionResult)<-[:HAS_EXTRACTION]-"
+            path, sc = resolve_selector(document, sc)
+            clauses.append(
+                f"EXISTS {{ MATCH (mi)<-[hr*1..{cd}]-(:ExtractionResult)<-[:HAS_EXTRACTION]-"
                 "(:StructureNode)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) "
-                "WHERE all(r IN hr WHERE type(r) STARTS WITH 'HAS_') } "
+                "WHERE all(r IN hr WHERE type(r) STARTS WITH 'HAS_') }"
             )
-            params["doc_path"] = selector_path(document)
+            params["doc_path"] = path
+        self._scope_where("mi", clauses, params, sc, "array")
+        where_sql = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = await self._read(
-            f"MATCH (mi:ModelInstance) {clause}"
+            f"MATCH (mi:ModelInstance) {where_sql}"
             "RETURN mi.model_class AS model_class, count(*) AS count ORDER BY count DESC",
             **params,
         )
         return [_map.model_class_stat(r, kind="in_use") for r in rows if r["model_class"]]
 
     async def get_model_properties(
-        self, model_class: str, *, document: str | DocumentRef | None = None
+        self,
+        model_class: str,
+        *,
+        document: str | DocumentRef | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> dict[str, list[str]]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        # ``declared`` comes from the (global) catalogue; ``observed`` is
+        # sampled only from the instances inside the scope.
         declared_rec = await self._read_one(
             "MATCH (:CatalogModel {name: $mc})-[:HAS_FIELD]->(f:ModelField) "
             "RETURN collect(DISTINCT f.name) AS declared",
             mc=model_class,
         )
+        clauses: list[str] = []
+        params: dict[str, Any] = {"mc": model_class}
+        self._scope_where("mi", clauses, params, sc, "array")
+        where_sql = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         observed_rec = await self._read_one(
-            "MATCH (mi:ModelInstance {model_class: $mc}) WITH mi LIMIT 500 "
+            f"MATCH (mi:ModelInstance {{model_class: $mc}}) {where_sql}WITH mi LIMIT 500 "
             "UNWIND keys(mi) AS k WITH DISTINCT k WHERE NOT k IN ['uid', 'model_class'] "
             "RETURN collect(k) AS observed",
-            mc=model_class,
+            **params,
         )
         return {
             "declared": sorted((declared_rec or {}).get("declared", []) or []),
@@ -102,17 +145,27 @@ class _IntrospectionMixin(_Neo4jRuntime):
         }
 
     async def list_node_roles(
-        self, *, document: str | DocumentRef | None = None
+        self,
+        *,
+        document: str | DocumentRef | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[RoleStat]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
         params: dict[str, Any] = {}
-        clause = ""
+        clauses: list[str] = []
         if document is not None:
-            clause = (
-                "WHERE EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) } "
+            path, sc = resolve_selector(document, sc)
+            clauses.append(
+                "EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) }"
             )
-            params["doc_path"] = selector_path(document)
+            params["doc_path"] = path
+        self._scope_where("n", clauses, params, sc)
+        where_sql = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = await self._read(
-            f"MATCH (n:StructureNode) {clause}"
+            f"MATCH (n:StructureNode) {where_sql}"
             "RETURN n.role AS role, count(*) AS count ORDER BY count DESC",
             **params,
         )
@@ -150,7 +203,17 @@ class _IntrospectionMixin(_Neo4jRuntime):
         rows = await self._read("CALL db.labels() YIELD label RETURN label ORDER BY label")
         return [r["label"] for r in rows]
 
-    async def get_graph_summary(self) -> GraphSummary:
+    async def get_graph_summary(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> GraphSummary:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        if not sc.is_unfiltered:
+            return await self._scoped_graph_summary(sc)
         try:
             scalars = await self._read_one(
                 "CALL apoc.meta.stats() YIELD nodeCount, relCount, labelCount, relTypeCount "
@@ -189,6 +252,58 @@ class _IntrospectionMixin(_Neo4jRuntime):
             total_nodes=int(scalars.get("nodeCount", 0) or 0),
             total_relationships=int(scalars.get("relCount", 0) or 0),
             total_relationship_types=int(scalars.get("relTypeCount", 0) or 0),
+            documents=int((docs or {}).get("total", 0) or 0),
+            latest_documents=int((docs or {}).get("latest", 0) or 0),
+        )
+
+    async def _scoped_graph_summary(self, sc: Scope) -> GraphSummary:
+        """Summary restricted to the scope.
+
+        Per-label counts of the tenant-carrying labels are taken label by label
+        (each is an index seek on ``tenant_id``). Catalogue nodes have no
+        tenant: they are global and reported unfiltered under their own labels.
+        """
+        node_counts: dict[str, int] = {}
+        rel_counts: dict[str, int] = {}
+        for label, kind in _SCOPED_LABELS:
+            clauses: list[str] = []
+            params: dict[str, Any] = {}
+            self._scope_where("x", clauses, params, sc, kind)
+            where_sql = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+            rec = await self._read_one(
+                f"MATCH (x:{label}) {where_sql}RETURN count(x) AS c", **params
+            )
+            count = int((rec or {}).get("c", 0) or 0)
+            if not count:
+                continue
+            node_counts[label] = count
+            for r in await self._read(
+                f"MATCH (x:{label})-[r]->() {where_sql}"
+                "RETURN type(r) AS t, count(*) AS c",
+                **params,
+            ):
+                rel_counts[r["t"]] = rel_counts.get(r["t"], 0) + int(r["c"])
+        for label in _CATALOG_LABELS:
+            rec = await self._read_one(f"MATCH (x:{label}) RETURN count(x) AS c")
+            count = int((rec or {}).get("c", 0) or 0)
+            if count:
+                node_counts[label] = count
+        clauses = []
+        params = {}
+        self._scope_where("d", clauses, params, sc)
+        where_sql = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        docs = await self._read_one(
+            f"MATCH (d:Document) {where_sql}RETURN count(d) AS total, "
+            "sum(CASE WHEN d.latest THEN 1 ELSE 0 END) AS latest",
+            **params,
+        )
+        return GraphSummary(
+            raw={"scope": {"tenants": sc.tenants, "user_ids": sc.user_ids, "job_ids": sc.job_ids}},
+            node_counts=dict(sorted(node_counts.items(), key=lambda kv: -kv[1])),
+            relationship_counts=dict(sorted(rel_counts.items(), key=lambda kv: -kv[1])),
+            total_nodes=sum(node_counts.values()),
+            total_relationships=sum(rel_counts.values()),
+            total_relationship_types=len(rel_counts),
             documents=int((docs or {}).get("total", 0) or 0),
             latest_documents=int((docs or {}).get("latest", 0) or 0),
         )

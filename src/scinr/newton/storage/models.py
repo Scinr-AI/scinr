@@ -36,6 +36,11 @@ class RawFileRecord(BaseModel):
         Used for deduplication and integrity checks.
     stored_at:
         UTC timestamp when this record was persisted.
+    tenant_id:
+        Stored tenant (``"__public__"`` for a public upload). ``None`` only for
+        legacy records written before multi-tenancy.
+    created_by_user_id, job_id:
+        Provenance of the upload (``None`` when not supplied).
     """
 
     id: str
@@ -45,6 +50,9 @@ class RawFileRecord(BaseModel):
     size_bytes: int
     checksum_sha256: str
     stored_at: datetime
+    tenant_id: str | None = None
+    created_by_user_id: str | None = None
+    job_id: str | None = None
 
 
 class ConvertedPageRecord(BaseModel):
@@ -68,6 +76,8 @@ class ConvertedPageRecord(BaseModel):
         Full Markdown text of this page as produced by the converter.
     converted_at:
         UTC timestamp when this page was persisted.
+    tenant_id, created_by_user_id, job_id:
+        Same as in :class:`RawFileRecord` (copied from the upload).
     """
 
     id: str
@@ -77,3 +87,6 @@ class ConvertedPageRecord(BaseModel):
     page_index: int
     markdown: str
     converted_at: datetime
+    tenant_id: str | None = None
+    created_by_user_id: str | None = None
+    job_id: str | None = None

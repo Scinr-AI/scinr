@@ -56,6 +56,7 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` | Collection name for raw file metadata. |
 | `MONGODB_PAGES_COLLECTION` | `converted_pages` | Collection name for converted document pages. |
 | `MONGODB_GRIDFS_BUCKET` | `raw_binaries` | GridFS bucket name for binary file storage. |
+| `MONGODB_ENSURE_INDEXES` | `true` | Create the MongoDB indexes automatically on the first `get_storage()` call of the process. Set to `false` when the database user lacks the `createIndex` privilege and operations manage the indexes. |
 
 ### PDF / Mistral OCR
 
@@ -129,6 +130,7 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
+| `mongodb_ensure_indexes` | `bool \| None` | Create the MongoDB indexes automatically (default `True`). `False` skips it, for users without the `createIndex` privilege. |
 | `custom_storage` | `tuple \| None` | Custom storage backend tuple (driver, connection). |
 
 ### Converter Parameters
@@ -402,6 +404,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **MongoDB Raw Files** | `mongodb_raw_files_collection` | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` |
 | **MongoDB Pages** | `mongodb_pages_collection` | `MONGODB_PAGES_COLLECTION` | `converted_pages` |
 | **MongoDB GridFS** | `mongodb_gridfs_bucket` | `MONGODB_GRIDFS_BUCKET` | `raw_binaries` |
+| **MongoDB Ensure Indexes** | `mongodb_ensure_indexes` | `MONGODB_ENSURE_INDEXES` | `True` |
 | **Custom Storage** | `custom_storage` | *(none)* | `None` |
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
 | **OCR Max Pages** | `mistral_ocr_safe_max_pages` | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` |

@@ -1,9 +1,11 @@
 """
 tests/unit/test_uid.py — Unit tests for scinr.newton.utils.uid
 
-Imports directly from the submodule to avoid triggering the CLI import chain.
+Imports directly from the submodule to avoid triggering the package's heavy import chain.
 """
 from __future__ import annotations
+
+import pytest
 
 from scinr.newton.utils.uid import make_instance_uid, make_uid, normalize_key
 
@@ -126,14 +128,42 @@ class TestNormalizeKey:
     def test_matches_ingestion_derived_uids(self):
         """normalize_key + make_instance_uid rebuild the exact UID ingestion wrote.
 
-        Reference values captured from a real graph (``Country`` model, single
-        ``country_code`` instance_key field).
+        Reference values for a public (``tenant_id=None``) ``Country`` model
+        instance, single ``country_code`` instance_key field. A public
+        instance hashes the stored public key ``"__public__"`` (see
+        ``utils/tenancy.py``), exactly what ingestion writes on the node;
+        folding the tenant into the hash (multi-tenant isolation — see
+        ``make_instance_uid``'s docstring) changed these versus the
+        pre-tenancy formula, and a given tenant_id produces yet another set.
         """
         cases = {
-            "BE": "7b4a882dd40ee96a",
-            "CY": "45e17767b9e17199",
-            "AT": "66c69574a64fdd95",
+            "BE": "1ea4048d299f6e72",
+            "CY": "daa2d84b6a028373",
+            "AT": "0abf952cf358f276",
         }
         for raw, expected in cases.items():
             uid = make_instance_uid("Country", {"country_code": normalize_key(raw)})
             assert uid == expected
+
+    def test_tenant_id_changes_the_uid(self):
+        """Same model_class/key_fields, different tenant_id → different UID."""
+        key_fields = {"country_code": normalize_key("BE")}
+        uid_none = make_instance_uid("Country", key_fields)
+        uid_acme = make_instance_uid("Country", key_fields, tenant_id="acme")
+        uid_globex = make_instance_uid("Country", key_fields, tenant_id="globex")
+        assert len({uid_none, uid_acme, uid_globex}) == 3
+
+    def test_public_instance_hashes_the_stored_public_key(self):
+        """tenant_id=None must hash to the same value ingestion stores on the
+        node (``"__public__"``), so a UID rebuilt from the API matches it."""
+        key_fields = {"country_code": normalize_key("BE")}
+        expected = make_uid("mi", "Country", "tenant", "__public__", "country_code", "be")
+        assert make_instance_uid("Country", key_fields) == expected
+
+    def test_public_sentinel_equals_none(self):
+        kf = {"country_code": "be"}
+        assert make_instance_uid("Country", kf, tenant_id="__public__") == make_instance_uid("Country", kf)
+
+    def test_empty_tenant_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_instance_uid("Country", {"country_code": "be"}, tenant_id="")

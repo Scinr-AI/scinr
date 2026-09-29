@@ -388,7 +388,9 @@ This parameter is forwarded to every document unit processed by the pipeline. It
 
 **Type:** `str | None`  **Default:** `None` (each)
 
-Caller-supplied provenance values written verbatim onto **every** `:Document` node the run creates — leaf documents, ancestor folder-parent nodes, and tabular documents alike. Each property is always `SET` (stored as `null` when the parameter is omitted), exactly like `context_instructions`.
+Caller-supplied provenance values written onto **every** `:Document` node the run creates — leaf documents, ancestor folder-parent nodes, and tabular documents alike. `created_by_user_id` and `job_id` are always `SET` verbatim (stored as `null` when omitted), exactly like `context_instructions`.
+
+**`tenant_id` is part of the document identity**, not just a label: a `:Document` is keyed by `(tenant_id, path, version)`, so two tenants ingesting the same path get two independent uploads (documents, folders, versions, structure, annotations, extractions — nothing shared). Versions are numbered per tenant, and `update_mode`, `replaces`, `document_names` and the annotation / entity extraction stages only ever select this tenant's documents. Omitting it (`None`) ingests a **public** document: readable by every tenant, but never merged with any tenant's content. It is stored as the reserved value `"__public__"`; passing `tenant_id="__public__"` is the same as passing `None`. See [Neo4j Graph Model — Multi-tenancy](neo4j-graph.md#multi-tenancy-the-tenant-is-part-of-the-document-identity).
 
 ```python
 result = await run_pipeline(
@@ -400,8 +402,9 @@ result = await run_pipeline(
 ```
 
 - The values are also stamped onto the `Document` model, so they are serialized into any `extract-*.json` written by the extraction stage. When you later run an ingestion-only pipeline from that JSON, a value passed to that call **overrides** the baked-in one; omitting it keeps the baked-in value.
-- They are **not** threaded through a standalone `stages=["preprocess"]` run — supply them on the `run_pipeline()` call that performs extraction and/or ingestion.
-- `job_id` doubles as a bulk-delete selector: `delete_document(job_id="ingest-2026-09-06-a")` removes every document from that run. `tenant_id` and `created_by_user_id` can be used as extra delete filters. See [Document Deletion](document-deletion.md).
+- With a storage backend, the preprocess stage writes them on the stored raw file and its converted pages (see [Storage Backends — Multi-tenancy](storage-backends.md#multi-tenancy)), and stamps them on the intermediate JSON: a later extraction of that JSON inherits them unless the extraction run passes its own. For a standalone conversion use `run_preprocess(..., tenant_id=..., created_by_user_id=..., job_id=...)` or `convert_folder(...)` with the same keywords.
+- **Ingestion verifies the owner of `raw_file_id`.** A document whose `raw_file_id` is not a stored raw file of its (effective) tenant fails with `IngestionError` and nothing is written — e.g. an `extract-*.json` converted for `acme` ingested with `tenant_id="globex"`. Only the tenant must match; the upload's user / job may differ. With `storage_backend="none"` a non-empty `raw_file_id` is rejected (it cannot be verified).
+- `job_id` doubles as a bulk-delete selector: `delete_document(job_id="ingest-2026-09-06-a", tenant_id="acme-corp")` removes every document of that tenant from that run. `tenant_id` is mandatory on every deletion (`None` / `"__public__"` = public documents); `job_id` and `created_by_user_id` accept one value or a list. See [Document Deletion](document-deletion.md).
 
 ### `update_mode` — In-Place Document Update
 
@@ -810,7 +813,7 @@ async def main():
 
     if not result.success:
         # Roll back everything this run wrote — every path, every version.
-        deletion = await delete_document(job_id=job_id)
+        deletion = await delete_document(job_id=job_id, tenant_id="acme-corp")
         print(f"Rolled back job {job_id}: {deletion.documents_deleted} documents removed")
 
 asyncio.run(main())
@@ -1023,7 +1026,7 @@ The pipeline validates parameter combinations before execution. Invalid combinat
 
 ```python
 #!/usr/bin/env python
-"""run_ingestion.py — Full pipeline run from command line."""
+"""run_ingestion.py — Full pipeline run from a script."""
 
 import asyncio
 import sys

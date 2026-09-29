@@ -92,15 +92,20 @@ class IntermediatePage(BaseModel):
 class IntermediateDocument(BaseModel):
     """A complete document in the intermediate format.
 
-    This is the root object serialised to JSON and written to
-    ``data/input/`` or ``data/input-pruebas/``.
+    This is the root object serialised to JSON and written to the converter
+    output directory.
     """
 
     pages: list[IntermediatePage]
     folder_path: str | None = None  # relative path of parent folder from input root (None for root files)
     raw_file_id: str | None = None  # MongoDB ObjectId of the RawFileRecord stored by Stage 0
-    context_instructions: str | None = None  # Free-text user-provided ingestion context. Injected via CLI --context.
+    context_instructions: str | None = None  # Free-text user-provided ingestion context. Set via ``context_instructions=``.
     document_name: str | None = None  # Stem of the original source file. Injected by convert_folder() / convert_single_file().
+    # Owner of the upload, stamped by convert_one() / convert_single_file() and
+    # written on the stored raw file and pages. Public-API form: None = public.
+    tenant_id: str | None = None
+    created_by_user_id: str | None = None
+    job_id: str | None = None
     missing_page_ranges: list[tuple[int, int]] | None = None
     # Rangos [start, end) de páginas del documento ORIGINAL que no pudieron
     # convertirse y fueron omitidas en modo best-effort (mistral_ocr_error_strategy).

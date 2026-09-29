@@ -19,6 +19,10 @@ async def run_preprocess(
     output_dir: str | None = None,
     context_instructions: str | None = None,
     parallel_docs: int = 1,
+    *,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[StageResult, list]:
     """Convert raw source files to intermediate JSON using the converters module.
 
@@ -38,6 +42,12 @@ async def run_preprocess(
     parallel_docs:
         Maximum number of documents converted concurrently (default: ``1``,
         i.e. sequential — matches pre-existing behaviour).
+    tenant_id:
+        Tenant owning the converted files (``None`` = public). Written on every
+        stored raw file and page, and stamped on each ``IntermediateDocument``
+        (so a later extraction / ingestion of its JSON keeps the same tenant).
+    created_by_user_id, job_id:
+        Provenance of the upload, written and stamped like *tenant_id*.
 
     Returns
     -------
@@ -76,6 +86,9 @@ async def run_preprocess(
             page_repo=page_repo,
             context_instructions=context_instructions,
             parallel_docs=parallel_docs,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
     except Exception as exc:
         duration = time.monotonic() - t0

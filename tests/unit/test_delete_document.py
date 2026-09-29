@@ -90,7 +90,10 @@ class _FakeSession:
         if "RETURN DISTINCT n.raw_file_id AS raw_file_id" in query:
             if self.driver.raw_file_ids_error is not None:
                 raise self.driver.raw_file_ids_error
-            return _FakeResult(self.driver.raw_file_id_rows)
+            # Rows omitting tenant_id stand for public nodes (the stored key).
+            return _FakeResult(
+                [{"tenant_id": "__public__", **row} for row in self.driver.raw_file_id_rows]
+            )
         raise AssertionError(f"Unexpected session.run query: {query}")
 
     def begin_transaction(self) -> _FakeTx:
@@ -211,8 +214,10 @@ class _FakeRawFileRepo:
         self.raise_exc = raise_exc
         self.raise_on_id = raise_on_id
         self.deleted_ids: list[str] = []
+        self.scopes: list[dict] = []
 
-    async def delete(self, raw_file_id: str) -> None:
+    async def delete(self, raw_file_id: str, **scope) -> None:
+        self.scopes.append(scope)
         self.driver.calls.append(("storage.raw_delete", raw_file_id, {}))
         if self.raise_exc is not None and (
             self.raise_on_id is None or raw_file_id == self.raise_on_id
@@ -239,8 +244,10 @@ class _FakePageRepo:
         self.raise_exc = raise_exc
         self.raise_on_id = raise_on_id
         self.deleted_ids: list[str] = []
+        self.scopes: list[dict] = []
 
-    async def delete_pages(self, raw_file_id: str) -> int:
+    async def delete_pages(self, raw_file_id: str, **scope) -> int:
+        self.scopes.append(scope)
         self.driver.calls.append(("storage.page_delete", raw_file_id, {}))
         if self.raise_exc is not None and (
             self.raise_on_id is None or raw_file_id == self.raise_on_id
@@ -277,7 +284,7 @@ class TestDeleteDocumentNotFound:
     ):
         patch_driver(_FakeDriver(existence_rows=[]))
 
-        result = await delete_document("some/path", version=None)
+        result = await delete_document("some/path", version=None, tenant_id=None)
 
         assert isinstance(result, DeletionResult)
         assert result.found is False
@@ -299,7 +306,7 @@ class TestDeleteDocumentNotFound:
     async def test_no_matching_document_does_not_run_delete_or_gc_queries(self, patch_driver):
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        await delete_document("some/path", version=None)
+        await delete_document("some/path", version=None, tenant_id=None)
 
         # Only the read-only existence check should have run.
         execute_write_calls = [c for c in fake_driver.calls if c[0] == "session.execute_write"]
@@ -321,14 +328,14 @@ class TestDeleteDocumentNotFound:
         fake_get_storage = MagicMock()
         monkeypatch.setattr("scinr.newton.storage.factory.get_storage", fake_get_storage)
 
-        await delete_document("some/path", version=None)
+        await delete_document("some/path", version=None, tenant_id=None)
 
         fake_get_storage.assert_not_called()
 
     async def test_driver_is_closed_even_when_nothing_found(self, patch_driver):
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        await delete_document("some/path")
+        await delete_document("some/path", tenant_id=None)
 
         assert fake_driver.closed is True
 
@@ -339,7 +346,7 @@ class TestDeleteDocumentNotFound:
         """
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
 
-        result = await delete_document("")
+        result = await delete_document("", tenant_id=None)
 
         assert result.path == ""
         assert result.found is False
@@ -347,7 +354,7 @@ class TestDeleteDocumentNotFound:
         existence_calls = [
             params for kind, query, params in fake_driver.calls if kind == "session.run"
         ]
-        assert existence_calls[0] == {"path": ""}
+        assert existence_calls[0] == {"tenant_id": "__public__", "path": ""}
 
 
 class TestDeleteDocumentCascade:
@@ -371,7 +378,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        result = await delete_document("docs/a", version=1)
+        result = await delete_document("docs/a", version=1, tenant_id=None)
 
         assert result.found is True
         assert result.versions_deleted == [1]
@@ -390,7 +397,7 @@ class TestDeleteDocumentCascade:
             if kind == "tx.run" and "documents_deleted" in query
         ]
         assert len(cascade_calls) == 1
-        assert cascade_calls[0] == {"path": "docs/a", "version": 1}
+        assert cascade_calls[0] == {"tenant_id": "__public__", "path": "docs/a", "version": 1}
 
     async def test_multiple_cascade_rows_are_summed(self, patch_driver):
         patch_driver(
@@ -421,7 +428,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        result = await delete_document("docs/b")
+        result = await delete_document("docs/b", tenant_id=None)
 
         assert result.found is True
         assert result.versions_deleted == [1, 2]
@@ -436,7 +443,7 @@ class TestDeleteDocumentCascade:
     async def test_version_none_is_omitted_from_the_bound_params(self, patch_driver):
         """When version is not given, no ``version`` condition/param is emitted
         (the WHERE stays a plain equality conjunction so the :Document indexes
-        can be used) — only ``path`` is bound.
+        can be used) — only the tenant and ``path`` are bound.
         """
         fake_driver = patch_driver(
             _FakeDriver(
@@ -446,14 +453,14 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        await delete_document("docs/c")  # version defaults to None
+        await delete_document("docs/c", tenant_id=None)  # version defaults to None
 
         existence_calls = [
             (query, params)
             for kind, query, params in fake_driver.calls
             if kind == "session.run"
         ]
-        assert existence_calls[0][1] == {"path": "docs/c"}
+        assert existence_calls[0][1] == {"tenant_id": "__public__", "path": "docs/c"}
         assert "$version" not in existence_calls[0][0]
         assert "IS NULL" not in existence_calls[0][0]
 
@@ -462,7 +469,7 @@ class TestDeleteDocumentCascade:
             for kind, query, params in fake_driver.calls
             if kind == "tx.run" and "documents_deleted" in query
         ]
-        assert cascade_calls[0] == {"path": "docs/c"}
+        assert cascade_calls[0] == {"tenant_id": "__public__", "path": "docs/c"}
 
     async def test_explicit_version_passed_through(self, patch_driver):
         fake_driver = patch_driver(
@@ -473,14 +480,14 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        await delete_document("docs/d", version=3)
+        await delete_document("docs/d", version=3, tenant_id=None)
 
         cascade_calls = [
             params
             for kind, query, params in fake_driver.calls
             if kind == "tx.run" and "documents_deleted" in query
         ]
-        assert cascade_calls[0] == {"path": "docs/d", "version": 3}
+        assert cascade_calls[0] == {"tenant_id": "__public__", "path": "docs/d", "version": 3}
 
     async def test_driver_is_closed_after_successful_deletion(self, patch_driver):
         """The happy path (found=True, cascade + GC all run) must still
@@ -494,7 +501,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        await delete_document("docs/i", version=1)
+        await delete_document("docs/i", version=1, tenant_id=None)
 
         assert fake_driver.closed is True
 
@@ -508,7 +515,7 @@ class TestDeleteDocumentCascade:
         )
 
         with pytest.raises(RuntimeError, match="neo4j unavailable"):
-            await delete_document("docs/broken")
+            await delete_document("docs/broken", tenant_id=None)
 
         assert fake_driver.closed is True
         # No cascade or GC work should have been attempted.
@@ -527,7 +534,7 @@ class TestDeleteDocumentCascade:
         )
 
         with pytest.raises(ValueError, match="cascade write failed"):
-            await delete_document("docs/j", version=1)
+            await delete_document("docs/j", version=1, tenant_id=None)
 
         rollback_calls = [c for c in fake_driver.calls if c[0] == "tx.rollback"]
         commit_calls = [c for c in fake_driver.calls if c[0] == "tx.commit"]
@@ -557,7 +564,7 @@ class TestDeleteDocumentCascade:
             _FakeDriver(existence_rows=[{"version": 1}], gc_emi_sequence=[0], gc_le_sequence=[0])
         )
 
-        await delete_document("docs/structureless", version=1)
+        await delete_document("docs/structureless", version=1, tenant_id=None)
 
         cascade_queries = [
             query
@@ -583,7 +590,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = await delete_document("docs/e", version=1)
+        result = await delete_document("docs/e", version=1, tenant_id=None)
 
         assert result.gc_entity_model_instance_deleted == 7
         assert result.gc_entity_model_instance_passes == 3
@@ -604,7 +611,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = await delete_document("docs/f", version=1)
+        result = await delete_document("docs/f", version=1, tenant_id=None)
 
         assert result.gc_entity_model_instance_passes == GC_MAX_PASSES
         assert result.gc_entity_model_instance_deleted == GC_MAX_PASSES
@@ -627,7 +634,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = await delete_document("docs/g", version=1)
+        result = await delete_document("docs/g", version=1, tenant_id=None)
 
         assert result.gc_entity_model_instance_deleted == 4
         assert result.gc_entity_model_instance_passes == 3
@@ -656,7 +663,7 @@ class TestDeleteDocumentGarbageCollection:
             )
         )
 
-        result = await delete_document("docs/h", version=1)
+        result = await delete_document("docs/h", version=1, tenant_id=None)
 
         assert result.gc_entity_model_instance_passes == 1
         assert result.gc_labeled_entity_passes == GC_MAX_PASSES
@@ -681,7 +688,7 @@ class TestDeleteDocumentStorageCleanup:
         page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 3, "rid2": 5})
         patch_storage(raw_repo, page_repo)
 
-        result = await delete_document("docs/k", version=1)
+        result = await delete_document("docs/k", version=1, tenant_id=None)
 
         assert raw_repo.deleted_ids == ["rid1", "rid2"]
         assert page_repo.deleted_ids == ["rid1", "rid2"]
@@ -704,6 +711,29 @@ class TestDeleteDocumentStorageCleanup:
         assert storage_indices, "expected storage deletion calls to have happened"
         assert cascade_indices, "expected the cascade delete to have run"
         assert max(storage_indices) < min(cascade_indices)
+
+    async def test_storage_deletes_are_scoped_to_the_tenant_of_each_node(
+        self, patch_driver, patch_storage
+    ):
+        """A raw_file_id is deleted only within the tenant of the graph node
+        carrying it: a forged id pointing at another tenant's upload deletes
+        nothing in storage. No user / job filter is applied here."""
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1", "tenant_id": "acme"}],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver)
+        patch_storage(raw_repo, page_repo)
+
+        await delete_document("docs/m", version=1, tenant_id="acme", created_by_user_id="u1")
+
+        assert raw_repo.scopes == [{"tenant_id": "acme"}]
+        assert page_repo.scopes == [{"tenant_id": "acme"}]
 
     async def test_documents_with_empty_raw_file_id_are_excluded(
         self, patch_driver, patch_storage
@@ -728,7 +758,7 @@ class TestDeleteDocumentStorageCleanup:
         page_repo = _FakePageRepo(fake_driver)
         patch_storage(raw_repo, page_repo)
 
-        result = await delete_document("docs/l", version=1)
+        result = await delete_document("docs/l", version=1, tenant_id=None)
 
         assert raw_repo.deleted_ids == ["rid1"]
         assert page_repo.deleted_ids == ["rid1"]
@@ -749,7 +779,7 @@ class TestDeleteDocumentStorageCleanup:
         patch_storage(raw_repo, page_repo)
 
         with pytest.raises(RuntimeError, match="mongo down"):
-            await delete_document("docs/m", version=1)
+            await delete_document("docs/m", version=1, tenant_id=None)
 
         assert fake_driver.closed is True
         cascade_calls = [
@@ -776,7 +806,7 @@ class TestDeleteDocumentStorageCleanup:
         patch_storage(raw_repo, page_repo)
 
         with pytest.raises(ValueError, match="gridfs error"):
-            await delete_document("docs/n", version=1)
+            await delete_document("docs/n", version=1, tenant_id=None)
 
         assert fake_driver.closed is True
         cascade_calls = [
@@ -807,7 +837,7 @@ class TestDeleteDocumentStorageCleanup:
         fake_get_storage = MagicMock()
         monkeypatch.setattr("scinr.newton.storage.factory.get_storage", fake_get_storage)
 
-        result = await delete_document("docs/o", version=1)
+        result = await delete_document("docs/o", version=1, tenant_id=None)
 
         fake_get_storage.assert_not_called()
         assert result.raw_files_deleted == 0
@@ -832,7 +862,7 @@ class TestDeleteDocumentStorageCleanup:
         page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 1, "rid2": 0, "rid3": 4})
         patch_storage(raw_repo, page_repo)
 
-        result = await delete_document("docs/p", version=1)
+        result = await delete_document("docs/p", version=1, tenant_id=None)
 
         assert result.raw_files_deleted == 3
         assert result.converted_pages_deleted == 5
@@ -845,7 +875,7 @@ class TestDeleteDocumentStorageCleanup:
             )
         )
 
-        await delete_document("docs/q", version=2)
+        await delete_document("docs/q", version=2, tenant_id=None)
 
         raw_file_id_calls = [
             params
@@ -853,7 +883,7 @@ class TestDeleteDocumentStorageCleanup:
             if kind == "session.run" and "RETURN DISTINCT n.raw_file_id AS raw_file_id" in query
         ]
         assert len(raw_file_id_calls) == 1
-        assert raw_file_id_calls[0] == {"path": "docs/q", "version": 2}
+        assert raw_file_id_calls[0] == {"tenant_id": "__public__", "path": "docs/q", "version": 2}
 
     async def test_page_repo_failure_mid_list_stops_before_processing_later_ids(
         self, patch_driver, patch_storage
@@ -884,7 +914,7 @@ class TestDeleteDocumentStorageCleanup:
         patch_storage(raw_repo, page_repo)
 
         with pytest.raises(RuntimeError, match="mongo down on rid2"):
-            await delete_document("docs/r", version=1)
+            await delete_document("docs/r", version=1, tenant_id=None)
 
         assert fake_driver.closed is True
         # rid1 was fully processed (both page delete and raw delete).
@@ -936,7 +966,7 @@ class TestDeleteDocumentStorageCleanup:
         patch_storage(raw_repo, page_repo)
 
         with pytest.raises(ValueError, match="gridfs error on rid2"):
-            await delete_document("docs/s", version=1)
+            await delete_document("docs/s", version=1, tenant_id=None)
 
         assert fake_driver.closed is True
         # delete_pages() ran for rid1 and rid2, but never for rid3.
@@ -963,17 +993,17 @@ class TestDeleteDocumentSelectorValidation:
     async def test_neither_path_nor_job_id_raises_value_error(self, patch_driver):
         patch_driver(_FakeDriver(existence_rows=[]))
         with pytest.raises(ValueError, match="exactly one of 'path' or 'job_id'"):
-            await delete_document()
+            await delete_document(tenant_id=None)
 
     async def test_both_path_and_job_id_raises_value_error(self, patch_driver):
         patch_driver(_FakeDriver(existence_rows=[]))
         with pytest.raises(ValueError, match="exactly one of 'path' or 'job_id'"):
-            await delete_document("docs/a", job_id="job-1")
+            await delete_document("docs/a", job_id="job-1", tenant_id=None)
 
     async def test_value_error_raised_before_any_neo4j_call(self, patch_driver):
         fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
         with pytest.raises(ValueError):
-            await delete_document()
+            await delete_document(tenant_id=None)
         assert fake_driver.calls == []
 
 
@@ -998,29 +1028,29 @@ class TestDeleteDocumentByJobId:
             )
         )
 
-        result = await delete_document(job_id="job-xyz")
+        result = await delete_document(job_id="job-xyz", tenant_id=None)
 
         assert result.found is True
         assert result.path is None
         assert result.job_id == "job-xyz"
         assert result.documents_deleted == 3
-        # Only the supplied selector is emitted — no path/version/tenant
-        # conditions, and no `IS NULL` disjunction (so idx_document_job_id
-        # can be used).
+        # Only the tenant (always) and the supplied selector are emitted — no
+        # path/version conditions, and no `IS NULL` disjunction (so the
+        # indexes can be used).
         existence_calls = [
             (query, params)
             for kind, query, params in fake_driver.calls
             if kind == "session.run"
         ]
-        assert existence_calls[0][1] == {"job_id": "job-xyz"}
-        assert "d.job_id = $job_id" in existence_calls[0][0]
+        assert existence_calls[0][1] == {"tenant_id": "__public__", "job_id": ["job-xyz"]}
+        assert "d.job_id IN $job_id" in existence_calls[0][0]
         assert "IS NULL" not in existence_calls[0][0]
         cascade_calls = [
             params
             for kind, query, params in fake_driver.calls
             if kind == "tx.run" and "documents_deleted" in query
         ]
-        assert cascade_calls[0] == {"job_id": "job-xyz"}
+        assert cascade_calls[0] == {"tenant_id": "__public__", "job_id": ["job-xyz"]}
 
     async def test_tenant_and_user_filters_are_forwarded_in_path_mode(self, patch_driver):
         fake_driver = patch_driver(
@@ -1048,7 +1078,7 @@ class TestDeleteDocumentByJobId:
             "path": "docs/a",
             "version": 1,
             "tenant_id": "tenant-7",
-            "created_by_user_id": "user-42",
+            "created_by_user_id": ["user-42"],
         }
         # job_id was not supplied → no job_id condition at all
         assert "job_id" not in query
@@ -1056,7 +1086,7 @@ class TestDeleteDocumentByJobId:
             "d.path = $path",
             "d.version = $version",
             "d.tenant_id = $tenant_id",
-            "d.created_by_user_id = $created_by_user_id",
+            "d.created_by_user_id IN $created_by_user_id",
         ):
             assert cond in query
 
@@ -1072,35 +1102,116 @@ class TestDeleteDocumentByJobId:
         assert result.documents_deleted == 0
 
 
+class TestDeleteDocumentTenantScope:
+    """The tenant is a mandatory, always-applied scope (see WP6 of
+    plans/multitenancy-document-identity-plan.md)."""
+
+    async def test_omitting_tenant_id_is_a_type_error(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(TypeError):
+            await delete_document("docs/a")  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            await delete_document(job_id="job-1")  # type: ignore[call-arg]
+        assert fake_driver.calls == []
+
+    async def test_tenant_none_targets_public_documents(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+
+        result = await delete_document("docs/a", tenant_id=None)
+
+        query, params = next(
+            (q, p) for kind, q, p in fake_driver.calls if kind == "session.run"
+        )
+        assert "d.tenant_id = $tenant_id" in query
+        assert params["tenant_id"] == "__public__"
+        assert result.tenant_id is None
+
+    @pytest.mark.parametrize("selector", [{"path": "docs/a"}, {"job_id": "job-1"}])
+    async def test_tenant_filter_is_in_every_query(self, patch_driver, selector):
+        fake_driver = patch_driver(
+            _FakeDriver(existence_rows=[{"version": 1}], gc_emi_sequence=[0], gc_le_sequence=[0])
+        )
+
+        await delete_document(**selector, tenant_id="acme")
+
+        doc_queries = [
+            (q, p) for kind, q, p in fake_driver.calls
+            if kind in ("session.run", "tx.run") and "MATCH (d:Document)" in q
+        ]
+        # existence check, raw_file_id lookup, cascade delete
+        assert len(doc_queries) == 3
+        for q, p in doc_queries:
+            assert "d.tenant_id = $tenant_id" in q
+            assert p["tenant_id"] == "acme"
+
+    async def test_empty_tenant_is_rejected_before_neo4j(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(ValueError):
+            await delete_document("docs/a", tenant_id="")
+        assert fake_driver.calls == []
+
+    async def test_public_sentinel_is_the_same_as_none(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        await delete_document("docs/a", tenant_id="__public__")
+        query, params = next((q, p) for kind, q, p in fake_driver.calls if kind == "session.run")
+        assert params["tenant_id"] == "__public__"
+
+    async def test_job_and_user_lists_use_in(self, patch_driver):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        await delete_document(job_id=["j1", "j2"], created_by_user_id=("u1",), tenant_id="acme")
+        query, params = next((q, p) for kind, q, p in fake_driver.calls if kind == "session.run")
+        assert "d.job_id IN $job_id" in query
+        assert "d.created_by_user_id IN $created_by_user_id" in query
+        assert params["job_id"] == ["j1", "j2"]
+        assert params["created_by_user_id"] == ["u1"]
+
+    @pytest.mark.parametrize("kw", [{"job_id": []}, {"path": "p", "created_by_user_id": []}])
+    async def test_empty_lists_are_rejected(self, patch_driver, kw):
+        fake_driver = patch_driver(_FakeDriver(existence_rows=[]))
+        with pytest.raises(ValueError, match="empty list"):
+            await delete_document(tenant_id="acme", **kw)
+        assert fake_driver.calls == []
+
+
 class TestBuildDocMatch:
     """Unit tests for deletion._build_doc_match() — the dynamic WHERE builder."""
 
     def test_only_supplied_filters_become_conditions(self):
         match, params = deletion._build_doc_match(
-            {"path": None, "version": None, "tenant_id": None,
-             "created_by_user_id": None, "job_id": "j1"}
+            {"path": None, "version": None, "tenant_id": "__public__",
+             "created_by_user_id": None, "job_id": ["j1"]}
         )
-        assert params == {"job_id": "j1"}
-        assert match.strip() == "MATCH (d:Document)\nWHERE d.job_id = $job_id"
+        assert params == {"tenant_id": "__public__", "job_id": ["j1"]}
+        assert (
+            match.strip()
+            == "MATCH (d:Document)\nWHERE d.tenant_id = $tenant_id AND d.job_id IN $job_id"
+        )
 
     def test_multiple_filters_are_anded_in_fixed_order(self):
         match, params = deletion._build_doc_match(
             {"path": "p", "version": 2, "tenant_id": "t",
-             "created_by_user_id": None, "job_id": None}
+             "created_by_user_id": ["u", "v"], "job_id": None}
         )
-        assert params == {"path": "p", "version": 2, "tenant_id": "t"}
+        assert params == {"tenant_id": "t", "path": "p", "version": 2, "created_by_user_id": ["u", "v"]}
         assert (
-            "WHERE d.path = $path AND d.version = $version AND d.tenant_id = $tenant_id"
+            "WHERE d.tenant_id = $tenant_id AND d.path = $path AND d.version = $version"
+            " AND d.created_by_user_id IN $created_by_user_id"
             in match
         )
 
+    def test_tenant_is_mandatory(self):
+        with pytest.raises(ValueError):
+            deletion._build_doc_match({"path": "p", "tenant_id": None})
+        with pytest.raises(ValueError):
+            deletion._build_doc_match({"path": "p"})
+
     def test_no_is_null_disjunction_is_ever_emitted(self):
-        match, _ = deletion._build_doc_match({"path": "p"})
+        match, _ = deletion._build_doc_match({"path": "p", "tenant_id": "t"})
         assert "IS NULL" not in match
         assert " OR " not in match
 
     def test_falsy_but_non_none_values_are_kept(self):
-        match, params = deletion._build_doc_match({"path": "", "version": 0})
-        assert params == {"path": "", "version": 0}
+        match, params = deletion._build_doc_match({"path": "", "version": 0, "tenant_id": "t"})
+        assert params == {"tenant_id": "t", "path": "", "version": 0}
         assert "d.path = $path" in match
         assert "d.version = $version" in match

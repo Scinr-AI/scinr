@@ -249,7 +249,7 @@ The ingestion module (`ingest/`) provides:
 
 **Node Properties:**
 
-- `:Document`: `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions` (plus `tenant_id` / `created_by_user_id` / `job_id` when provided)
+- `:Document`: `tenant_id`, `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions`, `created_by_user_id`, `job_id` — keyed by `(tenant_id, path, version)`; `tenant_id` is `"__public__"` for public documents
 - `:StructureNode`: `id` (composite key), `title`, `role`, `appearance_order`, `theme`, `source_page_ids`, `row_index` (tabular only)
 - `:InfoUnit`: `uid`, `title`, `order`, `description`
 
@@ -440,11 +440,15 @@ The tabular pipeline (`tabular/`) uses a **LangGraph**-based state machine (`tab
 
 1. **`load_sheets`** — Reads the file (CSV via pandas, XLSX/XLS via openpyxl), extracts headers and a 5-row preview, and stores per-sheet data in the `TabularState`.
 
-2. **`decide_model`** — Makes one LLM call per sheet to decide which extraction model to use. The LLM receives the sheet headers, preview rows, and the catalog of available models. Returns the `matched_model_class`.
+2. **`prepare_sheet`** — Selects the next pending sheet and loads it as the current sheet (headers, preview, row count).
 
-3. **`map_columns`** — Makes one LLM call per sheet to map column names to model fields. The LLM receives the sheet headers, the selected model's field definitions, and returns a column-to-field mapping.
+3. **`classify_theme`** — Makes one LLM call per sheet (`ThemeClassification`) to detect the sheet's thematic domain from its name, headers, and preview. Falls back to `"default"` if classification fails.
 
-4. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph directly to Neo4j. Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
+4. **`decide_model`** — Makes one LLM call per sheet to decide which extraction model to use. The LLM receives the sheet headers, preview rows, and the model catalog of the classified theme only (not the full catalog). Returns an `AnnotationDecision` with the `matched_model_class`, optional complementary models, and supplementary fields.
+
+5. **`map_columns`** — Makes one LLM call per sheet to map column names to model fields. The LLM receives the sheet headers, the selected model's field definitions, and returns a column-to-field mapping. If no model matched, the LLM call is skipped and all columns are mapped to `__extra__`.
+
+6. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph directly to Neo4j. Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
 
 **Per-File Process:**
 
@@ -702,6 +706,7 @@ scinr.newton/
 ├── storage/                    # Storage backends
 │   ├── base.py                 # RawFileRepository, PageRepository ABCs
 │   ├── factory.py              # get_storage() — backend factory
+│   ├── filters.py              # scope_to_mongo() — shared read scope rendered for MongoDB
 │   ├── null.py                 # NullRawFileRepository, NullPageRepository (no-op)
 │   ├── config.py               # Storage configuration
 │   ├── models.py               # RawFileRecord, PageRecord Pydantic models
@@ -732,7 +737,6 @@ scinr.newton/
     ├── neo4j_retry.py          # Neo4j operation retry with exponential backoff
     ├── neo4j_concurrency.py    # Neo4j concurrency utilities
     ├── document_resolver.py    # resolve_leaf_document_names() — folder → leaf resolution
-    ├── file_archiver.py        # File archiving utilities
     ├── logging_config.py       # Structured logging setup
     └── uid.py                  # Deterministic UID generation (make_uid, make_instance_uid)
 ```
@@ -817,7 +821,7 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 
 | Label | Description | Primary Key |
 |---|---|---|
-| `:Document` | Ingested document (versioned) | `(path, version)` composite |
+| `:Document` | Ingested document (versioned, per tenant) | `(tenant_id, path, version)` composite |
 | `:StructureNode` | Structural division (section, table, row, etc.) | `id` |
 | `:InfoUnit` | Semantic information unit | `uid` |
 | `:ModelDecision` | Annotation decision for a node | — |
@@ -877,14 +881,18 @@ The storage layer abstracts raw file and converted page persistence behind repos
 ### MongoDB Structure
 
 When `storage_backend="mongodb"`:
-- **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path)
+- **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path, tenant_id, created_by_user_id, job_id)
 - **`raw_files` collection** (`mongodb_raw_files_collection`): Raw file metadata records
 - **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, images, and dimensions
 
+Every record carries the stored `tenant_id` (`"__public__"` for public uploads), `created_by_user_id` and `job_id` of the upload.
+
 ### Repository Interfaces
 
-- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path) -> str` and `delete(raw_file_id) -> None`
-- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown) -> str`, `get_pages(raw_file_id) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id) -> int`
+- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`
+- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
+
+`<owner>` is `tenant_id` / `created_by_user_id` / `job_id` (writes; `None` = public). `<scope>` is the navigation scope — `tenant_id` (`None` = all tenants), `include_public`, `created_by_user_id`, `job_id` — shared through `utils/scope.py`. Ingestion verifies that a document's `raw_file_id` belongs to its tenant (`ingest/raw_file_check.py`). See [Storage Backends — Multi-tenancy](user-guides/storage-backends.md#multi-tenancy).
 
 Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used when `storage_backend="none"`.
 

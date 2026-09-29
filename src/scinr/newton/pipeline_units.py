@@ -27,24 +27,22 @@ logic below drift from the real stage without updating both)::
     ingestion_json   -> scinr.newton.ingest.loader._read_doc_path() /
                         _FILE_GLOB — reused directly, not duplicated.
     pre_ingested     -> scinr.newton.utils.document_resolver
-                        .resolve_leaf_document_names() — reused directly,
-                        a sync Neo4j query run via asyncio.to_thread().
+                        .resolve_leaf_documents() — reused directly,
+                        a sync Neo4j query run via asyncio.to_thread(),
+                        scoped to the run's tenant.
 
 Known design discrepancy (document_names vs document_names_dir)
 -----------------------------------------------------------------
 The `document_names` branch below eagerly resolves every name to its leaf
-documents via Neo4j (`resolve_leaf_document_names`), matching the explicit
-spec for this module. The `document_names_dir` branch, by contrast, does
-**not** touch Neo4j at all: it merely replicates the existing
-`scinr.newton.pipeline.run_pipeline()` block (~lines 502-518) that reads the
-raw `document_name` field out of each `extract-*.json` file. This mirrors
-current production behavior faithfully (that block never calls
-`resolve_leaf_document_names` either), but it means the two branches are
-*not* symmetric: `document_names` units carry Neo4j-confirmed leaf names,
-while `document_names_dir` units carry unresolved names that may still be
-folder-level (leaf resolution for those currently only happens later, one
-name at a time, inside `run_annotation()` / `run_entity_extraction()` via
-`scinr.newton.annotation.agent` / `scinr.newton.entity_extraction.agent`).
+documents via Neo4j (`resolve_leaf_documents`, within the run's tenant),
+matching the explicit spec for this module. The `document_names_dir` branch,
+by contrast, does **not** touch Neo4j at all: it reads the `document_name`
+and `doc_path` fields out of each `extract-*.json` file. The two branches
+are therefore *not* symmetric: `document_names` units carry Neo4j-confirmed
+leaf documents, while `document_names_dir` units carry unconfirmed ones
+(leaf resolution for those only happens later, inside `run_annotation()` /
+`run_entity_extraction()` via `scinr.newton.annotation.agent` /
+`scinr.newton.entity_extraction.agent`).
 Flagged here for whoever designs the future orchestration engine: either
 also resolve `document_names_dir` eagerly for consistency, or defer
 resolution for both branches uniformly.
@@ -62,6 +60,7 @@ from pathlib import Path
 from typing import Literal
 
 from scinr.newton.results import DocumentResult
+from scinr.newton.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +73,10 @@ class DocumentUnit:
     kind ``"raw_file"``, ``"extraction_json"``, or ``"ingestion_json"`` —
     they only describe *where* the eventual document comes from and what its
     ``doc_path`` will resolve to once the real stage processes it. Units of
-    kind ``"pre_ingested"`` describe a document name taken as-is (for
-    ``document_names``, Neo4j-confirmed leaf names; for
-    ``document_names_dir``, unresolved names read from disk — see module
-    docstring "Known design discrepancy" note).
+    kind ``"pre_ingested"`` describe an already-ingested document (for
+    ``document_names``, Neo4j-confirmed leaf documents; for
+    ``document_names_dir``, documents read from disk — see module docstring
+    "Known design discrepancy" note).
 
     Attributes:
         kind: One of ``"raw_file"``, ``"extraction_json"``, ``"ingestion_json"``,
@@ -86,9 +85,11 @@ class DocumentUnit:
             ``"pre_ingested"`` units (no filesystem source).
         doc_path: For ``raw_file`` / ``extraction_json`` / ``ingestion_json``: the
             document path derived exactly as the real stage would derive it
-            (see module docstring). For ``pre_ingested``: the document name
-            itself (leaf name, Neo4j-confirmed for ``document_names``;
-            unresolved for ``document_names_dir``).
+            (see module docstring). For ``pre_ingested``: the path of the
+            already-ingested document (Neo4j-confirmed leaf path for
+            ``document_names``; the ``extract-*.json``'s own ``doc_path`` for
+            ``document_names_dir``). Together with the tenant, the selector
+            the annotation / entity extraction stages use.
         relative_dir: Directory of *source_path* relative to the input root. ``Path(".")``
             for ``pre_ingested`` units (no filesystem source).
         document_name_hint: Human-readable document name (typically a filename stem, without any
@@ -125,6 +126,10 @@ class UnitResult:
     stage_results: dict[str, DocumentResult]
     stopped_at: str | None
     fatal_error: str | None
+
+    def __post_init__(self) -> None:
+        # Built from str(exc) and surfaced to API callers — scrub credentials.
+        self.fatal_error = redact_secrets(self.fatal_error)
 
 
 # ---------------------------------------------------------------------------
@@ -310,35 +315,40 @@ def _discover_ingestion_json_units(ingestion_input_dir: str) -> list[DocumentUni
     return units
 
 
-async def _discover_pre_ingested_units(document_names: list[str]) -> list[DocumentUnit]:
-    """Resolve each name in *document_names* to its leaf documents in Neo4j.
+async def _discover_pre_ingested_units(
+    document_names: list[str], tenant_id: str | None
+) -> list[DocumentUnit]:
+    """Resolve each name in *document_names* to its leaf documents in Neo4j,
+    among *tenant_id*'s documents only (``None`` = public documents).
 
-    Uses ``scinr.newton.utils.document_resolver.resolve_leaf_document_names()``
+    Uses ``scinr.newton.utils.document_resolver.resolve_leaf_documents()``
     (a sync Neo4j query) run off the event loop via ``asyncio.to_thread()``.
     A single sync ``Driver`` is opened for the whole call and closed at the
-    end (never left open). Leaf names are deduplicated (exact case, no
-    normalization) preserving first-occurrence order across all input names.
+    end (never left open). Leaves are deduplicated by path preserving
+    first-occurrence order across all input names.
     """
     from scinr.newton.ingest.config import get_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names
+    from scinr.newton.utils.document_resolver import resolve_leaf_documents
 
     driver = get_driver()
     try:
         seen: set[str] = set()
         units: list[DocumentUnit] = []
         for name in document_names:
-            leaves = await asyncio.to_thread(resolve_leaf_document_names, driver, name)
+            leaves = await asyncio.to_thread(
+                lambda n=name: resolve_leaf_documents(driver, tenant_id=tenant_id, document_name=n)
+            )
             for leaf in leaves:
-                if leaf in seen:
+                if leaf.path in seen:
                     continue
-                seen.add(leaf)
+                seen.add(leaf.path)
                 units.append(
                     DocumentUnit(
                         kind="pre_ingested",
                         source_path=None,
-                        doc_path=leaf,
+                        doc_path=leaf.path,
                         relative_dir=Path("."),
-                        document_name_hint=leaf,
+                        document_name_hint=leaf.name,
                     )
                 )
         return units
@@ -347,16 +357,18 @@ async def _discover_pre_ingested_units(document_names: list[str]) -> list[Docume
 
 
 def _discover_document_names_dir_units(document_names_dir: str) -> list[DocumentUnit]:
-    """Read the ``document_name`` field of every ``extract-*.json`` file
-    under *document_names_dir*.
+    """Read the ``document_name`` (and ``doc_path``) fields of every
+    ``extract-*.json`` file under *document_names_dir*.
 
-    Mirrors exactly the branch in ``scinr.newton.pipeline.run_pipeline()``
-    (~lines 502-518) that resolves ``doc_names_for_ann_ee`` from
-    ``document_names_dir`` — same glob, same per-file error handling, same
-    "no readable document_name fields" guard. Does **not** touch Neo4j (see
-    module docstring "Known design discrepancy" note): unlike
-    ``document_names``, names returned here are NOT resolved to leaves.
+    Same glob, per-file error handling and "no readable document_name fields"
+    guard as the former ``run_pipeline()`` block this replaces. The unit's
+    ``doc_path`` is the path ingestion stored the document under
+    (``doc_path`` or, when absent, ``document_name`` — as in
+    ``ingest.nodes.insert_document_graph``); units are deduplicated by it. Does **not**
+    touch Neo4j (see module docstring "Known design discrepancy" note):
+    unlike ``document_names``, documents returned here are NOT confirmed.
     """
+
     dir_path = Path(document_names_dir)
     if not dir_path.exists():
         raise FileNotFoundError(f"Folder not found: '{document_names_dir}'.")
@@ -377,14 +389,17 @@ def _discover_document_names_dir_units(document_names_dir: str) -> list[Document
             )
             continue
         name = data.get("document_name")
-        if not name or name in seen:
+        if not name:
             continue
-        seen.add(name)
+        doc_path = data.get("doc_path") or name
+        if doc_path in seen:
+            continue
+        seen.add(doc_path)
         units.append(
             DocumentUnit(
                 kind="pre_ingested",
                 source_path=None,
-                doc_path=name,
+                doc_path=doc_path,
                 relative_dir=Path("."),
                 document_name_hint=name,
             )
@@ -411,6 +426,7 @@ async def _discover_units(
     document_names: list[str] | None = None,
     document_names_dir: str | None = None,
     tabular_extensions: set[str] | None = None,
+    tenant_id: str | None = None,
 ) -> list[DocumentUnit]:
     """Discover the list of ``DocumentUnit``s for exactly one input source.
 
@@ -440,6 +456,8 @@ async def _discover_units(
             docstring).
         tabular_extensions: Only used with *input_raw*: file extensions to exclude from the
             result (e.g. tabular files routed to a separate pipeline).
+        tenant_id: Only used with *document_names*: the tenant whose documents
+            the names are resolved among (``None`` = public documents).
 
     Returns:
         The discovered units, in the order produced by each branch (see the
@@ -467,7 +485,7 @@ async def _discover_units(
     if which == "ingestion_input_dir":
         return _discover_ingestion_json_units(ingestion_input_dir)  # type: ignore[arg-type]
     if which == "document_names":
-        return await _discover_pre_ingested_units(document_names)  # type: ignore[arg-type]
+        return await _discover_pre_ingested_units(document_names, tenant_id)  # type: ignore[arg-type]
     return _discover_document_names_dir_units(document_names_dir)  # type: ignore[arg-type]
 
 
@@ -492,3 +510,16 @@ def build_all_paths_for_versioning(units: Sequence[DocumentUnit]) -> list[str]:
 
     leaf_paths = [u.doc_path for u in units if u.doc_path]
     return _extract_all_paths(leaf_paths)
+
+
+def unit_tenant(unit: DocumentUnit, tenant_id: str | None) -> str | None:
+    """Tenant (public-API form, ``None`` = public) *unit*'s document is, or will
+    be, stored under: the run's *tenant_id* when given — it overrides any value
+    baked into an ingested file — otherwise, for an ``ingestion_json`` unit,
+    the ``tenant_id`` baked into that ``extract-*.json``.
+    """
+    if tenant_id is None and unit.kind == "ingestion_json" and unit.source_path is not None:
+        from scinr.newton.ingest.loader import _read_tenant_id
+
+        return _read_tenant_id(unit.source_path)
+    return tenant_id

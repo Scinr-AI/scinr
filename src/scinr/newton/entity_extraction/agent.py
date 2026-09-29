@@ -11,6 +11,11 @@ Usage:
 When *document_name* refers to a folder document (one that has children via
 IS_COMPOSED_OF in Neo4j), all **leaf** descendants are processed sequentially.
 A failure in one leaf is logged and the remaining leaves are still processed.
+
+Documents are always selected within one tenant (``tenant_id``, ``None`` =
+public): by ``doc_path`` when given, otherwise by ``document_name``. Each leaf
+is then processed by its ``(tenant_id, path)`` — a name never selects nodes of
+another document, or of another tenant.
 """
 from __future__ import annotations
 
@@ -30,6 +35,9 @@ logger = logging.getLogger(__name__)
 async def _run_entity_extraction_for_single_document(
     document_name: str,
     only_unextracted: bool = False,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> dict:
     """
     Run the entity extraction pipeline for exactly one document.
@@ -38,15 +46,22 @@ async def _run_entity_extraction_for_single_document(
     concurrently, bounded by the global LLM_CONCURRENCY semaphore.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j.
+        document_name: Document display name (provenance on the extractions).
         only_unextracted: When True, only process nodes without an existing
             :HAS_EXTRACTION->(:ExtractionResult) relationship.
+        tenant_id: Owner of the document (``None`` = public).
+        doc_path: Path of the document — with *tenant_id*, the selector.
 
     Returns:
-        Final state dict with keys: document_name, targets, errors.
+        Final state dict with keys: document_name, doc_path, targets, errors.
     """
-    logger.info("Starting entity extraction agent for document: %r", document_name)
-    final_state = await _run_entity_extraction_parallel(document_name, only_unextracted=only_unextracted)
+    logger.info(
+        "Starting entity extraction agent for document: %r (path=%r, tenant=%r)",
+        document_name, doc_path, tenant_id,
+    )
+    final_state = await _run_entity_extraction_parallel(
+        document_name, only_unextracted=only_unextracted, tenant_id=tenant_id, doc_path=doc_path
+    )
 
     n_targets = len(final_state.get("targets", []))
     n_errors = len(final_state.get("errors", []))
@@ -64,6 +79,9 @@ async def _run_entity_extraction_for_single_document(
 async def _run_entity_extraction_parallel(
     document_name: str,
     only_unextracted: bool = False,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> dict:
     """Run entity extraction for a single document using intra-document parallelism.
 
@@ -73,14 +91,17 @@ async def _run_entity_extraction_parallel(
     Parameters
     ----------
     document_name:
-        Neo4j Document.name.
+        Neo4j Document.name (provenance only).
     only_unextracted:
         When True, skip nodes that already have a :HAS_EXTRACTION relationship.
+    tenant_id, doc_path:
+        Select the latest :Document to extract.
 
     Returns
     -------
     dict
-        Compatible with EntityExtractionState: keys document_name, targets, errors.
+        Compatible with EntityExtractionState: keys document_name, doc_path,
+        targets, errors.
     """
     from scinr.newton.config import get_llm_semaphore
     from scinr.newton.entity_extraction.neo4j_ops import fetch_extraction_targets
@@ -88,7 +109,9 @@ async def _run_entity_extraction_parallel(
     from scinr.newton.ingest.config import get_async_driver
 
     driver = get_async_driver()
-    targets = await fetch_extraction_targets(driver, document_name, only_unextracted=only_unextracted)
+    targets = await fetch_extraction_targets(
+        driver, tenant_id=tenant_id, doc_path=doc_path, only_unextracted=only_unextracted
+    )
 
     logger.info(
         "_run_entity_extraction_parallel: %d targets for document %r",
@@ -96,7 +119,7 @@ async def _run_entity_extraction_parallel(
     )
 
     if not targets:
-        return {"document_name": document_name, "targets": targets, "errors": []}
+        return {"document_name": document_name, "doc_path": doc_path, "targets": targets, "errors": []}
 
     semaphore = get_llm_semaphore()
     raw_results = await asyncio.gather(
@@ -121,6 +144,7 @@ async def _run_entity_extraction_parallel(
     )
     return {
         "document_name": document_name,
+        "doc_path": doc_path,
         "targets": targets,
         "errors": errors,
     }
@@ -135,6 +159,9 @@ async def run_entity_extraction_agent(
     document_name: str,
     parallel_docs: int = 1,
     only_unextracted: bool = False,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> dict:
     """
     Run the full entity extraction pipeline for a document (or folder) already annotated in Neo4j.
@@ -149,11 +176,16 @@ async def run_entity_extraction_agent(
     subgraph to Neo4j. Marks each InfoUnit as extracted on completion.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j.
+        document_name: The exact Document.name as stored in Neo4j. Selects the
+            root document(s) only when *doc_path* is not given (every latest
+            document of the tenant with that name); otherwise it is only a label.
         parallel_docs: Maximum number of leaf documents to extract concurrently.
             Defaults to ``1`` (sequential, backward-compatible behaviour).
         only_unextracted: When True, only process nodes that do NOT already have a
             :HAS_EXTRACTION->(:ExtractionResult) relationship. Defaults to False.
+        tenant_id: Owner of the document (``None`` = public). Only that
+            tenant's documents are read or written.
+        doc_path: Path of the root document (preferred selector).
 
     Returns:
         If a single document: the final EntityExtractionState dict.
@@ -172,41 +204,53 @@ async def run_entity_extraction_agent(
 
     from scinr.newton.exceptions import PreconditionError
     from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
+    from scinr.newton.utils.document_resolver import (
+        latest_document_pattern,
+        resolve_leaf_documents_async,
+    )
+    doc_pattern, doc_params = latest_document_pattern(
+        "d", tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    )
+    doc_label = f"'{doc_path or document_name}' (tenant={tenant_id!r})"
     cfg = get_config()
     driver = get_async_driver()
     async with driver.session(database=cfg.neo4j_database) as _session:
         # Check 1: document exists
-        _result1 = await _session.run(
-            "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
-            name=document_name,
-        )
+        _result1 = await _session.run(f"MATCH {doc_pattern} RETURN count(d) AS n", **doc_params)
         _doc_count = (await _result1.single())["n"]
         if _doc_count == 0:
             raise PreconditionError(
-                f"Document '{document_name}' not found in Neo4j (latest=true). "
+                f"Document {doc_label} not found in Neo4j (latest=true). "
                 f"Run run_ingestion() before run_entity_extraction_agent()."
             )
         # Check 2: at least one annotated node exists
         _result2 = await _session.run(
-            "MATCH (d:Document {name: $n, latest: true})"
+            f"MATCH {doc_pattern}"
             "-[:HAS_STRUCTURE|HAS_CHILD*1..]->(sn:StructureNode)"
             "-[:HAS_MODEL_DECISION]->() RETURN count(sn) AS n",
-            n=document_name,
+            **doc_params,
         )
         _annotated_count = (await _result2.single())["n"]
         if _annotated_count == 0:
             raise PreconditionError(
-                f"Document '{document_name}' has no annotated StructureNodes. "
+                f"Document {doc_label} has no annotated StructureNodes. "
                 f"Run run_annotation_agent() before run_entity_extraction_agent()."
             )
 
-    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
+    leaves = await resolve_leaf_documents_async(
+        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    )
+    leaf_names = [leaf.name for leaf in leaves]
 
     # Single document (no IS_COMPOSED_OF children): original behaviour
-    if len(leaf_names) == 1 and leaf_names[0] == document_name:
+    if len(leaves) == 1 and (
+        leaves[0].path == doc_path if doc_path is not None else leaves[0].name == document_name
+    ):
         return await _run_entity_extraction_for_single_document(
-            document_name, only_unextracted=only_unextracted
+            leaves[0].name,
+            only_unextracted=only_unextracted,
+            tenant_id=tenant_id,
+            doc_path=leaves[0].path,
         )
 
     # Multiple leaf documents: process with bounded concurrency, accumulate results
@@ -216,22 +260,28 @@ async def run_entity_extraction_agent(
 
     semaphore = asyncio.Semaphore(parallel_docs)
 
-    async def _run_leaf(leaf_name: str) -> dict:
+    async def _run_leaf(leaf) -> dict:
         async with semaphore:
-            logger.info("Processing leaf document %r (parent: %r)", leaf_name, document_name)
+            logger.info(
+                "Processing leaf document %r (path=%r, parent: %r)",
+                leaf.name, leaf.path, doc_path or document_name,
+            )
             return await _run_entity_extraction_for_single_document(
-                leaf_name, only_unextracted=only_unextracted
+                leaf.name,
+                only_unextracted=only_unextracted,
+                tenant_id=tenant_id,
+                doc_path=leaf.path,
             )
 
     leaf_results = await asyncio.gather(
-        *[_run_leaf(name) for name in leaf_names],
+        *[_run_leaf(leaf) for leaf in leaves],
         return_exceptions=True,
     )
 
-    for leaf_name, result in zip(leaf_names, leaf_results):
+    for leaf, result in zip(leaves, leaf_results):
         if isinstance(result, Exception):
-            logger.error("Entity extraction failed for leaf document %r: %s", leaf_name, result)
-            all_errors.append(f"[{leaf_name}] {result}")
+            logger.error("Entity extraction failed for leaf document %r: %s", leaf.path, result)
+            all_errors.append(f"[{leaf.name}] {result}")
         else:
             results.append(result)
             all_errors.extend(result.get("errors", []))
@@ -258,6 +308,9 @@ def run_entity_extraction_agent_sync(
     document_name: str,
     parallel_docs: int = 1,
     only_unextracted: bool = False,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> dict:
     """Synchronous wrapper around run_entity_extraction_agent."""
     return asyncio.run(
@@ -265,63 +318,7 @@ def run_entity_extraction_agent_sync(
             document_name,
             parallel_docs=parallel_docs,
             only_unextracted=only_unextracted,
+            tenant_id=tenant_id,
+            doc_path=doc_path,
         )
     )
-
-
-if __name__ == "__main__":
-    import argparse
-    from pathlib import Path
-
-    from scinr.newton.utils.logging_config import setup_logging
-    setup_logging(log_dir=Path("logs"))
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "scinr-ingest entity extraction agent — Stage 4\n"
-            "\n"
-            "If --document refers to a folder (a document with IS_COMPOSED_OF children),\n"
-            "all leaf descendants are processed automatically."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--document",
-        required=True,
-        help="Exact Document.name as stored in Neo4j",
-    )
-    parser.add_argument(
-        "--parallel-docs",
-        type=int,
-        default=1,
-        metavar="N",
-        help=(
-            "Maximum number of leaf documents to process concurrently. "
-            "Defaults to 1 (sequential)."
-        ),
-    )
-    parser.add_argument(
-        "--only-unextracted",
-        action="store_true",
-        default=False,
-        help=(
-            "Only process StructureNodes that do not already have a "
-            ":HAS_EXTRACTION->(:ExtractionResult) relationship."
-        ),
-    )
-    args = parser.parse_args()
-
-    result = run_entity_extraction_agent_sync(
-        args.document,
-        parallel_docs=args.parallel_docs,
-        only_unextracted=args.only_unextracted,
-    )
-    errors = result.get("errors", [])
-    n_targets = len(result.get("targets", []))
-    logger.info("Entity extraction complete: %d nodes processed", n_targets)
-    if errors:
-        logger.info("Non-fatal errors (%d):", len(errors))
-        for e in errors:
-            logger.info("  - %s", e)
-    else:
-        logger.info("No errors.")

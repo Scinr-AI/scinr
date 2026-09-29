@@ -87,18 +87,31 @@ class TestMongoDBStoreFile:
         )
 
         raw_file_id = await MongoDBRawFileRepository().store_file(
-            path=path, filename="big.pdf", content_type="application/pdf", folder_path="a/b"
+            path=path,
+            filename="big.pdf",
+            content_type="application/pdf",
+            folder_path="a/b",
+            tenant_id="acme",
+            created_by_user_id="u1",
+            job_id="j1",
         )
 
         assert raw_file_id == str(inserted_id)
         assert not isinstance(uploaded["source"], (bytes, bytearray))
-        assert uploaded["metadata"] == {"content_type": "application/pdf", "folder_path": "a/b"}
+        assert uploaded["metadata"] == {
+            "content_type": "application/pdf",
+            "folder_path": "a/b",
+            "tenant_id": "acme",
+            "created_by_user_id": "u1",
+            "job_id": "j1",
+        }
         doc = collection.insert_one.await_args.args[0]
         assert doc["size_bytes"] == len(payload)
         assert doc["checksum_sha256"] == hashlib.sha256(payload).hexdigest()
         assert doc["gridfs_id"] == gridfs_id
         assert doc["filename"] == "big.pdf"
         assert doc["folder_path"] == "a/b"
+        assert (doc["tenant_id"], doc["created_by_user_id"], doc["job_id"]) == ("acme", "u1", "j1")
 
     async def test_store_still_uploads_bytes_and_shares_metadata_insertion(self, monkeypatch):
         gridfs_id = ObjectId()
@@ -118,7 +131,10 @@ class TestMongoDBStoreFile:
         )
 
         assert bucket.upload_from_stream.await_args.args[1] == b"hello"
+        # No tenant = public, stored as the reserved key (never null).
+        assert bucket.upload_from_stream.await_args.kwargs["metadata"]["tenant_id"] == "__public__"
         doc = collection.insert_one.await_args.args[0]
+        assert doc["tenant_id"] == "__public__"
         assert doc["size_bytes"] == 5
         assert doc["checksum_sha256"] == hashlib.sha256(b"hello").hexdigest()
 
@@ -130,23 +146,41 @@ class TestDefaultStoreFile:
         received: dict = {}
 
         class _CustomRepo(RawFileRepository):
-            async def store(self, filename, content, content_type, folder_path):
+            async def store(self, filename, content, content_type, folder_path, **owner):
                 received.update(
                     filename=filename,
                     content=content,
                     content_type=content_type,
                     folder_path=folder_path,
+                    **owner,
                 )
                 return "custom-id"
 
-            async def delete(self, raw_file_id):
+            async def get(self, raw_file_id, **scope):
+                return None
+
+            async def open(self, raw_file_id, **scope):
+                return None
+
+            async def open_with_record(self, raw_file_id, **scope):
+                return None
+
+            async def list_raw_files(self, **scope):
+                return []
+
+            async def delete(self, raw_file_id, **scope):
                 return None
 
         path = tmp_path / "doc.bin"
         path.write_bytes(b"\x00\x01\x02")
 
         raw_file_id = await _CustomRepo().store_file(
-            path=path, filename="doc.bin", content_type="application/x", folder_path=None
+            path=path,
+            filename="doc.bin",
+            content_type="application/x",
+            folder_path=None,
+            tenant_id="acme",
+            job_id="j1",
         )
 
         assert raw_file_id == "custom-id"
@@ -155,4 +189,7 @@ class TestDefaultStoreFile:
             "content": b"\x00\x01\x02",
             "content_type": "application/x",
             "folder_path": None,
+            "tenant_id": "acme",
+            "created_by_user_id": None,
+            "job_id": "j1",
         }

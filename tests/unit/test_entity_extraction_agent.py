@@ -35,6 +35,7 @@ from scinr.newton.entity_extraction.agent import (
     _run_entity_extraction_parallel,
     run_entity_extraction_agent,
 )
+from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
 # Helpers — fake async Neo4j driver/session (async context manager protocol)
@@ -74,7 +75,7 @@ class _FakeAsyncDriver:
     like the real driver's API.
     """
 
-    def session(self):
+    def session(self, **kwargs):
         return _FakeAsyncSession()
 
 
@@ -119,7 +120,7 @@ class TestRunEntityExtractionParallelConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_fetch(driver, document_name, only_unextracted=False):
+        async def _tracking_fetch(driver, *, tenant_id, doc_path, only_unextracted=False):
             await tracker.track()
             return []
 
@@ -134,13 +135,13 @@ class TestRunEntityExtractionParallelConcurrency:
             ),
         ):
             results = await asyncio.gather(
-                _run_entity_extraction_parallel("docA"),
-                _run_entity_extraction_parallel("docB"),
+                _run_entity_extraction_parallel("docA", tenant_id=None, doc_path="docA"),
+                _run_entity_extraction_parallel("docB", tenant_id=None, doc_path="docB"),
             )
 
         assert results == [
-            {"document_name": "docA", "targets": [], "errors": []},
-            {"document_name": "docB", "targets": [], "errors": []},
+            {"document_name": "docA", "doc_path": "docA", "targets": [], "errors": []},
+            {"document_name": "docB", "doc_path": "docB", "targets": [], "errors": []},
         ]
         assert tracker.max_in_flight == 2
 
@@ -153,7 +154,7 @@ class TestRunEntityExtractionParallelConcurrency:
 class TestRunEntityExtractionAgentPreconditionConcurrency:
     async def test_two_concurrent_calls_overlap_during_leaf_resolution(self):
         """Two concurrent `run_entity_extraction_agent()` calls must overlap
-        during `resolve_leaf_document_names_async()` — proving the
+        during `resolve_leaf_documents_async()` — proving the
         precondition-check / leaf-resolution plumbing (async driver session,
         `await session.run(...)`, `await result.single()`) no longer blocks
         the event loop synchronously either.
@@ -165,9 +166,9 @@ class TestRunEntityExtractionAgentPreconditionConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_resolve(driver, document_name):
+        async def _tracking_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
             await tracker.track()
-            return [document_name]
+            return [LeafDocument(document_name, document_name)]
 
         fake_driver = _FakeAsyncDriver()
 
@@ -177,13 +178,13 @@ class TestRunEntityExtractionAgentPreconditionConcurrency:
                 MagicMock(return_value=fake_driver),
             ),
             patch(
-                "scinr.newton.utils.document_resolver.resolve_leaf_document_names_async",
+                "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
                 AsyncMock(side_effect=_tracking_resolve),
             ),
             patch(
                 "scinr.newton.entity_extraction.agent._run_entity_extraction_for_single_document",
                 AsyncMock(
-                    side_effect=lambda document_name, only_unextracted=False: {
+                    side_effect=lambda document_name, only_unextracted=False, *, tenant_id, doc_path: {
                         "document_name": document_name,
                         "targets": [],
                         "errors": [],

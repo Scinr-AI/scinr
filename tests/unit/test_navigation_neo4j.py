@@ -123,6 +123,30 @@ async def test_get_structure_nodes_where_and_title_filter() -> None:
     assert "n.`appearance_order` >= $w_appearance_order" in q
 
 
+async def test_get_structure_nodes_by_ids_one_query_in_request_order() -> None:
+    def node(i: str) -> dict:
+        return {"id": i, "node_id": i, "role": "table", "source_page_ids": [f"p-{i}"]}
+
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}], "n.id IN $ids": [
+        {"n": node("b")}, {"n": node("a")}
+    ]}))
+    out = await nav.get_structure_nodes_by_ids(
+        ["a", "missing", "b", "a"], tenant_id="acme", job_id="j1"
+    )
+    assert [(n.id, n.source_page_ids) for n in out] == [("a", ["p-a"]), ("b", ["p-b"])]
+    q, params = _query_with(drv, "n.id IN $ids")
+    assert q.startswith("MATCH (n:StructureNode) WHERE n.id IN $ids AND ")
+    assert "$scope_tenant" in q and "$scope_job_ids" in q
+    assert params["ids"] == ["a", "missing", "b"]
+    assert params["scope_tenant"] == "acme"
+
+
+async def test_get_structure_nodes_by_ids_empty_list_does_not_query() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    assert await nav.get_structure_nodes_by_ids([], tenant_id="acme") == []
+    assert not _has_query(drv, "StructureNode")
+
+
 async def test_get_model_instances_by_class_where_verbatim_and_order() -> None:
     mi = {"uid": "u1", "model_class": "ProcedureTypeModel", "procedure_type": "ib"}
     nav, drv = _mk(_resp({

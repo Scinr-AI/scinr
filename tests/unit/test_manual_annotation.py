@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scinr.newton.annotation.agent import run_manual_annotation
+from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
 # 1. Success path, single (non-folder) document
@@ -63,8 +64,8 @@ class TestRunManualAnnotationSingleDocumentSuccess:
                 MagicMock(return_value=driver_dummy),
             ),
             patch(
-                "scinr.newton.utils.document_resolver.resolve_leaf_document_names_async",
-                AsyncMock(return_value=["MyDoc"]),
+                "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
+                AsyncMock(return_value=[LeafDocument("MyDoc", "MyDoc")]),
             ),
             patch(
                 "scinr.newton.annotation.neo4j_ops.write_manual_annotation",
@@ -75,7 +76,9 @@ class TestRunManualAnnotationSingleDocumentSuccess:
             result = await run_manual_annotation("MyDoc", "SomeModelClass")
 
         assert result == 5
-        write_mock.assert_awaited_once_with(driver_dummy, "MyDoc", "SomeModelClass")
+        write_mock.assert_awaited_once_with(
+            driver_dummy, "MyDoc", "SomeModelClass", tenant_id=None, doc_path="MyDoc"
+        )
 
         error_records = [
             r for r in caplog.records if r.name == "scinr.newton.annotation.agent"
@@ -92,7 +95,8 @@ class TestRunManualAnnotationFolderMultipleLeaves:
     async def test_sums_counts_across_all_leaves(self) -> None:
         """When `document_name` resolves to multiple leaf documents, the
         per-leaf counts returned by `write_manual_annotation()` must be
-        summed correctly, and each leaf must be called with its own name.
+        summed correctly, and each leaf must be called with its own name and
+        selected by its own path within the tenant.
         """
         driver_dummy = MagicMock(name="async_driver")
         write_mock = AsyncMock(side_effect=[3, 7])
@@ -107,20 +111,31 @@ class TestRunManualAnnotationFolderMultipleLeaves:
                 MagicMock(return_value=driver_dummy),
             ),
             patch(
-                "scinr.newton.utils.document_resolver.resolve_leaf_document_names_async",
-                AsyncMock(return_value=["Leaf1", "Leaf2"]),
+                "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
+                AsyncMock(
+                    return_value=[
+                        LeafDocument("Leaf1", "SomeFolder/Leaf1"),
+                        LeafDocument("Leaf2", "SomeFolder/Leaf2"),
+                    ]
+                ),
             ),
             patch(
                 "scinr.newton.annotation.neo4j_ops.write_manual_annotation",
                 write_mock,
             ),
         ):
-            result = await run_manual_annotation("SomeFolder", "SomeModelClass")
+            result = await run_manual_annotation(
+                "SomeFolder", "SomeModelClass", tenant_id="acme"
+            )
 
         assert result == 10
         assert write_mock.await_count == 2
-        write_mock.assert_any_await(driver_dummy, "Leaf1", "SomeModelClass")
-        write_mock.assert_any_await(driver_dummy, "Leaf2", "SomeModelClass")
+        write_mock.assert_any_await(
+            driver_dummy, "Leaf1", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf1"
+        )
+        write_mock.assert_any_await(
+            driver_dummy, "Leaf2", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf2"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +166,13 @@ class TestRunManualAnnotationPerLeafFailureIsolation:
                 MagicMock(return_value=driver_dummy),
             ),
             patch(
-                "scinr.newton.utils.document_resolver.resolve_leaf_document_names_async",
-                AsyncMock(return_value=["Leaf1", "Leaf2"]),
+                "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
+                AsyncMock(
+                    return_value=[
+                        LeafDocument("Leaf1", "SomeFolder/Leaf1"),
+                        LeafDocument("Leaf2", "SomeFolder/Leaf2"),
+                    ]
+                ),
             ),
             patch(
                 "scinr.newton.annotation.neo4j_ops.write_manual_annotation",

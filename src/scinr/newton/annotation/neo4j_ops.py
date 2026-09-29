@@ -13,6 +13,7 @@ from neo4j import AsyncDriver
 from scinr.newton.annotation.models import AnnotationDecision
 from scinr.newton.config import get_config
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
+from scinr.newton.utils.tenancy import tenant_key
 
 if TYPE_CHECKING:
     from scinr.newton.utils.theme_registry import ThemeRegistry
@@ -33,11 +34,17 @@ def _make_uid(*parts: str) -> str:
 
 async def fetch_nodes_to_annotate(
     driver: AsyncDriver,
-    document_name: str,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
     only_unannotated: bool = False,
 ) -> list[dict]:
     """
     Fetch all StructureNodes that have at least one InfoUnit for this document.
+
+    The document is the ``latest`` :Document of *tenant_id* (``None`` = public)
+    at *doc_path* — never selected by name, which is neither unique within a
+    tenant nor across tenants.
 
     Traverses both direct HAS_STRUCTURE children and all HAS_CHILD descendants.
     Returns nodes ordered by appearance_order.
@@ -55,7 +62,8 @@ async def fetch_nodes_to_annotate(
         extra_filter = "AND NOT (n)-[:HAS_MODEL_DECISION]->()"
 
     query = f"""
-    MATCH (d:Document {{name: $doc_name, latest: true}})-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
+    MATCH (d:Document {{tenant_id: $tenant_id, path: $doc_path, latest: true}})
+          -[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
     WHERE (n)-[:HAS_INFO_UNIT]->()
     {extra_filter}
     RETURN DISTINCT
@@ -68,7 +76,7 @@ async def fetch_nodes_to_annotate(
     """
     cfg = get_config()
     async with driver.session(database=cfg.neo4j_database) as session:
-        result = await session.run(query, doc_name=document_name)
+        result = await session.run(query, tenant_id=tenant_key(tenant_id), doc_path=doc_path)
         return await result.data()
 
 
@@ -514,6 +522,7 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
         # Pass A: Enrich ModelField nodes with json_schema_extra metadata
         entity_label_count = 0
         instance_key_count = 0
+        instance_key_props: set[str] = set()
         for model_name, cls in all_models.items():
             if not hasattr(cls, "model_fields"):
                 continue
@@ -538,8 +547,12 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
                 )
                 if is_instance_key:
                     instance_key_count += 1
+                    instance_key_props.add(field_name)
                 if entity_label is not None:
                     entity_label_count += 1
+
+        # Pass A': one (tenant_id, <key>) index per distinct instance_key property
+        await _ensure_instance_key_indexes(session, instance_key_props)
 
         # Pass B: Create EntityLabel schema nodes and PRODUCES_ENTITY relationships
         produces_entity_count = 0
@@ -676,6 +689,50 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
         field_rel_count,
         instance_rel_count,
     )
+
+
+_IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def instance_key_index_name(prop: str) -> str:
+    """Name of the ``(tenant_id, <prop>)`` index on :ModelInstance for key *prop*.
+
+    Identifier-like names map to ``idx_mi_key_<prop>``. Anything else is
+    sanitised to ``[A-Za-z0-9_]`` and suffixed with a short hash of the
+    original, so two names that sanitise alike never share an index.
+    """
+    if _IDENT_RE.match(prop):
+        return f"idx_mi_key_{prop}"
+    safe = _re.sub(r"[^A-Za-z0-9_]", "_", prop)
+    digest = hashlib.sha1(prop.encode("utf-8")).hexdigest()[:8]
+    return f"idx_mi_key_{safe}_{digest}"
+
+
+async def _ensure_instance_key_indexes(session, props: set[str]) -> None:
+    """Create a ``(tenant_id, <prop>)`` index on :ModelInstance per key property.
+
+    ``instance_key`` fields are written (normalised) as properties of the
+    ModelInstance node, so a search on part of a composite key — or on a key
+    without rebuilding the uid — is an index seek within the tenant. The
+    label is always :ModelInstance, so one index serves every model that has
+    a key field with that name. Indexes of fields that stop being keys are
+    left in place (harmless; drop them by hand with ``DROP INDEX``).
+
+    A failure (e.g. no schema privilege) is logged and does not stop the
+    catalog setup.
+    """
+    for prop in sorted(props):
+        name = instance_key_index_name(prop)
+        escaped = prop.replace("`", "``")
+        cypher = (
+            f"CREATE INDEX {name} IF NOT EXISTS "
+            f"FOR (mi:ModelInstance) ON (mi.tenant_id, mi.`{escaped}`)"
+        )
+        try:
+            result = await session.run(cypher)
+            await result.consume()
+        except Exception as exc:  # noqa: BLE001 — a missing index must not block ingestion
+            log.warning("Could not create index %s on ModelInstance.%s: %s", name, prop, exc)
 
 
 async def ensure_theme_structure(driver: AsyncDriver, registry: ThemeRegistry) -> None:
@@ -943,7 +1000,10 @@ async def write_annotation(
                 propose_new_model:         $propose_new_model,
                 proposed_model_description: $proposed_model_description,
                 document_name:             $document_name,
-                timestamp:                 $timestamp
+                timestamp:                 $timestamp,
+                tenant_id:                 n.tenant_id,
+                created_by_user_id:        n.created_by_user_id,
+                job_id:                    n.job_id
             })
             CREATE (n)-[:HAS_MODEL_DECISION]->(md)
             """,
@@ -987,9 +1047,12 @@ async def write_annotation(
                 """
                 MATCH (md:ModelDecision {uid: $decision_uid})
                 CREATE (comp:ComplementaryMatch {
-                    uid:           $cm_uid,
-                    model_class:   $model_class,
-                    coverage_note: $coverage_note
+                    uid:                $cm_uid,
+                    model_class:        $model_class,
+                    coverage_note:      $coverage_note,
+                    tenant_id:          md.tenant_id,
+                    created_by_user_id: md.created_by_user_id,
+                    job_id:             md.job_id
                 })
                 CREATE (md)-[:HAS_COMPLEMENTARY_MATCH]->(comp)
                 WITH comp
@@ -1009,9 +1072,12 @@ async def write_annotation(
                 """
                 MATCH (md:ModelDecision {uid: $decision_uid})
                 CREATE (pm:ProposedModel {
-                    uid:         $pm_uid,
-                    schema_name: $schema_name,
-                    description: $description
+                    uid:                $pm_uid,
+                    schema_name:        $schema_name,
+                    description:        $description,
+                    tenant_id:          md.tenant_id,
+                    created_by_user_id: md.created_by_user_id,
+                    job_id:             md.job_id
                 })
                 CREATE (md)-[:HAS_PROPOSED_MODEL]->(pm)
                 """,
@@ -1026,11 +1092,14 @@ async def write_annotation(
                     """
                     MATCH (pm:ProposedModel {uid: $pm_uid})
                     CREATE (f:ProposedField {
-                        uid:         $f_uid,
-                        field_name:  $field_name,
-                        field_type:  $field_type,
-                        description: $description,
-                        required:    $required
+                        uid:                $f_uid,
+                        field_name:         $field_name,
+                        field_type:         $field_type,
+                        description:        $description,
+                        required:           $required,
+                        tenant_id:          pm.tenant_id,
+                        created_by_user_id: pm.created_by_user_id,
+                        job_id:             pm.job_id
                     })
                     CREATE (pm)-[:HAS_PROPOSED_FIELD]->(f)
                     """,
@@ -1053,11 +1122,14 @@ async def write_annotation(
                     """
                     MATCH (md:ModelDecision {uid: $decision_uid})
                     CREATE (s:SupplementaryField {
-                        uid:         $s_uid,
-                        field_name:  $field_name,
-                        field_type:  $field_type,
-                        description: $description,
-                        required:    $required
+                        uid:                $s_uid,
+                        field_name:         $field_name,
+                        field_type:         $field_type,
+                        description:        $description,
+                        required:           $required,
+                        tenant_id:          md.tenant_id,
+                        created_by_user_id: md.created_by_user_id,
+                        job_id:             md.job_id
                     })
                     CREATE (md)-[:HAS_SUPPLEMENTARY_FIELD]->(s)
                     """,
@@ -1087,6 +1159,9 @@ async def write_manual_annotation(
     driver: AsyncDriver,
     document_name: str,
     matched_model_class: str,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> int:
     """
     Assign a manual ModelDecision with the given model class to all StructureNodes
@@ -1105,9 +1180,13 @@ async def write_manual_annotation(
     driver:
         Open Neo4j driver.
     document_name:
-        Exact Document.name as stored in Neo4j (must have latest=True).
+        Document display name, recorded on each ModelDecision (provenance
+        only — not used to select the document).
     matched_model_class:
         CamelCase Pydantic model class name to assign to every qualifying node.
+    tenant_id, doc_path:
+        Select the ``latest`` :Document to annotate: *tenant_id*'s (``None`` =
+        public) document at *doc_path*.
 
     Returns
     -------
@@ -1120,20 +1199,22 @@ async def write_manual_annotation(
     async with driver.session(database=cfg.neo4j_database) as session:
         result = await session.run(
             """
-            MATCH (d:Document {name: $doc_name, latest: true})
+            MATCH (d:Document {tenant_id: $tenant_id, path: $doc_path, latest: true})
                   -[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
             WHERE (n)-[:HAS_INFO_UNIT]->()
             RETURN DISTINCT n.id AS full_node_id
             """,
-            doc_name=document_name,
+            tenant_id=tenant_key(tenant_id),
+            doc_path=doc_path,
         )
         node_ids = [r["full_node_id"] for r in await result.data()]
 
     if not node_ids:
         log.warning(
             "write_manual_annotation: no StructureNodes with InfoUnits found "
-            "for document %r",
-            document_name,
+            "for document %r (tenant=%r)",
+            doc_path,
+            tenant_id,
         )
         return 0
     cfg = get_config()
@@ -1215,7 +1296,10 @@ async def write_manual_annotation(
                     proposed_model_description: null,
                     document_name:              $document_name,
                     timestamp:                  $timestamp,
-                    source:                     'manual'
+                    source:                     'manual',
+                    tenant_id:                  n.tenant_id,
+                    created_by_user_id:         n.created_by_user_id,
+                    job_id:                     n.job_id
                 })
                 CREATE (n)-[:HAS_MODEL_DECISION]->(md)
                 """,
@@ -1248,16 +1332,19 @@ async def write_manual_annotation(
 
 async def fetch_document_context_instructions(
     driver,
-    document_name: str,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> str | None:
-    """Fetches the context_instructions property from the latest (:Document) node."""
+    """Fetches the context_instructions property from *tenant_id*'s (``None`` =
+    public) latest :Document at *doc_path*."""
     query = """
-        MATCH (d:Document {name: $document_name, latest: true})
+        MATCH (d:Document {tenant_id: $tenant_id, path: $doc_path, latest: true})
         RETURN d.context_instructions AS context_instructions
     """
     cfg = get_config()
     async with driver.session(database=cfg.neo4j_database) as session:
-        result = await session.run(query, document_name=document_name)
+        result = await session.run(query, tenant_id=tenant_key(tenant_id), doc_path=doc_path)
         record = await result.single()
         if record is None:
             return None

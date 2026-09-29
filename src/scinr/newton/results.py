@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from scinr.newton.utils.redaction import redact_secrets
+
 
 @dataclass
 class DocumentResult:
@@ -27,6 +29,11 @@ class DocumentResult:
     nodes_processed: int
     nodes_failed: int
     errors: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Error strings are built from driver exceptions and returned to API
+        # callers verbatim: scrub any credentials they may echo.
+        self.errors = [redact_secrets(e) if isinstance(e, str) else e for e in self.errors]
 
 
 @dataclass
@@ -51,6 +58,10 @@ class StageResult:
     total_failed: int
     duration_seconds: float
     errors: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # See DocumentResult.__post_init__.
+        self.errors = [redact_secrets(e) if isinstance(e, str) else e for e in self.errors]
 
 
 @dataclass
@@ -89,10 +100,10 @@ class DeletionResult:
         path: The Document ``path`` that was targeted for deletion, or None when
             the deletion was selected by ``job_id`` instead.
         version: The specific version requested, or None if all versions were targeted.
-        job_id: The ``job_id`` selector that was targeted, or None when the deletion
+        job_id: The ``job_id`` selector (one value or several) that was targeted, or None when the deletion
             was selected by ``path`` instead.
-        tenant_id: The ``tenant_id`` filter applied to the match, or None if no such
-            filter was requested.
+        tenant_id: The tenant the deletion was scoped to (always applied), or None
+            when it targeted public documents.
         created_by_user_id: The ``created_by_user_id`` filter applied to the match, or
             None if no such filter was requested.
         found: True if at least one matching Document existed before deletion. When False,
@@ -140,6 +151,6 @@ class DeletionResult:
     gc_labeled_entity_passes: int
     raw_files_deleted: int
     converted_pages_deleted: int
-    job_id: str | None = None
+    job_id: str | list[str] | tuple[str, ...] | None = None
     tenant_id: str | None = None
-    created_by_user_id: str | None = None
+    created_by_user_id: str | list[str] | tuple[str, ...] | None = None

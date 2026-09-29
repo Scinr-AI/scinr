@@ -17,6 +17,10 @@ methods — no Cypher required::
             where={"procedure_type": In(["IA", "IB"]), "confidence": Gte(0.8)},
         )
 
+Every method takes ``tenant_id`` / ``include_public`` / ``created_by_user_id`` /
+``job_id`` filters (``tenant_id=None`` = all tenants); fix them once with
+``nav.scoped(tenant_id="acme")``. See :mod:`scinr.newton.navigation.scope`.
+
 Nothing here mutates the graph. The backend is selected by
 ``ScinrConfig.graph_backend`` (env ``GRAPH_BACKEND``, default ``"neo4j"``).
 """
@@ -75,6 +79,7 @@ from scinr.newton.navigation.models import (
     NodeDescription,
     NodePath,
     NodeSelector,
+    OriginalFile,
     PageText,
     PathResult,
     ProposedFieldRef,
@@ -83,11 +88,15 @@ from scinr.newton.navigation.models import (
     RoleStat,
     ScoredInfoUnit,
     StructureNodeRef,
+    StructureNodeSourcePages,
+    StructureNodesSourcePages,
     StructureTree,
     Subgraph,
     ThemeRef,
     Triple,
 )
+from scinr.newton.navigation.scope import Scope, make_scope
+from scinr.newton.navigation.scoped import ScopedNavigator
 
 __all__ = [
     # entry points
@@ -95,6 +104,10 @@ __all__ = [
     "graph_navigator",
     "GraphNavigator",
     "DEFAULT_MAX_DEPTH",
+    # scope (tenant / user / job)
+    "Scope",
+    "ScopedNavigator",
+    "make_scope",
     # exceptions
     "NavigationError",
     "GraphConnectionError",
@@ -115,5 +128,5 @@ __all__ = [
     "CatalogFieldRef", "CatalogModelRef", "CatalogRelation", "CatalogGraph", "ThemeRef",
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
-    "PageText",
+    "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",
 ]

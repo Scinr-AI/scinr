@@ -23,3 +23,7 @@ Supporting utilities for theme discovery, LLM management, and graph operations.
 ## Logging
 
 ::: scinr.newton.utils.logging_config
+
+## Credential Redaction
+
+::: scinr.newton.utils.redaction

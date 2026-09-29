@@ -8,11 +8,10 @@ are created, no directories are touched. This is the correct behaviour for
 a library: the application that *uses* scinr-ingest is responsible for
 configuring file logging if it wants it.
 
-CLI mode
---------
-When ``log_dir`` is provided (the CLI passes ``Path("logs")``), two
-rotating daily-folder file handlers are added in addition to the console
-handler:
+File logging
+------------
+When ``log_dir`` is provided (e.g. ``Path("logs")``), two rotating
+daily-folder file handlers are added in addition to the console handler:
 
     <log_dir>/
     └── YYYY-MM-DD/
@@ -25,14 +24,59 @@ Usage::
     from scinr.newton.utils.logging_config import setup_logging
     setup_logging()
 
-    # CLI — console + daily file rotation under ./logs/:
+    # Application — console + daily file rotation under ./logs/:
     setup_logging(log_dir=Path("logs"))
+
+Credential redaction
+--------------------
+Every handler installed here formats through :class:`RedactingFormatter`, which
+masks connection-string passwords and the configured secrets in the final
+line — message, arguments and traceback alike. Applications that install their
+own handlers should use it too, or call :func:`redact_handlers` once after
+configuring logging::
+
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(message)s"))
+    redact_handlers()  # or: wrap whatever formatters the root handlers have
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from scinr.newton.utils.redaction import redact_secrets
+
+
+class RedactingFormatter(logging.Formatter):
+    """A :class:`logging.Formatter` that scrubs credentials from the output.
+
+    Redacts the fully formatted record (message, arguments, exception
+    traceback and stack info), so a driver error echoing a connection URI is
+    masked even when it is only logged through ``logger.exception``.
+
+    Pass ``wrapped=`` to keep an existing formatter (e.g. a JSON one) and only
+    add the redaction on top of its output.
+    """
+
+    def __init__(self, *args, wrapped: logging.Formatter | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._wrapped = wrapped
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = self._wrapped.format(record) if self._wrapped else super().format(record)
+        return redact_secrets(text)
+
+
+def redact_handlers(logger: logging.Logger | None = None) -> None:
+    """Make every handler of *logger* (the root logger by default) redact credentials.
+
+    Each handler's current formatter is wrapped in a :class:`RedactingFormatter`,
+    so its format is kept. Idempotent. Applications that configure their own
+    logging should call this once after doing so.
+    """
+    for handler in (logger or logging.getLogger()).handlers:
+        if not isinstance(handler.formatter, RedactingFormatter):
+            handler.setFormatter(RedactingFormatter(wrapped=handler.formatter or logging.Formatter()))
 
 
 def setup_logging(log_dir: Path | None = None) -> None:
@@ -46,7 +90,7 @@ def setup_logging(log_dir: Path | None = None) -> None:
         no files or directories are created.  Pass an explicit path (e.g.
         ``Path("logs")``) to enable file logging.
     """
-    fmt = logging.Formatter(
+    fmt = RedactingFormatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -64,7 +108,7 @@ def setup_logging(log_dir: Path | None = None) -> None:
         # Library mode: done — let the caller manage file logging.
         return
 
-    # CLI / explicit mode: create dated sub-folder and add file handlers.
+    # File logging: create dated sub-folder and add file handlers.
     today_str = datetime.now().strftime("%Y-%m-%d")
     dated_dir = Path(log_dir) / today_str
     dated_dir.mkdir(parents=True, exist_ok=True)
