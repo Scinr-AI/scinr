@@ -828,6 +828,62 @@ class InMemoryPageRepository(PageRepository):
 
 ---
 
+## Freeze Backend (Document Snapshots)
+
+`freeze_document()`, `restore_document()` and `export_document_snapshot(destination="storage")` store their snapshots through a third repository, `FreezeRepository`, configured with `freeze_backend`. It is separate from the two storage repositories, but by default it follows them: when neither `freeze_backend` nor `FREEZE_BACKEND` is set, it takes the resolved `storage_backend`. The full description is in [Document Freezing](document-freezing.md#configuration-the-freeze-backend).
+
+```python
+configure(..., storage_backend="mongodb")                          # raw files, pages and snapshots in MongoDB
+configure(..., storage_backend="mongodb", freeze_backend="none")   # storage without freezing
+configure(..., storage_backend="none", freeze_backend="mongodb")   # snapshots only
+```
+
+### MongoDB
+
+The MongoDB freeze backend uses `mongodb_uri` and `mongodb_database` of the storage backend, and adds two storage areas:
+
+- **`frozen_snapshots`** (GridFS bucket, `mongodb_frozen_gridfs_bucket`) holds the snapshot JSON files. They are uploaded and downloaded in streaming.
+- **`frozen_documents`** (collection, `mongodb_frozen_collection`) holds one metadata document per snapshot. Its `_id` is the `frozen_blob_id` written on the frozen `:Document`. It carries `tenant_id` (stored form, `"__public__"` for public documents), `created_by_user_id`, `job_id`, `size_bytes`, `checksum_sha256`, `stored_at`, `gridfs_id`, and the snapshot's own metadata: `schema_version`, `mode`, `frozen_at`, `keep_flags`, the `path` / `version` of the selector, and the list of `documents` it holds (`tenant_id`, `path`, `version`, `job_id` and `created_by_user_id` of each).
+
+The indexes are created together with the storage ones (same bootstrap, same `mongodb_ensure_indexes` setting):
+
+```python
+# frozen_documents: snapshots by document / by ingestion run of the freeze call
+db.frozen_documents.create_index(
+    [("tenant_id", 1), ("path", 1), ("version", 1)], name="frozen_by_tenant_path_version"
+)
+db.frozen_documents.create_index([("tenant_id", 1), ("job_id", 1)], name="frozen_by_tenant_job")
+
+# frozen_documents: newest snapshot holding a document (restore of a deleted document)
+db.frozen_documents.create_index(
+    [("tenant_id", 1), ("documents.path", 1), ("documents.version", 1), ("stored_at", -1)],
+    name="frozen_by_tenant_document",
+)
+db.frozen_documents.create_index(
+    [("tenant_id", 1), ("documents.job_id", 1), ("stored_at", -1)],
+    name="frozen_by_tenant_document_job",
+)
+```
+
+Every read and delete looks the metadata document up by `_id` **and** tenant first, and only then touches GridFS. A snapshot of another tenant behaves as one that does not exist.
+
+`delete_document()` does not delete snapshots. A freeze snapshot is deleted by `restore_document()` once no `:Document` references it; backups and exports stay until you delete them.
+
+### Custom
+
+Pass an instance of `scinr.newton.freeze.base.FreezeRepository` as `custom_freeze_storage`:
+
+| Method | Contract |
+|---|---|
+| `store_snapshot(path, *, tenant_id, created_by_user_id=None, job_id=None, metadata) -> str` | Upload the snapshot file at `path` in streaming and return its `frozen_blob_id`. `tenant_id` comes in its API form (`None` or `"__public__"` = public). |
+| `read_snapshot_to_file(frozen_blob_id, dest_path, *, tenant_id) -> bool` | Download it to `dest_path` in streaming. Return `False`, and write nothing, when it does not exist or belongs to another tenant. |
+| `delete_snapshot(frozen_blob_id, *, tenant_id) -> None` | Delete it. Idempotent: a missing snapshot, or one of another tenant, is not an error. |
+| `find_snapshots(*, tenant_id, path=None, version=None, job_id=None, created_by_user_id=None) -> list[SnapshotRecord]` | Optional. The snapshots of the tenant holding a matching document, newest first. Without it, restoring a document that is no longer in the graph needs `restore_document(frozen_blob_id=...)`. |
+
+Reads, lookups and deletes receive the **stored** tenant key, the `tenant_id` property of the frozen `:Document`.
+
+---
+
 ## When to Use Each Backend
 
 | Scenario | Recommended Backend | Rationale |
@@ -969,5 +1025,6 @@ DEBUG:scinr.newton.storage.mongodb.client:MongoDB indexes ensured.
 - **[Configuration](../configuration.md)** — Complete reference for `configure()`, environment variables, and all settings.
 - **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, stage selection, and workflow patterns.
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results.
+- **[Document Freezing](document-freezing.md)** — Freezing, restoring and exporting documents, and the snapshot format.
 - **[Architecture](../architecture.md)** — Detailed walkthrough of each pipeline stage and data flow.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.

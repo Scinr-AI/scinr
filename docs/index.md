@@ -24,6 +24,8 @@ It uses LLMs and Pydantic models to extract structured, domain-specific informat
 
 * **Multi-tenancy** — The `tenant_id` is part of every document's identity: tenants ingesting the same path get fully independent documents, and tenant-less (public) documents are never merged with a tenant's. Stamp runs with `created_by_user_id` and `job_id`, and delete a whole ingestion run of a tenant in one call with `delete_document(job_id=..., tenant_id=...)`.
 
+* **Document freezing** — Archive a document's subgraph to a snapshot with `freeze_document()` and keep only a stub in Neo4j, then rebuild it with `restore_document()`: same ids, no LLM calls. Backups and exports use the same snapshot.
+
 * **Optional MongoDB storage** — Store raw files, converted documents, and binary assets using MongoDB/GridFS. Support for other database are planned in the roadmap.
 
 * **LLM-ready documentation** — Provides `llms.txt` and `llms-full.txt` files for AI coding agents and other LLM-based tools.

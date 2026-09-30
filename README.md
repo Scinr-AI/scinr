@@ -51,6 +51,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Global entity deduplication** — `LabeledEntity` singletons keyed by `(label, normalized_value)` enable cross-document dedup in the graph
 - **Cross-document model linking** — `instance_relationships` create typed edges between `ModelInstance` nodes across different document sections; forward-reference shell nodes are merged when the target model is later extracted
 - **Versioning & folder hierarchy** — full document version chain in Neo4j; folder structure mirrored as `IS_COMPOSED_OF` relationships
+- **Document lifecycle** — `delete_document()` removes a document and its whole cascade; `freeze_document()` archives its subgraph to a snapshot and leaves a stub in the graph, and `restore_document()` rebuilds it with no LLM calls. All three are tenant-scoped and work in bounded transactions, so they fit in Neo4j's transaction memory whatever the size of the folder. See the [Document Freezing guide](https://scinr-ai.github.io/scinr/user-guides/document-freezing/)
 - **Read-back navigation API** — `scinr.newton.navigation`: a read-only, `async`, engine-abstracted layer of ~90 typed methods over the graph (documents, structure nodes, model instances, entities, schema introspection) — no Cypher required. See the [Graph Navigation guide](https://scinr-ai.github.io/scinr/user-guides/graph-navigation/)
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `parallel_docs=N` for concurrent document handling at every stage
@@ -251,6 +252,9 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 | `MONGODB_RAW_FILES_COLLECTION` | No | `raw_files` | Collection for raw file metadata |
 | `MONGODB_PAGES_COLLECTION` | No | `converted_pages` | Collection for converted page content |
 | `MONGODB_GRIDFS_BUCKET` | No | `raw_binaries` | GridFS bucket for raw binary files |
+| `FREEZE_BACKEND` | No | the storage backend | Backend for document snapshots (`freeze_document()` / `restore_document()`): `none`, `mongodb` or `custom` |
+| `MONGODB_FROZEN_COLLECTION` | No | `frozen_documents` | Collection for snapshot metadata |
+| `MONGODB_FROZEN_GRIDFS_BUCKET` | No | `frozen_snapshots` | GridFS bucket for snapshot files |
 | `EXTRACTION_BATCH_SIZE` | No | `1` | Pages per extraction chunk |
 | `LLM_CONCURRENCY` | No | `4` | Max concurrent LLM calls |
 | `PROMPT_CACHING_ENABLED` | No | `true` | Enable Bedrock prompt caching (`cachePoint`) |
@@ -343,11 +347,12 @@ scinr/
             ├── stages/             ← Stage runner functions
             ├── converters/         ← Stage 0: file → paged JSON
             ├── extraction/         ← Stage 1: paged JSON → Document tree
-            ├── ingest/             ← Stage 2: Document tree → Neo4j
+            ├── ingest/             ← Stage 2: Document tree → Neo4j; delete / freeze / restore
             ├── annotation/         ← Stage 3: LangGraph annotation agent
             ├── entity_extraction/  ← Stage 4: LangGraph entity extraction
             ├── tabular/            ← Tabular bypass pipeline
             ├── storage/            ← Optional MongoDB storage layer
+            ├── freeze/             ← Snapshot backend for document freezing
             ├── models/             ← Extraction domain models
             │   └── default/        ← Built-in open-source models
             ├── utils/              ← Shared utilities

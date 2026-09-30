@@ -424,6 +424,8 @@ result = await run_pipeline(
 > **Constraints:**
 > - `update_mode=True` is not allowed when ingesting multiple documents. It is designed for single-document correction.
 > - `update_mode` and `replaces` are mutually exclusive — they cannot be used together.
+> - The extracted `:Entity` / `:ModelInstance` / `:LabeledEntity` nodes that only the old content reached stay in the graph as orphans. Run `collect_orphans(tenant_id=...)` from time to time to remove them, while that tenant is not being ingested (see [Document Deletion — Garbage Collection](document-deletion.md#garbage-collection)).
+> - Ingestion does not check whether the version is frozen. Re-ingesting a frozen document rebuilds its structure under the stub, which stays marked `frozen`: check the `frozen` property first, or `restore_document()` it (see [Document Freezing — Caveats](document-freezing.md#caveats)).
 
 ### `replaces` — Document Replacement
 

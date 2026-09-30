@@ -24,10 +24,13 @@ from scinr.newton import (
     run_pipeline,
     run_preprocess, run_extraction, run_ingestion,
     run_annotation, run_entity_extraction, run_tabular_pipeline,
-    delete_document,
+    delete_document, collect_orphans,
+    freeze_document, restore_document, export_document_snapshot,
     DocumentResult, StageResult, PipelineResult, DeletionResult,
+    OrphanCollectionResult, FreezeResult, RestoreResult,
     ScinrError, ConfigurationError, PreconditionError,
-    ExtractionError, IngestionError, ModelError, StorageError, ConversionError,
+    ExtractionError, IngestionError, ModelError, StorageError, FreezeError,
+    ConversionError,
 )
 ```
 
@@ -72,6 +75,10 @@ configure(
 | `mongodb_pages_collection` | `str` | `MONGODB_PAGES_COLLECTION` | `"converted_pages"` | Collection for converted page content. |
 | `mongodb_gridfs_bucket` | `str` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` | GridFS bucket for raw binary files. |
 | `custom_storage` | `tuple \| None` | — | `None` | `(RawFileRepository, PageRepository)` when `storage_backend="custom"`. |
+| `freeze_backend` | `Literal["none", "mongodb", "custom"] \| None` | `FREEZE_BACKEND` | the resolved `storage_backend` | Backend for document snapshots (`freeze_document()`, `restore_document()`). Passing `"none"` disables freezing even with `storage_backend="mongodb"`. |
+| `mongodb_frozen_collection` | `str` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` | Collection for snapshot metadata. |
+| `mongodb_frozen_gridfs_bucket` | `str` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` | GridFS bucket for snapshot files. |
+| `custom_freeze_storage` | `FreezeRepository \| None` | — | `None` | Snapshot repository when `freeze_backend="custom"`. |
 | `extra_converters` | `dict[str, type] \| None` | — | `{}` | Maps file extensions to `BaseConverter` subclasses, overriding built-in converters. |
 | `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral OCR API key. **Required to convert any PDF** — PDF conversion is Mistral OCR only, there is no fallback. |
 | `prompt_caching_enabled` | `bool \| None` | `PROMPT_CACHING_ENABLED` | `True` | Enable Bedrock Converse prompt caching (~90% token cost reduction on repeated calls). |
@@ -86,7 +93,7 @@ configure(
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
 
-**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
+**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` or `freeze_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
 
 ---
 
@@ -207,6 +214,59 @@ Behavior:
 
 **Returns:** `DeletionResult`
 
+`delete_document()` does not know about frozen documents: it deletes a frozen stub but leaves its snapshot in the freeze backend. Restore the document first, then delete it.
+
+---
+
+### Document Freezing
+
+**Modules:** `scinr.newton.ingest.freeze`, `scinr.newton.ingest.restore`
+
+Freezing archives the subgraph of a document to a **snapshot** in the freeze backend and reduces the document in Neo4j to a **stub**. Unlike deletion, it is reversible, and restoring calls no LLM. The three functions are `async`, open and close their own Neo4j driver, and take the selector of `delete_document()`: a mandatory keyword-only `tenant_id`, exactly one of `path` (optionally `version`) or `job_id`, an optional `created_by_user_id`, and the downward `IS_COMPOSED_OF*` cascade. The full guide is `docs/user-guides/document-freezing.md`.
+
+```python
+from scinr.newton import freeze_document, restore_document, export_document_snapshot
+
+frozen = await freeze_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
+print(frozen.frozen_blob_id, frozen.structure_nodes_deleted, frozen.info_units_deleted)
+
+restored = await restore_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
+print(restored.documents_restored, restored.nodes_created)
+```
+
+#### `freeze_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, keep_structure_nodes=False, keep_annotations=False, keep_extraction_results=False, delete_after_export=True)`
+
+1. Resolves the documents. Nothing matched: `found=False`, nothing touched. A document already frozen: `FreezeError`.
+2. Exports the complete snapshot to the freeze backend, in streaming. If this fails, the graph is not touched.
+3. Marks each `:Document` as a stub in one transaction: `frozen=true`, `frozen_blob_id`, `frozen_at`, the `frozen_keep_*` flags and `frozen_cleanup_pending=true`.
+4. Deletes the subtree in bounded transactions (the same cascade as `delete_document()`), keeping what the `keep_*` flags ask for. InfoUnits always go. A kept `:ModelDecision` / `:ExtractionResult` whose `:StructureNode` is deleted is re-linked to its `:Document`.
+5. Collects the orphans it caused, as `delete_document()` does.
+6. Removes `frozen_cleanup_pending`.
+
+Steps 4 and 5 are not atomic. If they fail, the documents stay frozen with `frozen_cleanup_pending=true`: call `freeze_document()` again to finish, or `restore_document()` to go back.
+
+`delete_after_export=False` is a **backup**: the snapshot is stored, `last_backup_blob_id` / `last_backup_at` are set on the `:Document`, and the graph is otherwise unchanged. The `keep_*` flags are rejected in this mode (`ValueError`).
+
+**Returns:** `FreezeResult`
+
+#### `restore_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, frozen_blob_id=None, batch_size=1000, concurrency=4)`
+
+Rebuilds the subgraph from its snapshot:
+
+- **A frozen stub** is restored from the snapshot it points at. Restoring a folder also restores the descendants frozen in the same snapshot.
+- **A document that is no longer in the graph** (deleted after a freeze or a backup) is recreated from its newest snapshot, or from `frozen_blob_id` when given, and re-linked to its folder and version chain.
+- **A document that exists unfrozen** is refused with `FreezeError`.
+
+The snapshot is validated completely (schema version, tenant of every entry and node) before any write. The rebuild then writes idempotent batches of `batch_size` rows, `concurrency` transactions at a time, so a failed restore can simply be called again. For the node families the freeze removed, the snapshot wins over anything written while the document was frozen. A freeze snapshot is deleted once no `:Document` references it; backups and exports are kept.
+
+**Returns:** `RestoreResult`
+
+#### `export_document_snapshot(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, destination="dict", file_path=None)`
+
+Read-only. Produces the same snapshot as a `dict` (`destination="dict"`), a file (`"file"`, returns the `Path`) or a stored snapshot (`"storage"`, returns the `frozen_blob_id`). Only `"storage"` needs a freeze backend.
+
+**Raises (all three):** `FreezeError` for a document in the wrong state or an invalid snapshot, `ConfigurationError` when the freeze backend is `"none"`, `ValueError` for an invalid selector.
+
 ---
 
 ### Result Types
@@ -281,6 +341,56 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 | `raw_files_deleted` | `int` | Number of `RawFileRecord` (binaries) deleted from the storage layer for the `raw_file_id`s referenced by the deleted Document(s) and their descendants. |
 | `converted_pages_deleted` | `int` | Number of `ConvertedPageRecord` (converted Markdown pages) deleted from the storage layer for the same `raw_file_id`s. |
 
+#### `OrphanCollectionResult`
+
+Result of a `collect_orphans()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant_id` | `str \| None` | The tenant that was swept (`None` = public). |
+| `gc_entity_model_instance_deleted` | `int` | `:Entity`/`:ModelInstance` nodes of the tenant deleted because no `:ExtractionResult` reached them. |
+| `gc_entity_model_instance_passes` | `int` | Iterations of that pass over the whole tenant (it stops at the first one that deletes nothing, 7 at most). |
+| `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes of the tenant deleted because nothing pointed at them. |
+| `gc_labeled_entity_passes` | `int` | Iterations of that pass. |
+
+#### `FreezeResult`
+
+Result of a `freeze_document()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `path`, `version`, `job_id`, `tenant_id`, `created_by_user_id` | | The selector, as passed. |
+| `found` | `bool` | `False` when nothing matched: nothing was exported or changed. |
+| `mode` | `"freeze" \| "backup"` | `"backup"` with `delete_after_export=False`. |
+| `frozen_blob_id` | `str \| None` | Id of the snapshot in the freeze backend. |
+| `versions_frozen` | `list[int]` | Sorted versions of the matched documents. |
+| `documents_frozen` | `int` | Documents in the snapshot: the matched ones plus their `IS_COMPOSED_OF*` descendants. |
+| `structure_nodes_deleted` / `structure_nodes_kept` | `int` | `:StructureNode` nodes removed / left in place. |
+| `info_units_deleted` | `int` | `:InfoUnit` nodes removed. |
+| `model_decisions_deleted` / `model_decisions_kept` | `int` | `:ModelDecision` nodes removed / kept. |
+| `proposed_models_deleted`, `proposed_fields_deleted` | `int` | `:ProposedModel` / `:ProposedField` nodes removed. |
+| `extraction_results_deleted` / `extraction_results_kept` | `int` | `:ExtractionResult` nodes removed / kept. |
+| `gc_*` | `int` | The four garbage-collection counters, as in `DeletionResult`. |
+
+Every counter is 0 in backup mode.
+
+#### `RestoreResult`
+
+Result of a `restore_document()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `path`, `version`, `job_id`, `tenant_id`, `created_by_user_id` | | The selector, as passed. |
+| `found` | `bool` | `False` when nothing matched. |
+| `versions_restored` | `list[int]` | Sorted versions of the matched documents. |
+| `documents_restored` | `int` | Documents restored, descendants included. |
+| `documents_recreated` | `int` | How many of them no longer existed in the graph and were recreated. |
+| `frozen_blob_ids` | `list[str]` | Snapshots the documents were restored from. |
+| `snapshots_deleted` | `int` | Snapshots deleted because no `:Document` references them any more. |
+| `nodes_created` / `nodes_reused` | `int` | Snapshot nodes created, or found in the graph and reused. |
+| `relationships_created` | `int` | Relationships recreated. |
+| `gc_*` | `int` | Counters of the tenant sweep the restore runs when it finds extraction results written onto the frozen document; 0 otherwise. |
+
 ---
 
 ### Exceptions
@@ -297,6 +407,7 @@ ScinrError (base)
 ├── IngestionError       — Neo4j write failed (version conflict, schema constraint violation)
 ├── ModelError           — Pydantic model cannot be resolved or is invalid (bad catalog.py)
 ├── StorageError         — MongoDB unavailable or misconfigured
+├── FreezeError          — a document cannot be frozen, restored or snapshotted (already frozen, nothing to restore, snapshot missing or of another tenant)
 └── ConversionError      — file converter failed to process a source file
 ```
 
@@ -571,6 +682,13 @@ When enabled (`STORAGE_BACKEND=mongodb`), the storage layer persists:
 | `raw_binaries` (GridFS) | Binary content of raw source files (PDF bytes, DOCX bytes, etc.). |
 
 The `raw_file_id` and `page_id` fields stored in Neo4j nodes allow cross-referencing back to the original binary and page content in MongoDB.
+
+Document snapshots have their own backend (`FREEZE_BACKEND`, which inherits `STORAGE_BACKEND` when unset). With MongoDB it adds:
+
+| Collection / Bucket | Contents |
+|---|---|
+| `frozen_documents` (MongoDB) | Metadata of each snapshot: tenant, documents it holds, mode, size, checksum, timestamp, keep flags. Its `_id` is the `frozen_blob_id`. |
+| `frozen_snapshots` (GridFS) | The snapshot JSON files. |
 
 ### Enable / Disable Storage
 

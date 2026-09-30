@@ -34,7 +34,7 @@ Snapshots live in a **freeze backend**, configured next to the storage backend:
 
 - `"none"` — `freeze_document()`, `restore_document()` and `export_document_snapshot(destination="storage")` raise `ConfigurationError`. The `"dict"` and `"file"` destinations of the export still work.
 - `"mongodb"` — the snapshot JSON goes to GridFS (`frozen_snapshots`), and a metadata document goes to `frozen_documents`. The metadata document holds the tenant, `created_by_user_id`, `job_id`, the size, the SHA-256 checksum, `frozen_at` and the keep flags. Its `_id` is the snapshot's id (`frozen_blob_id`).
-- `"custom"` — pass an instance of `scinr.newton.freeze.base.FreezeRepository` as `custom_freeze_storage`. It has three methods: `store_snapshot`, `read_snapshot_to_file` and `delete_snapshot`, all tenant-scoped.
+- `"custom"` — pass an instance of `scinr.newton.freeze.base.FreezeRepository` as `custom_freeze_storage`. It has three mandatory methods, `store_snapshot`, `read_snapshot_to_file` and `delete_snapshot`, and an optional one, `find_snapshots`, which `restore_document()` needs to find the snapshot of a document that is no longer in the graph. All of them are tenant-scoped.
 
 ```python
 configure(..., storage_backend="mongodb")                          # snapshots in MongoDB too

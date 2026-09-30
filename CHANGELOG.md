@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-29
+## [0.4.0] - 2026-09-30
+
+Multi-tenancy and document freezing, both implemented and pushed.
 
 The tenant is now part of every document's identity (see
 `plans/multitenancy-document-identity-plan.md`), and every navigation function
@@ -18,9 +20,91 @@ it (see `plans/multitenancy-document-storage-plan.md`). Both databases now have
 the indexes those tenant-scoped reads need (see
 `plans/multitenancy-indexes-plan.md`). The command-line interface is removed:
 `scinr` is used as a library, through `configure()` and `run_pipeline()` /
-`run_*()` (see `plans/remove-cli-plan.md`).
+`run_*()` (see `plans/remove-cli-plan.md`). A document's subgraph can now be
+frozen to a snapshot in the document store and restored later (see
+`plans/document-freezing.md` and `plans/document-freezing-implementation-plan.md`).
 
 ### Added
+- **Document freezing.** `freeze_document()` exports the subgraph of a document
+  to a snapshot in the freeze backend and reduces the document in Neo4j to a
+  stub: the `:Document` stays (`frozen=true`, `frozen_blob_id`, `frozen_at`),
+  its structure tree, InfoUnits, annotations and extraction results go.
+  `restore_document()` rebuilds it from the snapshot, with no LLM calls. Both
+  take the same tenant-scoped selector as `delete_document()` (`path` /
+  `version` or `job_id`, mandatory `tenant_id`, optional `created_by_user_id`)
+  and cascade downwards through `IS_COMPOSED_OF*`. See the new "Document
+  Freezing" user guide.
+  - `keep_structure_nodes`, `keep_annotations` and `keep_extraction_results`
+    leave those node families in the graph; InfoUnits always go.
+  - `delete_after_export=False` is a **backup**: only the snapshot is stored
+    (`last_backup_blob_id` / `last_backup_at` on the `:Document`).
+  - The snapshot is stored before anything is deleted, and the deletion runs in
+    bounded transactions. An interrupted freeze leaves
+    `frozen_cleanup_pending=true`; calling `freeze_document()` again finishes it
+    without exporting again.
+  - The restore validates the whole snapshot (schema version, tenant of every
+    entry and node) before any write, reads it incrementally, and writes
+    idempotent batches (`batch_size`, `concurrency`), so a failed restore can be
+    called again. Changes made to a frozen document are discarded for the node
+    families the freeze removed: the snapshot wins.
+  - `restore_document()` also recreates a document that is no longer in the
+    graph (deleted after a freeze or a backup) from its newest snapshot, or from
+    the one passed as `frozen_blob_id`, re-linking it to its folder and version
+    chain. A freeze snapshot is deleted once no `:Document` references it;
+    backups and exports are kept. A document that exists unfrozen is refused.
+    Raw files are not part of a snapshot: a recreated `:Document` keeps its
+    `raw_file_id` and a warning is logged when the stored file is gone.
+  - Garbage collection: the freeze collects the orphans it causes (see
+    "Garbage collection is scoped to the operation" below). The restore only
+    creates nodes, so it collects nothing, unless something was extracted onto
+    the kept structure nodes of the frozen document; it then sweeps the tenant.
+  - Both log the duration of each phase at `INFO` level (`timings: export=…
+    upload=… mark=… delete=… gc=… clear_pending=…` for the freeze, `indexes=…
+    download=… validate=… stale_delete=… rebuild=… finish=… gc=…` for the
+    restore).
+  - Transaction memory stays bounded whatever the size of the operation:
+    measured on a folder of 732 documents (475,000 nodes), the peak is 13 MiB
+    for the freeze and 8 MiB for the restore (2 MiB per rebuild transaction in
+    flight).
+  - Known limits: ingestion does not check `frozen` (`update_mode=True` on a
+    frozen version rebuilds its structure under the stub), and
+    `delete_document()` on a frozen document leaves its snapshot in the freeze
+    backend. See "Caveats" in the guide.
+- `export_document_snapshot()`: the same snapshot without touching the graph,
+  as a `dict`, a file or a stored snapshot (`destination="dict" | "file" |
+  "storage"`).
+- **Freeze backend.** `configure(freeze_backend=...)` / `FREEZE_BACKEND`
+  (`none`, `mongodb`, `custom`); unset, it inherits the resolved
+  `storage_backend`. MongoDB stores the snapshot in GridFS
+  (`mongodb_frozen_gridfs_bucket` / `MONGODB_FROZEN_GRIDFS_BUCKET`, default
+  `frozen_snapshots`) and its metadata in `mongodb_frozen_collection` /
+  `MONGODB_FROZEN_COLLECTION` (default `frozen_documents`), with the indexes
+  `frozen_by_tenant_path_version`, `frozen_by_tenant_job`,
+  `frozen_by_tenant_document` and `frozen_by_tenant_document_job`.
+  `custom_freeze_storage` takes a `scinr.newton.freeze.base.FreezeRepository`
+  (`store_snapshot`, `read_snapshot_to_file`, `delete_snapshot`, and optionally
+  `find_snapshots`), every method tenant-scoped.
+- `FreezeError`, `FreezeResult` and `RestoreResult`, exported from
+  `scinr.newton`.
+- `collect_orphans(tenant_id=...)`: sweeps every orphaned `:Entity` /
+  `:ModelInstance` / `:LabeledEntity` of one tenant and returns an
+  `OrphanCollectionResult`. For the orphans left by other write paths
+  (`update_mode=True` re-ingestion, re-running the extraction on a node). Its
+  cost grows with the tenant; do not run it while that tenant is being
+  ingested.
+- `:Document` properties written by these operations: `frozen`,
+  `frozen_blob_id`, `frozen_at`, `frozen_keep_structure_nodes`,
+  `frozen_keep_annotations`, `frozen_keep_extraction_results`,
+  `frozen_cleanup_pending`, `last_backup_blob_id`, `last_backup_at` and
+  `deletion_pending`.
+- Documentation: new "Document Freezing" user guide and "Freezing" API page;
+  the deletion guide documents the bounded transactions, the scoped garbage
+  collection and `collect_orphans()`.
+- Neo4j indexes on `uid` for `:ModelDecision`, `:ProposedModel`,
+  `:ProposedField`, `:ComplementaryMatch` and `:SupplementaryField`, and on
+  `:CatalogModel(name)`. `restore_document()` creates them if they are missing
+  (`ingest.schema.ensure_indexes()`).
+- `ijson>=3.2` as a base dependency (incremental parsing of snapshots).
 - **Scope filters on every navigation method.** All `GraphNavigator` methods
   except the global-catalogue ones (`list_catalog_models`, `get_catalog_graph`,
   `list_themes`, `list_relationship_types`, `list_node_labels`) and `execute_raw`
@@ -111,6 +195,40 @@ the indexes those tenant-scoped reads need (see
   `(var {prop: …})` node pattern in the library.
 
 ### Changed
+- **`delete_document()` deletes in bounded transactions.** The cascade used to
+  run in one transaction, which failed with `MemoryPoolOutOfMemoryError` on a
+  folder of a few hundred documents (Neo4j caps the memory of all running
+  transactions, a fixed size on Aura). The `:Document` nodes are now marked
+  `deletion_pending`, processed 50 at a time, each delete commits every 1,000
+  nodes, and the `:Document` nodes go last. The cascade is no longer atomic:
+  if it fails half-way, calling `delete_document()` again with the same
+  selector deletes what is left. When a query had to be retried, the
+  `*_deleted` counters are a lower bound.
+- **Garbage collection is scoped to the operation.** `delete_document()` (and
+  `freeze_document()`) only check the `:Entity` / `:ModelInstance` /
+  `:LabeledEntity` nodes the deleted `:ExtractionResult` nodes pointed at,
+  within the deletion's tenant, instead of every such node of the graph (all
+  tenants included), so the cost follows the size of the deletion. The
+  `gc_*_deleted` counters of `DeletionResult` are the orphans
+  this deletion caused, and `gc_*_passes` the rounds over its candidates (`0`
+  when there was none). A call that finishes an interrupted delete or freeze
+  sweeps the whole tenant instead. Orphans from other write paths are left to
+  `collect_orphans()`. What makes a node an orphan has not changed (no
+  `:ExtractionResult` within 7 hops; no incoming relationship for a
+  `:LabeledEntity`), and the collection now follows a chain of orphans to its
+  end instead of stopping after 7 passes.
+- The idempotency deletes of the annotation and extraction writers are shared
+  helpers: `annotation.neo4j_ops.delete_stale_model_decision()` and
+  `entity_extraction.graph_mapper.delete_stale_extraction_result()`, used by
+  `write_annotation()`, `write_manual_annotation()`,
+  `write_extraction_subgraph()`, `delete_tabular_subgraph()` and
+  `restore_document()`. They take one `StructureNode.id` or several. No change
+  of behaviour.
+- Neo4j write retries also cover `SessionExpired` and every error the driver
+  declares retryable (`NotALeader`, `ForbiddenOnReadOnlyDatabase`,
+  `AuthorizationExpired`), i.e. a leader change in a cluster.
+- `get_gridfs_bucket()` takes an optional `bucket_name` (default: the raw-files
+  bucket).
 - **The library creates the MongoDB indexes itself.** The first `get_storage()`
   of the process (per MongoDB target) creates them; there is no longer anything
   to call at application startup. A failure (typically a missing `createIndex`

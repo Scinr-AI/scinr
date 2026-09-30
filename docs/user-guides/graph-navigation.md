@@ -238,7 +238,10 @@ children of `get_model_instance_subtree`), as the free walks already do.
   documents, surviving shared nodes keep listing that job.
 - A `job_id` filter on merged nodes without a `tenant_id` scans the label (the
   arrays are not indexable); with a tenant, the `tenant_id` index narrows first.
-- The orphan garbage collector of `delete_document()` is global (not per tenant).
+- Navigation does not filter on `frozen`: a frozen document is still listed, but
+  its structure, annotations and extractions are not in the graph until
+  `restore_document()` (see [Document Freezing](document-freezing.md)). Check the
+  `frozen` property of the `:Document` when that matters.
 
 ---
 

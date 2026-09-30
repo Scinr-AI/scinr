@@ -44,6 +44,12 @@ Represents the original input file or folder that was ingested into the system. 
 | `tenant_id` | String | Owner tenant from `run_pipeline(tenant_id=...)`, or the reserved value `"__public__"` for a public document (no tenant supplied) — never `null`. **Part of the document identity**: a `:Document` is unique on `(tenant_id, path, version)`. Written on leaf **and** folder-parent nodes. See [Multi-tenancy](#multi-tenancy-the-tenant-is-part-of-the-document-identity). |
 | `created_by_user_id` | String \| null | Caller-supplied id of the user that launched the ingestion, from `run_pipeline(created_by_user_id=...)`. Always set (`null` when not supplied). |
 | `job_id` | String \| null | Caller-supplied ingestion job/run id from `run_pipeline(job_id=...)`. Always set (`null` when not supplied). Usable as a bulk-delete selector — see [Document Deletion](document-deletion.md). |
+| `frozen` | Boolean | `true` while the document is a frozen stub: its subtree is in a snapshot, not in the graph. Absent until the document is frozen for the first time, `false` after a restore. See [Document Freezing](document-freezing.md). |
+| `frozen_blob_id`, `frozen_at` | String | Id of the snapshot in the freeze backend, and ISO-8601 timestamp of the freeze. Only on a frozen stub; removed by the restore. |
+| `frozen_keep_structure_nodes`, `frozen_keep_annotations`, `frozen_keep_extraction_results` | Boolean | The `keep_*` flags the document was frozen with. Only on a frozen stub. |
+| `frozen_cleanup_pending` | Boolean | `true` from the moment the stub is marked until its subtree has been deleted and garbage-collected. Still there afterwards only if the freeze was interrupted. |
+| `last_backup_blob_id`, `last_backup_at` | String | Snapshot and ISO-8601 timestamp of the last `freeze_document(delete_after_export=False)`. |
+| `deletion_pending` | Boolean | Set by `delete_document()` before it deletes anything. A `:Document` that still carries it belongs to an interrupted deletion: call `delete_document()` again. |
 
 ---
 
@@ -410,6 +416,8 @@ In this pattern:
 
 When `update_mode=True`, the existing document and all its downstream nodes are replaced in-place. The `version` property on the `:Document` node is **reused** (it does **not** increment), and the `path` remains the same. The ingestion loader finds the latest version by `path`, deletes its `:StructureNode` / `:InfoUnit` descendants, and re-inserts the new structure at the same version number.
 
+The `:Entity` / `:ModelInstance` / `:LabeledEntity` nodes that only the old content reached are **not** deleted by the re-ingestion. `collect_orphans(tenant_id=...)` removes them (see [Document Deletion — Garbage Collection](document-deletion.md#garbage-collection)). The re-ingestion does not check whether the version is frozen either (see [Document Freezing — Caveats](document-freezing.md#caveats)).
+
 ```
 (:Document {
   name: "clinical_trial_report.pdf",
@@ -439,9 +447,20 @@ When a document needs to be permanently removed from the graph (rather than upda
 - Always acts within one tenant: `tenant_id` is mandatory (`None` / `"__public__"` = public documents).
 - Removes the tenant's `:Document` node(s) matching the given `path` (and optionally `version`), **or** every `:Document` of the tenant carrying a given `job_id` (`delete_document(job_id=..., tenant_id=...)`), optionally narrowed further by `created_by_user_id` (`job_id` and `created_by_user_id` accept a list).
 - Cascade-deletes all connected structure, annotation, and extraction nodes.
-- Runs garbage collection on orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes.
+- Garbage-collects the `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes of the tenant that the deletion left orphaned.
+- Works in bounded transactions, so a large folder does not overrun Neo4j's transaction memory; an interrupted deletion is finished by calling it again.
 
 Unlike `update_mode=True` re-ingestion, deletion is **irreversible** — there is no undo. See the [Document Deletion](document-deletion.md) guide for details.
+
+### Document Freezing
+
+`freeze_document()` is the reversible alternative. It exports the document's subgraph to a snapshot in the freeze backend and reduces the document to a stub:
+
+- The `:Document` node stays, with `frozen=true` and `frozen_blob_id`, so the document is still listed and its version chain is intact.
+- The `:StructureNode` tree, the `:InfoUnit` nodes, the annotations and the extraction results are deleted, unless `keep_structure_nodes`, `keep_annotations` or `keep_extraction_results` keep them. InfoUnits always go.
+- A kept `:ModelDecision` / `:ExtractionResult` whose `:StructureNode` was deleted hangs from the `:Document` instead, through a temporary `(:Document)-[:HAS_MODEL_DECISION|HAS_EXTRACTION]->()` relationship. The restore removes it.
+
+`restore_document()` rebuilds the subgraph from the snapshot, with the same ids and uids and no LLM calls. See the [Document Freezing](document-freezing.md) guide.
 
 ---
 
@@ -568,6 +587,8 @@ A lookup by id / uid is a seek on these constraints, as long as the pattern carr
 ### Single-property indexes
 
 `tenant_id` on `Document`, `StructureNode`, `InfoUnit`, `ExtractionResult`, `ModelInstance`, `ModelDecision`, `LabeledEntity` and `Entity`; `created_by_user_id` / `job_id` on `Document`, `StructureNode` and `ExtractionResult`; plus `Document(name)`, `Document(latest)`, `Document(path)`, `StructureNode(role)`, `StructureNode(row_index)`, `StructureNode(source_page_ids)`, `LabeledEntity(label)`, `ExtractionResult(node_full_id)` and `ModelInstance(model_class)`.
+
+`uid` on `ModelDecision`, `ProposedModel`, `ProposedField`, `ComplementaryMatch` and `SupplementaryField`, and `CatalogModel(name)`. These are plain indexes, not constraints, because older graphs may hold duplicates. `restore_document()` looks nodes up through them, and creates them itself when they are missing (a graph ingested before they existed).
 
 ### Composite tenant indexes
 
