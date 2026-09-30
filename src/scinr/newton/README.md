@@ -24,10 +24,13 @@ from scinr.newton import (
     run_pipeline,
     run_preprocess, run_extraction, run_ingestion,
     run_annotation, run_entity_extraction, run_tabular_pipeline,
-    delete_document,
+    delete_document, collect_orphans,
+    freeze_document, restore_document, export_document_snapshot,
     DocumentResult, StageResult, PipelineResult, DeletionResult,
+    OrphanCollectionResult, FreezeResult, RestoreResult,
     ScinrError, ConfigurationError, PreconditionError,
-    ExtractionError, IngestionError, ModelError, StorageError, ConversionError,
+    ExtractionError, IngestionError, ModelError, StorageError, FreezeError,
+    ConversionError,
 )
 ```
 
@@ -72,6 +75,10 @@ configure(
 | `mongodb_pages_collection` | `str` | `MONGODB_PAGES_COLLECTION` | `"converted_pages"` | Collection for converted page content. |
 | `mongodb_gridfs_bucket` | `str` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` | GridFS bucket for raw binary files. |
 | `custom_storage` | `tuple \| None` | — | `None` | `(RawFileRepository, PageRepository)` when `storage_backend="custom"`. |
+| `freeze_backend` | `Literal["none", "mongodb", "custom"] \| None` | `FREEZE_BACKEND` | the resolved `storage_backend` | Backend for document snapshots (`freeze_document()`, `restore_document()`). Passing `"none"` disables freezing even with `storage_backend="mongodb"`. |
+| `mongodb_frozen_collection` | `str` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` | Collection for snapshot metadata. |
+| `mongodb_frozen_gridfs_bucket` | `str` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` | GridFS bucket for snapshot files. |
+| `custom_freeze_storage` | `FreezeRepository \| None` | — | `None` | Snapshot repository when `freeze_backend="custom"`. |
 | `extra_converters` | `dict[str, type] \| None` | — | `{}` | Maps file extensions to `BaseConverter` subclasses, overriding built-in converters. |
 | `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral OCR API key. **Required to convert any PDF** — PDF conversion is Mistral OCR only, there is no fallback. |
 | `prompt_caching_enabled` | `bool \| None` | `PROMPT_CACHING_ENABLED` | `True` | Enable Bedrock Converse prompt caching (~90% token cost reduction on repeated calls). |
@@ -86,7 +93,7 @@ configure(
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
 
-**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
+**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` or `freeze_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
 
 ---
 
@@ -170,35 +177,95 @@ All stage functions are async and importable from `scinr.newton`:
 
 **Module:** `scinr.newton.ingest.deletion`
 
-#### `delete_document(path, version=None)`
+#### `delete_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None)`
 
-Async function. Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `--update` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
+Async function. Completely removes a document from Neo4j — unlike `delete_document_content()` (an internal helper used by the `update_mode=True` in-place re-ingestion flow, which only wipes content and keeps the `:Document` node), `delete_document()` deletes the `:Document` node(s) themselves plus their entire structure, and then cleans up orphans.
 
 ```python
 import asyncio
 from scinr.newton import delete_document
 
-result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a"))        # deletes every version
-result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", version=2))  # deletes only version 2
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", tenant_id="acme"))             # every version
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", version=2, tenant_id="acme"))  # only version 2
+result = asyncio.run(delete_document("ModuloA/SubModulo/doc_a", tenant_id=None))               # the public document
+result = asyncio.run(delete_document(job_id="job-123", tenant_id="acme"))                      # a whole ingestion run
 print(result.found, result.documents_deleted, result.structure_nodes_deleted)
 
 # Inside an already-running event loop, use await instead:
-result = await delete_document("ModuloA/SubModulo/doc_a")
+result = await delete_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
 ```
+
+`tenant_id` is **mandatory** (keyword-only, no default — omitting it raises `TypeError`) because the tenant is part of the document identity: two tenants can own documents at the same path. `tenant_id=None` (or `"__public__"`) explicitly targets public documents; there is no way to delete across tenants. Exactly one of `path` / `job_id` selects the documents within that tenant (`job_id` and `created_by_user_id` accept one value or a list); `version` and `created_by_user_id` are optional extra filters.
 
 Behavior:
 
 1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
-2. Read-only check: finds every `(:Document {path: $path})` matching `version` (or all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
+2. Read-only check: finds every `:Document` of the tenant matching the selector (`path` or `job_id`) and the optional filters (all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
 3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the Neo4j driver is still closed via the `finally` block).
-4. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
-5. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
-   - **Pass 1:** deletes orphaned `:Entity`/`:ModelInstance` nodes (no `:ExtractionResult` reaches them within 7 hops).
-   - **Pass 2** (runs only after Pass 1 fully finishes): deletes orphaned `:LabeledEntity` nodes (no incoming relationship at all).
+4. Cascade delete (bounded transactions — documents 50 at a time, each delete committing every 1,000 nodes — so a large folder does not overrun Neo4j's transaction memory): marks the `:Document` node(s) `deletion_pending`, then deletes every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) of the matched `:Document` node(s) and of their `IS_COMPOSED_OF*` descendants, together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, `:ComplementaryMatch`, `:SupplementaryField` and `:ExtractionResult` children. The `:Document` nodes go last, after step 5. Not atomic: if it fails half-way, calling `delete_document()` again with the same selector deletes what is left.
+5. Garbage collection of the orphans the deletion caused, scoped to the tenant:
+   - an `:Entity`/`:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when it has no incoming relationship at all;
+   - only the nodes the deleted `:ExtractionResult` nodes pointed at are checked, and then what each deleted orphan pointed at, until a round deletes nothing — the cost follows the deletion, not the size of the tenant;
+   - a call that finishes an interrupted delete or freeze (the documents carry `deletion_pending` / `frozen_cleanup_pending`) checks every such node of the tenant instead.
+
+`collect_orphans(tenant_id=...)` runs that whole-tenant check on demand (two passes, each repeated up to `GC_MAX_PASSES` = 7 times until one deletes nothing). Use it to collect what `delete_document()` does not: the orphans left by re-ingestion with `update_mode=True` and by re-extraction. Returns `OrphanCollectionResult` (`tenant_id` plus the four `gc_*` counters). Do not run it while the same tenant is being ingested.
 
 > **Breaking change note:** if you configure `storage_backend="custom"`, your custom `RawFileRepository`/`PageRepository` implementations must now also implement `delete(raw_file_id)` / `delete_pages(raw_file_id)` respectively (see [Storage Layer](#storage-layer)) — these are new abstract methods on the base interfaces.
 
 **Returns:** `DeletionResult`
+
+`delete_document()` does not know about frozen documents: it deletes a frozen stub but leaves its snapshot in the freeze backend. Restore the document first, then delete it.
+
+---
+
+### Document Freezing
+
+**Modules:** `scinr.newton.ingest.freeze`, `scinr.newton.ingest.restore`
+
+Freezing archives the subgraph of a document to a **snapshot** in the freeze backend and reduces the document in Neo4j to a **stub**. Unlike deletion, it is reversible, and restoring calls no LLM. The three functions are `async`, open and close their own Neo4j driver, and take the selector of `delete_document()`: a mandatory keyword-only `tenant_id`, exactly one of `path` (optionally `version`) or `job_id`, an optional `created_by_user_id`, and the downward `IS_COMPOSED_OF*` cascade. The full guide is `docs/user-guides/document-freezing.md`.
+
+```python
+from scinr.newton import freeze_document, restore_document, export_document_snapshot
+
+frozen = await freeze_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
+print(frozen.frozen_blob_id, frozen.structure_nodes_deleted, frozen.info_units_deleted)
+
+restored = await restore_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
+print(restored.documents_restored, restored.nodes_created)
+```
+
+#### `freeze_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, keep_structure_nodes=False, keep_annotations=False, keep_extraction_results=False, delete_after_export=True)`
+
+1. Resolves the documents. Nothing matched: `found=False`, nothing touched. A document already frozen: `FreezeError`.
+2. Exports the complete snapshot to the freeze backend, in streaming. If this fails, the graph is not touched.
+3. Marks each `:Document` as a stub in one transaction: `frozen=true`, `frozen_blob_id`, `frozen_at`, the `frozen_keep_*` flags and `frozen_cleanup_pending=true`.
+4. Deletes the subtree in bounded transactions (the same cascade as `delete_document()`), keeping what the `keep_*` flags ask for. InfoUnits always go. A kept `:ModelDecision` / `:ExtractionResult` whose `:StructureNode` is deleted is re-linked to its `:Document`.
+5. Collects the orphans it caused, as `delete_document()` does.
+6. Removes `frozen_cleanup_pending`.
+
+Steps 4 and 5 are not atomic. If they fail, the documents stay frozen with `frozen_cleanup_pending=true`: call `freeze_document()` again to finish, or `restore_document()` to go back.
+
+`delete_after_export=False` is a **backup**: the snapshot is stored, `last_backup_blob_id` / `last_backup_at` are set on the `:Document`, and the graph is otherwise unchanged. The `keep_*` flags are rejected in this mode (`ValueError`).
+
+**Returns:** `FreezeResult`
+
+#### `restore_document(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, frozen_blob_id=None, batch_size=1000, concurrency=4)`
+
+Rebuilds the subgraph from its snapshot:
+
+- **A frozen stub** is restored from the snapshot it points at. Restoring a folder also restores the descendants frozen in the same snapshot.
+- **A document that is no longer in the graph** (deleted after a freeze or a backup) is recreated from its newest snapshot, or from `frozen_blob_id` when given, and re-linked to its folder and version chain.
+- **A document that exists unfrozen** is refused with `FreezeError`.
+
+The snapshot is validated completely (schema version, tenant of every entry and node) before any write. The rebuild then writes idempotent batches of `batch_size` rows, `concurrency` transactions at a time, so a failed restore can simply be called again. For the node families the freeze removed, the snapshot wins over anything written while the document was frozen. A freeze snapshot is deleted once no `:Document` references it; backups and exports are kept.
+
+**Returns:** `RestoreResult`
+
+#### `export_document_snapshot(path=None, version=None, *, tenant_id, created_by_user_id=None, job_id=None, destination="dict", file_path=None)`
+
+Read-only. Produces the same snapshot as a `dict` (`destination="dict"`), a file (`"file"`, returns the `Path`) or a stored snapshot (`"storage"`, returns the `frozen_blob_id`). Only `"storage"` needs a freeze backend.
+
+**Raises (all three):** `FreezeError` for a document in the wrong state or an invalid snapshot, `ConfigurationError` when the freeze backend is `"none"`, `ValueError` for an invalid selector.
 
 ---
 
@@ -253,8 +320,11 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 
 | Field | Type | Description |
 |---|---|---|
-| `path` | `str` | The Document `path` that was targeted for deletion. |
+| `path` | `str \| None` | The Document `path` that was targeted for deletion, or `None` when selected by `job_id`. |
 | `version` | `int \| None` | The specific version requested, or `None` if all versions were targeted. |
+| `job_id` | `str \| None` | The `job_id` selector that was targeted, or `None` when selected by `path`. |
+| `tenant_id` | `str \| None` | The tenant the deletion was scoped to (always applied), or `None` for public documents. |
+| `created_by_user_id` | `str \| None` | The `created_by_user_id` filter applied, or `None` if none was requested. |
 | `found` | `bool` | `True` if at least one matching Document existed before deletion. When `False`, all counters below are 0 and no delete or GC queries were executed. |
 | `versions_deleted` | `list[int]` | Sorted list of integer versions that matched and were deleted. Empty when `found` is `False`. |
 | `documents_deleted` | `int` | Number of `:Document` nodes deleted (the matched Document(s) plus any reached via `IS_COMPOSED_OF*`). |
@@ -264,12 +334,62 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 | `proposed_models_deleted` | `int` | Number of `:ProposedModel` nodes deleted. |
 | `proposed_fields_deleted` | `int` | Number of `:ProposedField` nodes deleted. |
 | `extraction_results_deleted` | `int` | Number of `:ExtractionResult` nodes deleted. |
-| `gc_entity_model_instance_deleted` | `int` | Total `:Entity`/`:ModelInstance` nodes deleted across all GC iterations. |
-| `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at `GC_MAX_PASSES`). |
-| `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
-| `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at `GC_MAX_PASSES`). |
+| `gc_entity_model_instance_deleted` | `int` | `:Entity`/`:ModelInstance` nodes this deletion left orphaned, and deleted. |
+| `gc_entity_model_instance_passes` | `int` | GC rounds run over `:Entity`/`:ModelInstance` candidates (0 when there was none). |
+| `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes this deletion left orphaned, and deleted. |
+| `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates (0 when there was none). |
 | `raw_files_deleted` | `int` | Number of `RawFileRecord` (binaries) deleted from the storage layer for the `raw_file_id`s referenced by the deleted Document(s) and their descendants. |
 | `converted_pages_deleted` | `int` | Number of `ConvertedPageRecord` (converted Markdown pages) deleted from the storage layer for the same `raw_file_id`s. |
+
+#### `OrphanCollectionResult`
+
+Result of a `collect_orphans()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant_id` | `str \| None` | The tenant that was swept (`None` = public). |
+| `gc_entity_model_instance_deleted` | `int` | `:Entity`/`:ModelInstance` nodes of the tenant deleted because no `:ExtractionResult` reached them. |
+| `gc_entity_model_instance_passes` | `int` | Iterations of that pass over the whole tenant (it stops at the first one that deletes nothing, 7 at most). |
+| `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes of the tenant deleted because nothing pointed at them. |
+| `gc_labeled_entity_passes` | `int` | Iterations of that pass. |
+
+#### `FreezeResult`
+
+Result of a `freeze_document()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `path`, `version`, `job_id`, `tenant_id`, `created_by_user_id` | | The selector, as passed. |
+| `found` | `bool` | `False` when nothing matched: nothing was exported or changed. |
+| `mode` | `"freeze" \| "backup"` | `"backup"` with `delete_after_export=False`. |
+| `frozen_blob_id` | `str \| None` | Id of the snapshot in the freeze backend. |
+| `versions_frozen` | `list[int]` | Sorted versions of the matched documents. |
+| `documents_frozen` | `int` | Documents in the snapshot: the matched ones plus their `IS_COMPOSED_OF*` descendants. |
+| `structure_nodes_deleted` / `structure_nodes_kept` | `int` | `:StructureNode` nodes removed / left in place. |
+| `info_units_deleted` | `int` | `:InfoUnit` nodes removed. |
+| `model_decisions_deleted` / `model_decisions_kept` | `int` | `:ModelDecision` nodes removed / kept. |
+| `proposed_models_deleted`, `proposed_fields_deleted` | `int` | `:ProposedModel` / `:ProposedField` nodes removed. |
+| `extraction_results_deleted` / `extraction_results_kept` | `int` | `:ExtractionResult` nodes removed / kept. |
+| `gc_*` | `int` | The four garbage-collection counters, as in `DeletionResult`. |
+
+Every counter is 0 in backup mode.
+
+#### `RestoreResult`
+
+Result of a `restore_document()` call.
+
+| Field | Type | Description |
+|---|---|---|
+| `path`, `version`, `job_id`, `tenant_id`, `created_by_user_id` | | The selector, as passed. |
+| `found` | `bool` | `False` when nothing matched. |
+| `versions_restored` | `list[int]` | Sorted versions of the matched documents. |
+| `documents_restored` | `int` | Documents restored, descendants included. |
+| `documents_recreated` | `int` | How many of them no longer existed in the graph and were recreated. |
+| `frozen_blob_ids` | `list[str]` | Snapshots the documents were restored from. |
+| `snapshots_deleted` | `int` | Snapshots deleted because no `:Document` references them any more. |
+| `nodes_created` / `nodes_reused` | `int` | Snapshot nodes created, or found in the graph and reused. |
+| `relationships_created` | `int` | Relationships recreated. |
+| `gc_*` | `int` | Counters of the tenant sweep the restore runs when it finds extraction results written onto the frozen document; 0 otherwise. |
 
 ---
 
@@ -287,6 +407,7 @@ ScinrError (base)
 ├── IngestionError       — Neo4j write failed (version conflict, schema constraint violation)
 ├── ModelError           — Pydantic model cannot be resolved or is invalid (bad catalog.py)
 ├── StorageError         — MongoDB unavailable or misconfigured
+├── FreezeError          — a document cannot be frozen, restored or snapshotted (already frozen, nothing to restore, snapshot missing or of another tenant)
 └── ConversionError      — file converter failed to process a source file
 ```
 
@@ -327,11 +448,7 @@ Normalises every supported file format into a uniform intermediate JSON envelope
 
 Converters are registered in `src/scinr/newton/converters/registry.py` (keyed by file extension), so the pipeline auto-selects the right converter for each file. When a storage backend is configured, Stage 0 also stores the raw binary and converted pages in MongoDB.
 
-```bash
-# CLI
-newton --stage preprocess --input-raw files/ --input data/json/
-
-# Library API
+```python
 result, docs = asyncio.run(run_preprocess("files/", output_dir="data/json/"))
 ```
 
@@ -355,11 +472,7 @@ Reads the paged JSON and processes pages through a **sliding window** (default 2
 
 A **2-phase extraction + repair loop** handles malformed LLM output: if Pydantic validation fails, a dedicated repair model retries up to 3 times with escalating temperatures (`0.0 → 0.3 → 0.6`). The repair logic is shared across all LLM stages via `src/scinr/newton/utils/llm_repair.py`.
 
-```bash
-# CLI
-newton --stage extract --input data/json/ --output data/output/ --parallel-docs 4
-
-# Library API
+```python
 result, docs = asyncio.run(run_extraction(input_folder="data/json/", output_folder="data/output/", parallel_docs=4))
 ```
 
@@ -379,19 +492,15 @@ Key behaviours:
 - **Folder hierarchy** — when a `folder_path` is present, ancestor `(:Document)` nodes are created and connected via `[:IS_COMPOSED_OF]` relationships, mirroring the source directory tree inside the graph.
 - **Versioning** — each ingest increments the `version` counter and sets `latest=true` on the new node while all previous versions become `latest=false`.
 
-```bash
-# CLI — ingest from output folder
-newton --stage ingest --output data/output/
-
-# CLI — update in-place (no new version created)
-newton --stage ingest --output data/output/ --update
-
-# CLI — link as successor of another document
-newton --stage all --input-raw files/new/ --input data/json/ --output data/output/ --replaces "OldDocumentName"
-
-# Library API
+```python
+# Ingest from output folder
 result = asyncio.run(run_ingestion(output_folder="data/output/"))
+
+# Update in-place (no new version created)
 result = asyncio.run(run_ingestion(output_folder="data/output/", update_mode=True))
+
+# Link as successor of another document
+result = asyncio.run(run_pipeline(input_raw="files/new/", replaces="OldDocumentName"))
 ```
 
 ---
@@ -413,19 +522,14 @@ For each node the agent reads the theme assigned during Stage 1, then makes a st
 
 The **ThemeRegistry** auto-discovers all `src/scinr/newton/models/*/catalog.py` files at startup and presents their `THEME_DESCRIPTION` and `SELECTABLE_MODELS` to the LLM — no code changes needed when a new domain is added.
 
-```bash
-# CLI — annotate all nodes
-newton --stage annotate --document "MyDocument"
-
-# CLI — resume (skip already-annotated nodes)
-newton --stage annotate --document "MyDocument" --only-unannotated
-
-# CLI — manual override (assign a fixed model without LLM)
-newton --stage annotate --document "MyDocument" --manual --model "Triple"
-
-# Library API
+```python
+# Annotate all nodes
 result = asyncio.run(run_annotation("MyDocument"))
+
+# Resume (skip already-annotated nodes)
 result = asyncio.run(run_annotation("MyDocument", only_unannotated=True))
+
+# Manual override (assign a fixed model without LLM)
 result = asyncio.run(run_annotation("MyDocument", manual=True, model_class="Triple"))
 ```
 
@@ -450,15 +554,11 @@ The **`compose_schema`** step dynamically constructs a composite Pydantic model 
 - Fields with `field_relationships` metadata generate typed Neo4j relationships between entity nodes.
 - Nodes without a model decision fall back to the `Triple` (RDF) model.
 
-```bash
-# CLI — extract entities for all annotated nodes
-newton --stage entity_extract --document "MyDocument"
-
-# CLI — resume (skip nodes that already have an ExtractionResult)
-newton --stage entity_extract --document "MyDocument" --only-unextracted --parallel-docs 4
-
-# Library API
+```python
+# Extract entities for all annotated nodes
 result = asyncio.run(run_entity_extraction("MyDocument"))
+
+# Resume (skip nodes that already have an ExtractionResult)
 result = asyncio.run(run_entity_extraction("MyDocument", only_unextracted=True, parallel_docs=4))
 ```
 
@@ -478,58 +578,17 @@ Ingests tabular files directly into Neo4j, bypassing Stages 0–4. For each shee
 3. Maps sheet columns to model fields via LLM.
 4. Writes `(:Document)-[:HAS_STRUCTURE]->(:StructureNode:Table)-[:HAS_CHILD]->(:StructureNode:Row)` subgraph.
 
-```bash
-# CLI — ingest all CSV/XLSX files in a folder
-newton --stage tabular --input-raw files/data/
-
-# CLI — update mode (wipe and re-ingest)
-newton --stage tabular --input-raw files/data/ --update
-
-# Library API
+```python
+# Ingest all CSV/XLSX files in a folder
 result = asyncio.run(run_tabular_pipeline("files/data/"))
+
+# Update mode (wipe and re-ingest)
 result = asyncio.run(run_tabular_pipeline("files/data/", update_mode=True))
 ```
 
-The tabular pipeline is also automatically invoked by `--stage all` (and `run_pipeline()` with `input_raw`) when CSV/XLSX/XLS files are present in the input directory.
+The tabular pipeline is also automatically invoked by `run_pipeline()` with `input_raw` when CSV/XLSX/XLS files are present in the input directory.
 
 > When two or more columns map to the same model field, values are combined/deduplicated (only for `str` and `list[str]` fields — other field types keep the last value and log a warning). See the [Tabular Pipeline guide, §7.4](../../../docs/user-guides/tabular-pipeline.md#74-combining-values-when-multiple-columns-map-to-the-same-field) for details.
-
----
-
-### CLI Reference
-
-The CLI entry point is `scinr.newton.cli:main_sync`, registered as `newton` via `pyproject.toml`:
-
-```bash
-newton --stage <STAGE> [options]
-```
-
-| `--stage` choice | Equivalent `run_pipeline()` stages | Description |
-|---|---|---|
-| `all` | `["preprocess", "extraction", "ingestion", "annotation", "entity_extraction"]` | Full pipeline |
-| `preprocess` | `["preprocess"]` | Stage 0 only |
-| `extract` | `["extraction"]` | Stage 1 only |
-| `ingest` | `["ingestion"]` | Stage 2 only |
-| `annotate` | `["annotation"]` | Stage 3 only |
-| `entity_extract` | `["entity_extraction"]` | Stage 4 only |
-| `tabular` | `["tabular"]` | Tabular bypass only |
-
-Key CLI flags:
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--input` | `DIR` | `data/json/` | Input folder for Stage 1 (intermediate JSON files) |
-| `--input-raw` | `DIR` | — | Raw source files folder for Stage 0 / tabular |
-| `--output` | `DIR` | `data/output/` | Output folder for Stage 1/2 |
-| `--document` | `NAME` | — | Document name for Stage 3/4. Required with `--stage annotate` and `--stage entity_extract` |
-| `--update` | flag | off | Update mode: re-ingest into the latest version without creating a new one |
-| `--replaces` | `DOC_NAME` | — | Name of existing document being superseded |
-| `--parallel-docs` | `N` | `1` | Concurrent documents across stages |
-| `--only-unannotated` | flag | off | Stage 3 only: skip already-annotated nodes |
-| `--only-unextracted` | flag | off | Stage 4 only: skip already-extracted nodes |
-| `--manual` | flag | off | Stage 3 only: assign fixed model without LLM. Requires `--model` |
-| `--model` | `CLASS_NAME` | — | CamelCase model class name for `--manual` annotation |
-| `--context` | `TEXT` | — | Free-text context instructions passed to Stage 0 and Stage 3 LLMs |
 
 ---
 
@@ -601,12 +660,12 @@ RETURN s.node_id, s.title, s.theme;
 
 Every ingest run auto-increments the `version` counter and marks only the newest node as `latest=true`.
 
-| Scenario | CLI flag / API param | Behaviour |
+| Scenario | API param | Behaviour |
 |---|---|---|
 | First ingest | *(none)* | Creates version 1 with `latest=true`. |
-| Re-ingest (correction) | `--update` / `update_mode=True` | Wipes and re-ingests into the existing latest version; no new version node created. |
+| Re-ingest (correction) | `update_mode=True` | Wipes and re-ingests into the existing latest version; no new version node created. |
 | New version | *(none, run again)* | Creates version N+1, links via `HAS_NEWER_VERSION`, sets `latest=true`. |
-| Document supersedes another | `--replaces <name>` / `replaces="name"` | Links the new document as the successor of the named existing document. The old document's `latest=True` version becomes `latest=False`. |
+| Document supersedes another | `replaces="name"` | Links the new document as the successor of the named existing document. The old document's `latest=True` version becomes `latest=False`. |
 
 ---
 
@@ -623,6 +682,13 @@ When enabled (`STORAGE_BACKEND=mongodb`), the storage layer persists:
 | `raw_binaries` (GridFS) | Binary content of raw source files (PDF bytes, DOCX bytes, etc.). |
 
 The `raw_file_id` and `page_id` fields stored in Neo4j nodes allow cross-referencing back to the original binary and page content in MongoDB.
+
+Document snapshots have their own backend (`FREEZE_BACKEND`, which inherits `STORAGE_BACKEND` when unset). With MongoDB it adds:
+
+| Collection / Bucket | Contents |
+|---|---|
+| `frozen_documents` (MongoDB) | Metadata of each snapshot: tenant, documents it holds, mode, size, checksum, timestamp, keep flags. Its `_id` is the `frozen_blob_id`. |
+| `frozen_snapshots` (GridFS) | The snapshot JSON files. |
 
 ### Enable / Disable Storage
 
@@ -664,6 +730,8 @@ configure(
 ```
 
 > **Breaking change:** `RawFileRepository.delete(raw_file_id)` and `PageRepository.delete_pages(raw_file_id)` are new required abstract methods, added so that `delete_document()` (see [Document Deletion](#document-deletion)) can clean up documental storage before deleting the corresponding Neo4j nodes. Any pre-existing `storage_backend="custom"` implementation must add both methods. Both must be idempotent: `delete()` must not raise if the `raw_file_id` no longer exists, and `delete_pages()` must return `0` (not raise) if no pages match.
+
+> **Breaking change (multi-tenancy):** `RawFileRepository.get` / `open` / `open_with_record` / `list_raw_files` and `PageRepository.get_pages_by_ids` are new required abstract methods, writes take keyword-only `tenant_id` / `created_by_user_id` / `job_id`, and reads / deletes take the navigation scope (`tenant_id`, `include_public`, `created_by_user_id`, `job_id`; `None` = all tenants). See `docs/user-guides/storage-backends.md#multi-tenancy`.
 
 The storage backend abstraction lives in `src/scinr/newton/storage/base.py` and `src/scinr/newton/storage/factory.py`. Additional backends (e.g. PostgreSQL, S3) can be added by implementing the base interface.
 

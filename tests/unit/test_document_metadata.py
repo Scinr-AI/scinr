@@ -13,6 +13,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 from scinr.newton.ingest import nodes
 from scinr.newton.ingest.loader import _apply_metadata_overrides
 from scinr.newton.models.document_structure import Document
@@ -57,15 +59,22 @@ class TestInsertDocumentMetadata:
         assert params["tenant_id"] == "tenant-1"
         assert params["created_by_user_id"] == "user-9"
         assert params["job_id"] == "job-abc"
-        assert "d.tenant_id" in tx.calls[0][0]
+        # tenant_id is part of the MERGE key, not a SET property
+        assert "MERGE (d:Document {tenant_id: $tenant_id, path: $path, version: $version})" in (
+            tx.calls[0][0]
+        )
         assert "d.created_by_user_id" in tx.calls[0][0]
         assert "d.job_id" in tx.calls[0][0]
 
+    def test_tenant_is_required(self):
+        with pytest.raises(TypeError):
+            nodes.insert_document(_FakeTx(), "doc", "doc", 1)  # type: ignore[call-arg]
+
     def test_values_default_to_none_and_are_still_bound(self):
         tx = _FakeTx()
-        nodes.insert_document(tx, "doc", "doc", 1)
+        nodes.insert_document(tx, "doc", "doc", 1, tenant_id="__public__")
         params = tx.params_for("MERGE (d:Document")
-        assert params["tenant_id"] is None
+        assert params["tenant_id"] == "__public__"
         assert params["created_by_user_id"] is None
         assert params["job_id"] is None
 
@@ -133,13 +142,16 @@ class TestInsertDocumentGraphForwardsMetadata:
         )
 
     def test_absent_metadata_is_forwarded_as_none(self):
+        """No tenant → the reserved public key (never null, see utils/tenancy.py);
+        the other metadata is forwarded as None."""
         tx = _FakeTx()
         doc = _doc()
 
         nodes.insert_document_graph(tx, doc, resolved_version=1)
 
         leaf = tx.params_for("MERGE (d:Document")
-        assert leaf["tenant_id"] is None
+        assert leaf["tenant_id"] == "__public__"
+        assert doc.tenant_id is None  # the Document itself is not modified
         assert leaf["created_by_user_id"] is None
         assert leaf["job_id"] is None
 

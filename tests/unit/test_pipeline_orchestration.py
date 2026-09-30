@@ -50,10 +50,17 @@ from scinr.newton.config import configure
 from scinr.newton.pipeline import run_pipeline
 from scinr.newton.results import DocumentResult, PipelineResult, StageResult
 from scinr.newton.stages import run_preprocess
+from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _identity_leaves(driver, *, tenant_id, doc_path=None, document_name=None):
+    """Resolver stub: every selector is already a (root-level) leaf document."""
+    selector = doc_path if doc_path is not None else document_name
+    return [LeafDocument(selector, selector)]
 
 
 def _sr(
@@ -90,7 +97,7 @@ def mock_stages(monkeypatch):
     `run_ingestion` are no longer called by `run_pipeline()` (see
     `mock_unit_stage_fns` for their per-document replacements) but are kept
     patched here too since `scinr.newton.stages.run_preprocess` is still a
-    public re-export used directly by `cli.py` and by
+    public re-export used directly by
     `TestStage0Baseline.test_stage0_reports_conversion_failures_as_failed_documents`
     below (which imports the real, unpatched `run_preprocess`).
     """
@@ -127,8 +134,8 @@ def mock_infra(monkeypatch):
         `TestCatalogMemoization` below for a test that leaves these REAL and
         mocks one layer deeper instead)
       - `scinr.newton.utils.theme_registry.get_theme_registry`
-      - `scinr.newton.utils.document_resolver.resolve_leaf_document_names`
-        (identity: returns `[document_name]`, i.e. "already a leaf",
+      - `scinr.newton.utils.document_resolver.resolve_leaf_documents`
+        (identity: returns `[LeafDocument(document_name, document_name)]`, i.e. "already a leaf",
         emulating `document_names` resolution without touching Neo4j)
     """
     import scinr.newton.annotation.neo4j_ops as neo4j_ops_mod
@@ -154,8 +161,8 @@ def mock_infra(monkeypatch):
     )
     monkeypatch.setattr(
         document_resolver_mod,
-        "resolve_leaf_document_names",
-        MagicMock(side_effect=lambda driver, name: [name]),
+        "resolve_leaf_documents",
+        MagicMock(side_effect=_identity_leaves),
     )
     return {"sync_driver": fake_sync_driver, "async_driver": fake_async_driver}
 
@@ -478,8 +485,8 @@ class TestStageResultAggregation:
         but we assert on the set/sum, not on list order, to stay robust).
 
         `document_names=[...]` now resolves through `_discover_units()` ->
-        `resolve_leaf_document_names()` (mocked via `mock_infra` to return
-        `[name]` for each input name — i.e. every name is already a leaf, no
+        `resolve_leaf_documents()` (mocked via `mock_infra` to return
+        one leaf per input name — i.e. every name is already a leaf, no
         fan-out), instead of being forwarded verbatim to `run_annotation()`
         as in the old batch orchestration. The per-document call still
         happens through `run_annotation()`, one call per leaf name.
@@ -673,7 +680,7 @@ class TestStage0Baseline:
     prior revisions of this docstring — `convert_folder()`/`run_preprocess()`
     are simply not on this call path anymore when going through
     `run_pipeline()`; they remain available as public standalone functions
-    for direct use, e.g. from `cli.py`, and are still exercised directly by
+    for direct use, and are still exercised directly by
     `test_stage0_reports_conversion_failures_as_failed_documents` below).
     """
 
@@ -947,8 +954,8 @@ class TestCatalogMemoization:
             )
             monkeypatch.setattr(
                 document_resolver_mod,
-                "resolve_leaf_document_names",
-                MagicMock(side_effect=lambda driver, name: [name]),
+                "resolve_leaf_documents",
+                MagicMock(side_effect=_identity_leaves),
             )
 
             mock_stages["run_annotation"].return_value = _sr(
@@ -1006,7 +1013,7 @@ class _FakeAsyncDriver:
     returning a fresh session each call.
     """
 
-    def session(self):
+    def session(self, **kwargs):
         return _FakeAsyncSession()
 
 
@@ -1032,9 +1039,9 @@ class TestAnnotationEntityExtractionConcurrency:
     `run_entity_extraction` REAL (per `TestCatalogMemoization`'s mocking
     philosophy above) to exercise that exact code path, so it needs its own
     async-context-manager-capable fake driver (`_FakeAsyncDriver` above)
-    instead. Also mocks `resolve_leaf_document_names_async` directly (the
-    new async helper `mock_infra` does not know about — it only patches the
-    original *sync* `resolve_leaf_document_names`, which is still used
+    instead. Also mocks `resolve_leaf_documents_async` directly (the
+    async helper `mock_infra` does not know about — it only patches the
+    *sync* `resolve_leaf_documents`, which is still used
     as-is by `_discover_pre_ingested_units()` for the `document_names`
     discovery branch, and is patched separately below for that purpose).
     """
@@ -1074,11 +1081,11 @@ class TestAnnotationEntityExtractionConcurrency:
             async with lock:
                 in_flight -= 1
 
-        async def _tracking_fetch_nodes(driver, document_name, only_unannotated=False):
+        async def _tracking_fetch_nodes(driver, *, tenant_id, doc_path, only_unannotated=False):
             await _tracked_sleep()
             return []
 
-        async def _tracking_fetch_targets(driver, document_name, only_unextracted=False):
+        async def _tracking_fetch_targets(driver, *, tenant_id, doc_path, only_unextracted=False):
             await _tracked_sleep()
             return []
 
@@ -1089,15 +1096,15 @@ class TestAnnotationEntityExtractionConcurrency:
         # untouched code path) — identity: every name is already a leaf.
         monkeypatch.setattr(
             document_resolver_mod,
-            "resolve_leaf_document_names",
-            MagicMock(side_effect=lambda driver, name: [name]),
+            "resolve_leaf_documents",
+            MagicMock(side_effect=_identity_leaves),
         )
         # New async resolver used by `run_annotation_agent()` /
         # `run_entity_extraction_agent()` — same identity semantics.
         monkeypatch.setattr(
             document_resolver_mod,
-            "resolve_leaf_document_names_async",
-            AsyncMock(side_effect=lambda driver, name: [name]),
+            "resolve_leaf_documents_async",
+            AsyncMock(side_effect=_identity_leaves),
         )
         monkeypatch.setattr(
             ingest_config_mod, "get_driver", MagicMock(return_value=fake_sync_driver)

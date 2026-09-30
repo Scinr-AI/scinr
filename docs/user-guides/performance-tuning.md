@@ -585,6 +585,37 @@ result = await run_pipeline(
 
 ---
 
+## Deleting, Freezing and Restoring at Scale
+
+`delete_document()`, `freeze_document()` and `restore_document()` call no LLM. Their limit is Neo4j's **transaction memory**: the server caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura), and a transaction holds everything it writes or deletes until it commits. All three therefore work in bounded transactions, and their memory does not grow with the size of the operation.
+
+| Operation | How the work is split | Tunable |
+|---|---|---|
+| `delete_document()`, `freeze_document()` | Documents 50 at a time; each delete commits every 1,000 nodes | No |
+| `restore_document()` | Batches of `batch_size` rows, `concurrency` transactions in flight | `batch_size` (1000), `concurrency` (4) |
+
+Measured on a local Neo4j 2026.08 with a synthetic folder of 732 documents (475,000 nodes, 520,000 relationships), transaction pool capped at 24 MiB:
+
+| Operation | Peak transaction memory | Time |
+|---|---|---|
+| `freeze_document()` | 13 MiB | 41 s |
+| `delete_document()` | 13 MiB | 10 s |
+| `restore_document()`, defaults | 8 MiB (2 MiB per transaction in flight) | about 10,000 nodes per second |
+
+Take the times as orders of magnitude: they depend on the server and on how much each document extracted.
+
+What to expect on a large multi-tenant graph:
+
+- **The cost of a delete or a freeze follows the documents selected, not the tenant.** The garbage collection only checks what the deleted extraction results pointed at: about 0.1 s for one document and 0.2 s for twenty, in a tenant of 140,000 extraction nodes.
+- **`collect_orphans()` grows with the tenant.** It checks every `:Entity`, `:ModelInstance` and `:LabeledEntity` of the tenant, whatever there is to collect (0.2 to 0.5 s for those 140,000 nodes). Schedule it; do not call it after every operation. The same sweep runs when a call finishes an interrupted delete or freeze.
+- **For a bulk operation that covers most of a tenant, the scoped collection is the slower of the two**: about 1.9 s against 0.6 s for 300 documents that were the whole tenant. It is a small part of the total (the freeze took 17 s).
+- **Restore while an ingestion is running**: lower `concurrency` (down to 1) rather than `batch_size`. The restore and the ingestion lock the same shared nodes (catalog nodes, the tenant's `:ModelInstance` / `:LabeledEntity`), and contention, not memory, is what slows them down. See [Batch size and concurrency](document-freezing.md#batch-size-and-concurrency).
+- **Large properties**, such as InfoUnits with tens of kilobytes of text, are the one thing that makes a restore transaction grow. Lower `batch_size` then.
+
+Both `freeze_document()` and `restore_document()` log the duration of each phase at `INFO` level (`timings: …`), which tells export, upload, delete, garbage collection and rebuild apart.
+
+---
+
 ## Monitoring and Diagnostics
 
 ### Pipeline Result Inspection
@@ -916,5 +947,6 @@ async def batch_run(input_dir: str, batch_size: int = 20) -> None:
 - **[Architecture](../architecture.md)** — Detailed walkthrough of concurrency layers, semaphores, and async design.
 - **[Tabular Pipeline](tabular-pipeline.md)** — Tabular normalization performance and `normalization_batch_size` tuning.
 - **[Custom Models](custom-models.md)** — Defining extraction models that affect annotation and extraction stage performance.
+- **[Document Deletion](document-deletion.md)** and **[Document Freezing](document-freezing.md)** — Bounded transactions, garbage collection, and the restore's `batch_size` / `concurrency`.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.
 - **[Results API](../api/results.md)** — Auto-generated documentation for `PipelineResult`, `StageResult`, and `DocumentResult`.

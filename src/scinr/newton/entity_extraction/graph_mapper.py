@@ -6,8 +6,10 @@ a Neo4j subgraph using three relationship mechanisms:
 
   Level 1 — Entity labeling:
     Fields with json_schema_extra={"entity_label": "X"} become MERGE'd
-    (:X {label, value, normalized_value}) nodes. Same label + same
-    normalized_value always resolves to the same node across all extractions.
+    (:X {label, value, normalized_value}) nodes. Same tenant + same label +
+    same normalized_value always resolves to the same node across all
+    extractions of that tenant (tenant_id is folded into the uid, so entities
+    are never shared between tenants).
 
   Level 2 — Field relationships:
     Fields with json_schema_extra={"field_relationships": [{"to_field": "...", "rel_type": "..."}]}
@@ -16,9 +18,18 @@ a Neo4j subgraph using three relationship mechanisms:
 
   Level 3 — Instance Key Relationships:
     Fields with json_schema_extra={"instance_key": True} define a composite
-    key that makes ModelInstance nodes globally deduplicatable (UID =
-    make_instance_uid(model_class, {sorted key_fields})). Analogous to
-    LabeledEntity deduplication by (label, normalized_value).
+    key that makes ModelInstance nodes deduplicatable within a tenant (UID =
+    make_instance_uid(model_class, {sorted key_fields}, tenant_id)). Analogous
+    to LabeledEntity deduplication by (tenant_id, label, normalized_value).
+
+  Provenance: every node written here carries a scalar ``tenant_id`` read
+  back from the owning StructureNode — the *stored* tenant key (the tenant, or
+  ``"__public__"`` for a public document; see ``utils/tenancy.py``), which is
+  also the value hashed into every tenant-scoped uid. Merge-deduplicated nodes (ModelInstance
+  with instance_key, LabeledEntity, Entity) also accumulate
+  ``created_by_user_ids`` / ``job_ids`` arrays. Key-less ModelInstance nodes
+  (never merged) get the same array properties with a single element, so every
+  ModelInstance is filtered uniformly; ExtractionResult keeps them as scalars.
 
     Fields with json_schema_extra={"instance_relationships": [...]} trigger,
     for each item in a list[str] field, MERGE of a target ModelInstance shell
@@ -47,6 +58,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Sequence
 from datetime import UTC
 from typing import Any
 
@@ -55,6 +67,7 @@ from pydantic import BaseModel
 
 from scinr.newton.config import get_config
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
+from scinr.newton.utils.tenancy import PUBLIC_TENANT
 from scinr.newton.utils.uid import make_instance_uid as _make_instance_uid
 from scinr.newton.utils.uid import make_uid as _make_uid
 from scinr.newton.utils.uid import normalize_key as _normalize
@@ -158,6 +171,70 @@ def _get_instance_key_fields(instance: BaseModel) -> dict[str, str] | None:
     return key_fields if key_fields else None
 
 
+def _require_stored_tenant(stored: str | None, node_full_id: str) -> str:
+    """Return the stored tenant key read off a StructureNode, refusing a
+    missing one: hashing a null tenant into a uid would silently create a
+    bucket shared by every such node, outside any tenant."""
+    if stored is None:
+        raise RuntimeError(
+            f"StructureNode {node_full_id!r} has no tenant_id; re-ingest its document."
+        )
+    return stored
+
+
+def _provenance_set_clause(alias: str) -> str:
+    """SET-clause fragment for a MERGE'd node: scalar ``tenant_id`` plus
+    accumulate ``created_by_user_id`` / ``job_id`` into deduplicated arrays.
+
+    Used identically in ``ON CREATE`` and ``ON MATCH`` branches — re-affirming
+    ``tenant_id`` on every MATCH is harmless since it is already folded into the
+    node's ``uid`` (a MATCH only ever happens within the same tenant). A ``None``
+    provenance value is skipped rather than pushed into the array.
+    """
+    return (
+        f"{alias}.tenant_id = $tenant_id, "
+        f"{alias}.created_by_user_ids = CASE "
+        f"WHEN $created_by_user_id IS NULL THEN coalesce({alias}.created_by_user_ids, []) "
+        f"WHEN $created_by_user_id IN coalesce({alias}.created_by_user_ids, []) THEN {alias}.created_by_user_ids "
+        f"ELSE coalesce({alias}.created_by_user_ids, []) + $created_by_user_id END, "
+        f"{alias}.job_ids = CASE "
+        f"WHEN $job_id IS NULL THEN coalesce({alias}.job_ids, []) "
+        f"WHEN $job_id IN coalesce({alias}.job_ids, []) THEN {alias}.job_ids "
+        f"ELSE coalesce({alias}.job_ids, []) + $job_id END"
+    )
+
+
+_STALE_EXTRACTION_RESULT_DELETE_QUERY = """
+UNWIND $node_ids AS nid
+MATCH (n:StructureNode {id: nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
+OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
+DETACH DELETE child
+WITH DISTINCT er
+DETACH DELETE er
+"""
+
+
+async def delete_stale_extraction_result(runner, node_ids: str | Sequence[str]) -> None:
+    """Delete the ExtractionResult(s) hanging from the given StructureNode(s),
+    together with every :ModelInstance reachable from them within 10 hops.
+
+    The idempotency step of write_extraction_subgraph(),
+    write_manual_annotation() and restore_document(). Note that the
+    ModelInstance purge does not check whether another live ExtractionResult
+    still reaches the instance (long-standing pipeline behaviour); the GC
+    passes of ``ingest/_gc.py`` clean up whatever else is left orphaned.
+
+    Parameters
+    ----------
+    runner:
+        An ``AsyncSession`` or ``AsyncTransaction`` (anything with an async ``run``).
+    node_ids:
+        One ``StructureNode.id`` (tenant-prefixed) or several.
+    """
+    ids = [node_ids] if isinstance(node_ids, str) else list(node_ids)
+    await runner.run(_STALE_EXTRACTION_RESULT_DELETE_QUERY, node_ids=ids)
+
+
 # ---------------------------------------------------------------------------
 # Core writer
 # ---------------------------------------------------------------------------
@@ -204,28 +281,30 @@ async def write_extraction_subgraph(
     timestamp = datetime.now(UTC).isoformat()
     cfg = get_config()
     async with driver.session(database=cfg.neo4j_database) as session:
-        # ── Guard: verify StructureNode exists ────────────────────────────
+        # ── Guard: verify StructureNode exists, read its provenance ───────
+        # tenant_id / created_by_user_id / job_id are stamped on the
+        # StructureNode at Stage-2 ingestion time (see ingest/nodes.py) — read
+        # them back here rather than threading them through the whole
+        # extraction call stack. This is the single source of truth for "which
+        # tenant does this extraction belong to".
         result = await session.run(
-            "MATCH (n:StructureNode {id: $nid}) RETURN count(n) AS cnt",
+            "MATCH (n:StructureNode {id: $nid}) "
+            "RETURN count(n) AS cnt, n.tenant_id AS tenant_id, "
+            "n.created_by_user_id AS created_by_user_id, n.job_id AS job_id",
             nid=node_full_id,
         )
-        cnt = (await result.single())["cnt"]
+        rec = await result.single()
+        cnt = rec["cnt"] if rec else 0
         if cnt == 0:
             raise RuntimeError(
                 f"write_extraction_subgraph: StructureNode not found: {node_full_id!r}"
             )
+        tenant_id = _require_stored_tenant(rec["tenant_id"], node_full_id)
+        created_by_user_id = rec["created_by_user_id"]
+        job_id = rec["job_id"]
 
         # ── Idempotency: delete stale ExtractionResult subgraph ───────────
-        await session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-            OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
-            DETACH DELETE child
-            WITH er
-            DETACH DELETE er
-            """,
-            nid=node_full_id,
-        )
+        await delete_stale_extraction_result(session, node_full_id)
 
         # ── Create ExtractionResult node ──────────────────────────────────
         await session.run(
@@ -236,7 +315,10 @@ async def write_extraction_subgraph(
                 node_full_id:  $nid,
                 document_name: $doc_name,
                 model_class:   $model_class,
-                timestamp:     $timestamp
+                timestamp:     $timestamp,
+                tenant_id:            $tenant_id,
+                created_by_user_id:   $created_by_user_id,
+                job_id:               $job_id
             })
             CREATE (n)-[:HAS_EXTRACTION]->(er)
             """,
@@ -245,6 +327,9 @@ async def write_extraction_subgraph(
             doc_name=document_name,
             model_class=primary_model_class,
             timestamp=timestamp,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
 
         # ── Link primary CatalogModel ─────────────────────────────────────
@@ -309,6 +394,9 @@ async def write_extraction_subgraph(
             field_path_prefix="",
             entity_nodes=entity_nodes,
             depth=0,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
 
         # ── Level 2: resolve field_relationships ──────────────────────────
@@ -327,6 +415,17 @@ async def write_extraction_subgraph(
     )
 
 
+_PARENT_LABELS = frozenset({"ExtractionResult", "ModelInstance"})
+
+
+def _check_parent_label(label: str) -> None:
+    """Reject any label other than the two a model subgraph can hang from."""
+    if label not in _PARENT_LABELS:
+        raise ValueError(
+            f"parent label must be one of {sorted(_PARENT_LABELS)}, got {label!r}"
+        )
+
+
 async def _write_model_fields(
     session,
     instance: BaseModel,
@@ -335,6 +434,9 @@ async def _write_model_fields(
     field_path_prefix: str,
     entity_nodes: dict[str, str],
     depth: int,
+    tenant_id: str = PUBLIC_TENANT,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
     list_index: int | None = None,
 ) -> None:
     """
@@ -355,7 +457,10 @@ async def _write_model_fields(
     parent_uid:
         Neo4j uid of the parent node.
     parent_label:
-        Neo4j label of the parent node (used for SET properties).
+        Neo4j label of the parent node: ``"ExtractionResult"`` at the root,
+        ``"ModelInstance"`` below. Every MATCH on the parent uses it, so the
+        lookup is a seek on the label's uid constraint instead of a scan of
+        every node in the graph.
     field_path_prefix:
         Dot-separated prefix for entity_nodes registry keys.
     entity_nodes:
@@ -365,6 +470,9 @@ async def _write_model_fields(
     list_index:
         If this instance is an element of a list, its 0-based index.
     """
+    # Interpolated into the Cypher: a closed set, never caller-controlled text.
+    _check_parent_label(parent_label)
+
     if depth > 10:
         log.warning("_write_model_fields: max depth reached, stopping recursion")
         return
@@ -389,20 +497,25 @@ async def _write_model_fields(
             key_fields = _get_instance_key_fields(value)
             rel_name = f"HAS_{_to_rel_name(field_name)}"
             if key_fields:
-                # ModelInstance con clave compuesta: UID determinístico, MERGE
-                child_uid = _make_instance_uid(type(value).__name__, key_fields)
+                # ModelInstance con clave compuesta: UID determinístico (incluye
+                # tenant_id), MERGE — nunca se comparte entre tenants distintos.
+                child_uid = _make_instance_uid(type(value).__name__, key_fields, tenant_id)
                 key_props_set = ", ".join(f"child.`{k}` = ${k}" for k in key_fields)
+                prov_set = _provenance_set_clause("child")
                 await session.run(
                     f"""
-                    MATCH (parent {{uid: $parent_uid}})
+                    MATCH (parent:{parent_label} {{uid: $parent_uid}})
                     MERGE (child:ModelInstance {{uid: $child_uid}})
-                    ON CREATE SET child.model_class = $model_class, {key_props_set}
-                    ON MATCH  SET {key_props_set}
+                    ON CREATE SET child.model_class = $model_class, {key_props_set}, {prov_set}
+                    ON MATCH  SET {key_props_set}, {prov_set}
                     MERGE (parent)-[:`{rel_name}`]->(child)
                     """,
                     parent_uid=parent_uid,
                     child_uid=child_uid,
                     model_class=type(value).__name__,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
                     **key_fields,
                 )
             else:
@@ -410,16 +523,22 @@ async def _write_model_fields(
                 child_uid = uuid.uuid4().hex[:16]
                 await session.run(
                     f"""
-                    MATCH (parent {{uid: $parent_uid}})
+                    MATCH (parent:{parent_label} {{uid: $parent_uid}})
                     CREATE (child:ModelInstance {{
                         uid:         $child_uid,
-                        model_class: $model_class
+                        model_class: $model_class,
+                        tenant_id:   $tenant_id,
+                        created_by_user_ids: CASE WHEN $created_by_user_id IS NULL THEN [] ELSE [$created_by_user_id] END,
+                        job_ids:             CASE WHEN $job_id IS NULL THEN [] ELSE [$job_id] END
                     }})
                     CREATE (parent)-[:`{rel_name}`]->(child)
                     """,
                     parent_uid=parent_uid,
                     child_uid=child_uid,
                     model_class=type(value).__name__,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
                 )
             await _write_model_fields(
                 session=session,
@@ -429,6 +548,9 @@ async def _write_model_fields(
                 field_path_prefix=field_path,
                 entity_nodes=entity_nodes,
                 depth=depth + 1,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
             continue
 
@@ -444,30 +566,37 @@ async def _write_model_fields(
                     key_fields = _get_instance_key_fields(item)
                     rel_name = f"HAS_{_to_rel_name(field_name)}"
                     if key_fields:
-                        child_uid = _make_instance_uid(type(item).__name__, key_fields)
+                        child_uid = _make_instance_uid(type(item).__name__, key_fields, tenant_id)
                         key_props_set = ", ".join(f"child.`{k}` = ${k}" for k in key_fields)
+                        prov_set = _provenance_set_clause("child")
                         await session.run(
                             f"""
-                            MATCH (parent {{uid: $parent_uid}})
+                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
                             MERGE (child:ModelInstance {{uid: $child_uid}})
-                            ON CREATE SET child.model_class = $model_class, {key_props_set}
-                            ON MATCH  SET {key_props_set}
+                            ON CREATE SET child.model_class = $model_class, {key_props_set}, {prov_set}
+                            ON MATCH  SET {key_props_set}, {prov_set}
                             MERGE (parent)-[:`{rel_name}` {{index: $idx}}]->(child)
                             """,
                             parent_uid=parent_uid,
                             child_uid=child_uid,
                             model_class=type(item).__name__,
                             idx=i,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
                             **key_fields,
                         )
                     else:
                         child_uid = uuid.uuid4().hex[:16]
                         await session.run(
                             f"""
-                            MATCH (parent {{uid: $parent_uid}})
+                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
                             CREATE (child:ModelInstance {{
                                 uid:         $child_uid,
-                                model_class: $model_class
+                                model_class: $model_class,
+                                tenant_id:   $tenant_id,
+                                created_by_user_ids: CASE WHEN $created_by_user_id IS NULL THEN [] ELSE [$created_by_user_id] END,
+                                job_ids:             CASE WHEN $job_id IS NULL THEN [] ELSE [$job_id] END
                             }})
                             CREATE (parent)-[:`{rel_name}` {{index: $idx}}]->(child)
                             """,
@@ -475,6 +604,9 @@ async def _write_model_fields(
                             child_uid=child_uid,
                             model_class=type(item).__name__,
                             idx=i,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
                         )
                     await _write_model_fields(
                         session=session,
@@ -484,17 +616,27 @@ async def _write_model_fields(
                         field_path_prefix=item_path,
                         entity_nodes=entity_nodes,
                         depth=depth + 1,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
                         list_index=i,
                     )
                 else:
                     if isinstance(item, str) and entity_label:
                         # list[str] with entity_label
-                        le_uid = await _merge_labeled_entity(session, entity_label, str(item))
+                        le_uid = await _merge_labeled_entity(
+                            session,
+                            entity_label,
+                            str(item),
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
+                        )
                         await session.run(
-                            """
-                            MATCH (parent {uid: $parent_uid})
-                            MATCH (le:LabeledEntity {uid: $le_uid})
-                            MERGE (parent)-[:REFERENCES {field_name: $field_name, list_index: $idx}]->(le)
+                            f"""
+                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
+                            MATCH (le:LabeledEntity {{uid: $le_uid}})
+                            MERGE (parent)-[:REFERENCES {{field_name: $field_name, list_index: $idx}}]->(le)
                             """,
                             parent_uid=parent_uid,
                             le_uid=le_uid,
@@ -518,12 +660,19 @@ async def _write_model_fields(
         # ── Case: scalar with entity_label ────────────────────────────────
         # Se guarda tanto como referencia y como propiedad si tiene label.
         if entity_label and isinstance(value, (str, int, float, bool)):
-            le_uid = await _merge_labeled_entity(session, entity_label, str(value))
+            le_uid = await _merge_labeled_entity(
+                session,
+                entity_label,
+                str(value),
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             await session.run(
-                """
-                MATCH (parent {uid: $parent_uid})
-                MATCH (le:LabeledEntity {uid: $le_uid})
-                MERGE (parent)-[:REFERENCES {field_name: $field_name}]->(le)
+                f"""
+                MATCH (parent:{parent_label} {{uid: $parent_uid}})
+                MATCH (le:LabeledEntity {{uid: $le_uid}})
+                MERGE (parent)-[:REFERENCES {{field_name: $field_name}}]->(le)
                 """,
                 parent_uid=parent_uid,
                 le_uid=le_uid,
@@ -547,33 +696,58 @@ async def _write_model_fields(
         session=session,
         instance=instance,
         src_mi_uid=parent_uid,
+        src_label=parent_label,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
 
     # Batch-SET all scalar properties on the parent node
     if scalar_props:
         set_clause = ", ".join(f"parent.`{k}` = ${k}" for k in scalar_props)
         await session.run(
-            f"MATCH (parent {{uid: $parent_uid}}) SET {set_clause}",
+            f"MATCH (parent:{parent_label} {{uid: $parent_uid}}) SET {set_clause}",
             parent_uid=parent_uid,
             **scalar_props,
         )
 
 
-async def _merge_labeled_entity(session, label: str, value: str) -> str:
+async def _merge_labeled_entity(
+    session,
+    label: str,
+    value: str,
+    *,
+    tenant_id: str = PUBLIC_TENANT,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
+) -> str:
     """
     MERGE a :LabeledEntity node with the given label and value.
-    Returns the uid of the node.
+
+    ``tenant_id`` is folded into the ``uid`` (see :func:`make_instance_uid` for
+    the rationale) so entities never merge across tenants; the node's
+    ``(label, normalized_value)`` uniqueness is therefore only enforced
+    *within* a tenant. Returns the uid of the node.
     """
     normalized = _normalize(value)
-    uid = _make_uid("le", label, normalized)
-    _le_params = dict(label=label, normalized_value=normalized, uid=uid, value=value)
+    uid = _make_uid("le", tenant_id, label, normalized)
+    prov_set = _provenance_set_clause("le")
+    _le_params = dict(
+        label=label,
+        normalized_value=normalized,
+        uid=uid,
+        value=value,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
+    )
     await with_neo4j_retry(
         lambda: session.run(
-            """
-        MERGE (le:LabeledEntity {label: $label, normalized_value: $normalized_value})
-        ON CREATE SET le.uid   = $uid,
-                      le.value = $value
-        ON MATCH  SET le.uid   = $uid
+            f"""
+        MERGE (le:LabeledEntity {{uid: $uid}})
+        ON CREATE SET le.label = $label, le.normalized_value = $normalized_value,
+                      le.value = $value, {prov_set}
+        ON MATCH  SET {prov_set}
         """,
             **_le_params,
         )
@@ -656,6 +830,11 @@ async def _apply_instance_relationships(
     session,
     instance: BaseModel,
     src_mi_uid: str,
+    *,
+    src_label: str = "ModelInstance",
+    tenant_id: str = PUBLIC_TENANT,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """
     Level 3 — Instance Key Relationships.
@@ -679,7 +858,10 @@ async def _apply_instance_relationships(
     src_mi_uid:
         UID of the ModelInstance (or ExtractionResult) node that *owns* this
         instance — it becomes the source of the typed relationship.
+    src_label:
+        Label of that node (``"ModelInstance"`` or ``"ExtractionResult"``).
     """
+    _check_parent_label(src_label)
     if not hasattr(instance, "model_fields"):
         return
 
@@ -752,21 +934,25 @@ async def _apply_instance_relationships(
                     **fixed_key_fields,
                     fanout_remote_field: _normalize(str(item)),
                 }
-                tgt_uid = _make_instance_uid(target_model, tgt_key_fields)
+                tgt_uid = _make_instance_uid(target_model, tgt_key_fields, tenant_id)
 
                 # MERGE del nodo target (shell con solo las keys si es nuevo)
                 key_set = ", ".join(f"tgt.`{k}` = ${k}" for k in tgt_key_fields)
+                prov_set = _provenance_set_clause("tgt")
                 merge_params: dict = {
                     "tgt_uid": tgt_uid,
                     "model_class": target_model,
+                    "tenant_id": tenant_id,
+                    "created_by_user_id": created_by_user_id,
+                    "job_id": job_id,
                     **tgt_key_fields,
                 }
                 await with_neo4j_retry(
-                    lambda p=merge_params, ks=key_set: session.run(
+                    lambda p=merge_params, ks=key_set, ps=prov_set: session.run(
                         f"""
                     MERGE (tgt:ModelInstance {{uid: $tgt_uid}})
-                    ON CREATE SET tgt.model_class = $model_class, {ks}
-                    ON MATCH  SET {ks}
+                    ON CREATE SET tgt.model_class = $model_class, {ks}, {ps}
+                    ON MATCH  SET {ks}, {ps}
                     """,
                         **p,
                     )
@@ -777,7 +963,7 @@ async def _apply_instance_relationships(
                 await with_neo4j_retry(
                     lambda p=rel_params: session.run(
                         f"""
-                    MATCH (src {{uid: $src_uid}})
+                    MATCH (src:{src_label} {{uid: $src_uid}})
                     MATCH (tgt:ModelInstance {{uid: $tgt_uid}})
                     MERGE (src)-[:`{rel_type}`]->(tgt)
                     """,
@@ -856,8 +1042,9 @@ async def write_triple_subgraph(
       (:ExtractionResult)-[:HAS_ENTITY]->(:Entity {value, normalized_value, uid})
       (:Entity {subject})-[:NORMALIZED_PRED {predicate_raw}]->(:Entity {object})
 
-    Entity nodes are global singletons (MERGEd by normalized_value) — they are
-    reused across extractions for the same canonical value. The ExtractionResult
+    Entity nodes are per-tenant singletons (MERGEd by uid = hash of tenant_id +
+    normalized_value) — they are reused across extractions of the same tenant
+    for the same canonical value, never across tenants. The ExtractionResult
     and its HAS_ENTITY relationships are re-created fresh on each run (idempotent
     via DELETE of the old ExtractionResult).
 
@@ -883,18 +1070,25 @@ async def write_triple_subgraph(
     triple_items = getattr(triple_instance, "triples", None) or []
     cfg = get_config()
     async with driver.session(database=cfg.neo4j_database) as session:
-        # ── Guard: verify StructureNode exists ────────────────────────────
+        # ── Guard: verify StructureNode exists, read its provenance ───────
+        # (see write_extraction_subgraph for why provenance is read back here)
         result = await session.run(
-            "MATCH (n:StructureNode {id: $nid}) RETURN count(n) AS cnt",
+            "MATCH (n:StructureNode {id: $nid}) "
+            "RETURN count(n) AS cnt, n.tenant_id AS tenant_id, "
+            "n.created_by_user_id AS created_by_user_id, n.job_id AS job_id",
             nid=node_full_id,
         )
-        cnt = (await result.single())["cnt"]
+        rec = await result.single()
+        cnt = rec["cnt"] if rec else 0
         if cnt == 0:
             raise RuntimeError(f"write_triple_subgraph: StructureNode not found: {node_full_id!r}")
+        tenant_id = _require_stored_tenant(rec["tenant_id"], node_full_id)
+        created_by_user_id = rec["created_by_user_id"]
+        job_id = rec["job_id"]
 
         # ── Idempotency: delete stale ExtractionResult ────────────────────
         # DETACH DELETE removes HAS_EXTRACTION and HAS_ENTITY relationships
-        # but leaves :Entity nodes intact (they are shared global singletons).
+        # but leaves :Entity nodes intact (they are deduplicated within a tenant).
         await session.run(
             """
             MATCH (n:StructureNode {id: $nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
@@ -912,7 +1106,10 @@ async def write_triple_subgraph(
                 node_full_id:  $nid,
                 document_name: $doc_name,
                 model_class:   'Triple',
-                timestamp:     $timestamp
+                timestamp:     $timestamp,
+                tenant_id:            $tenant_id,
+                created_by_user_id:   $created_by_user_id,
+                job_id:               $job_id
             })
             CREATE (n)-[:HAS_EXTRACTION]->(er)
             """,
@@ -920,6 +1117,9 @@ async def write_triple_subgraph(
             uid=extraction_uid,
             doc_name=document_name,
             timestamp=timestamp,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
 
         # ── Process each TripleItem ────────────────────────────────────────
@@ -939,34 +1139,51 @@ async def write_triple_subgraph(
                 )
                 continue
 
-            # Normalize and build UIDs
+            # Normalize and build UIDs (tenant folded in — see make_instance_uid)
             subj_norm = _normalize(subject_val)
             obj_norm = _normalize(object_val)
-            subj_uid = _make_uid("entity", subj_norm)
-            obj_uid = _make_uid("entity", obj_norm)
+            subj_uid = _make_uid("entity", tenant_id, subj_norm)
+            obj_uid = _make_uid("entity", tenant_id, obj_norm)
             rel_type = _normalize_rel_type(predicate_val)
+            entity_prov_set = _provenance_set_clause("e")
 
             # MERGE subject :Entity node
-            _subj_params = dict(normalized_value=subj_norm, uid=subj_uid, value=subject_val)
+            _subj_params = dict(
+                normalized_value=subj_norm,
+                uid=subj_uid,
+                value=subject_val,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             await with_neo4j_retry(
                 lambda: session.run(
-                    """
-                MERGE (e:Entity {uid: $uid})
+                    f"""
+                MERGE (e:Entity {{uid: $uid}})
                 ON CREATE SET e.normalized_value = $normalized_value,
-                              e.value = $value
+                              e.value = $value, {entity_prov_set}
+                ON MATCH  SET {entity_prov_set}
                 """,
                     **_subj_params,
                 )
             )
 
             # MERGE object :Entity node
-            _obj_params = dict(normalized_value=obj_norm, uid=obj_uid, value=object_val)
+            _obj_params = dict(
+                normalized_value=obj_norm,
+                uid=obj_uid,
+                value=object_val,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+            )
             await with_neo4j_retry(
                 lambda: session.run(
-                    """
-                MERGE (e:Entity {uid: $uid})
+                    f"""
+                MERGE (e:Entity {{uid: $uid}})
                 ON CREATE SET e.normalized_value = $normalized_value,
-                              e.value = $value
+                              e.value = $value, {entity_prov_set}
+                ON MATCH  SET {entity_prov_set}
                 """,
                     **_obj_params,
                 )

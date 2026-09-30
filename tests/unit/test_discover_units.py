@@ -15,7 +15,7 @@ derivation logic they must match exactly:
     ingestion_json  -> scinr.newton.ingest.loader._read_doc_path().
 
 The Neo4j-backed branch (document_names) is exercised with
-resolve_leaf_document_names monkeypatched — no real Neo4j connection.
+resolve_leaf_documents monkeypatched — no real Neo4j connection.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from scinr.newton.pipeline_units import (
     _discover_units,
     build_all_paths_for_versioning,
 )
+from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
 # raw_file
@@ -214,22 +215,27 @@ def test_discover_ingestion_json_units_missing_dir_raises(tmp_path):
 @pytest.mark.asyncio
 async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
     """A folder name resolving to 3 leaves must yield 3 units; two input
-    names that share a leaf must not produce a duplicate unit for it.
+    names that share a leaf must not produce a duplicate unit for it. Names
+    are resolved within the run's tenant, and each unit carries the leaf's
+    path (the stage selector) plus its name.
     """
+    seen_tenants = []
 
-    def fake_resolve(driver, document_name):
+    def fake_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
+        seen_tenants.append(tenant_id)
         if document_name == "FolderDoc":
-            return ["LeafA", "LeafB", "LeafC"]
+            return [LeafDocument(n, f"Folder/{n}") for n in ("LeafA", "LeafB", "LeafC")]
         if document_name == "OtherDoc":
-            return ["LeafC", "LeafD"]  # LeafC overlaps with FolderDoc's result
-        return [document_name]
+            # LeafC overlaps with FolderDoc's result
+            return [LeafDocument(n, f"Folder/{n}") for n in ("LeafC", "LeafD")]
+        return [LeafDocument(document_name, document_name)]
 
     class _FakeDriver:
         def close(self):
             pass
 
     monkeypatch.setattr(
-        "scinr.newton.utils.document_resolver.resolve_leaf_document_names",
+        "scinr.newton.utils.document_resolver.resolve_leaf_documents",
         fake_resolve,
     )
     monkeypatch.setattr(
@@ -237,10 +243,12 @@ async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
         lambda: _FakeDriver(),
     )
 
-    units = await _discover_pre_ingested_units(["FolderDoc", "OtherDoc"])
+    units = await _discover_pre_ingested_units(["FolderDoc", "OtherDoc"], "acme")
 
     doc_paths = [u.doc_path for u in units]
-    assert doc_paths == ["LeafA", "LeafB", "LeafC", "LeafD"]  # dedup, order preserved
+    assert doc_paths == ["Folder/LeafA", "Folder/LeafB", "Folder/LeafC", "Folder/LeafD"]
+    assert [u.document_name_hint for u in units] == ["LeafA", "LeafB", "LeafC", "LeafD"]
+    assert seen_tenants == ["acme", "acme"]
     assert all(u.kind == "pre_ingested" for u in units)
     assert all(u.source_path is None for u in units)
 
@@ -254,15 +262,15 @@ async def test_discover_pre_ingested_units_closes_driver(monkeypatch):
             closed["value"] = True
 
     monkeypatch.setattr(
-        "scinr.newton.utils.document_resolver.resolve_leaf_document_names",
-        lambda driver, name: [name],
+        "scinr.newton.utils.document_resolver.resolve_leaf_documents",
+        lambda driver, *, tenant_id, document_name: [LeafDocument(document_name, document_name)],
     )
     monkeypatch.setattr(
         "scinr.newton.ingest.config.get_driver",
         lambda: _FakeDriver(),
     )
 
-    await _discover_pre_ingested_units(["SomeDoc"])
+    await _discover_pre_ingested_units(["SomeDoc"], None)
 
     assert closed["value"] is True
 
@@ -277,15 +285,23 @@ def test_discover_units_document_names_dir_reads_names(tmp_path):
         json.dumps({"document_name": "DocA"}), encoding="utf-8"
     )
     (tmp_path / "extract-b.json").write_text(
-        json.dumps({"document_name": "DocB"}), encoding="utf-8"
+        json.dumps({"document_name": "DocB", "doc_path": "Folder/DocB"}), encoding="utf-8"
+    )
+    # Same name, different folder: a different document, not a duplicate.
+    (tmp_path / "extract-c.json").write_text(
+        json.dumps({"document_name": "DocB", "doc_path": "Other/DocB"}), encoding="utf-8"
     )
 
     import asyncio
 
     units = asyncio.run(_discover_units(document_names_dir=str(tmp_path)))
 
-    doc_paths = sorted(u.doc_path for u in units)
-    assert doc_paths == ["DocA", "DocB"]
+    # doc_path falls back to document_name, as ingestion does
+    assert sorted((u.doc_path, u.document_name_hint) for u in units) == [
+        ("DocA", "DocA"),
+        ("Folder/DocB", "DocB"),
+        ("Other/DocB", "DocB"),
+    ]
     assert all(u.kind == "pre_ingested" for u in units)
     assert all(u.source_path is None for u in units)
 

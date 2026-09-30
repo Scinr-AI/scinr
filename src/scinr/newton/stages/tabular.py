@@ -14,6 +14,7 @@ from scinr.newton.ingest.config import get_async_driver, get_driver
 from scinr.newton.ingest.schema import setup_schema
 from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.tabular.agent import decide_content_type
+from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,12 @@ async def run_tabular_pipeline(
     tabular_delimiter:
         Field delimiter for CSV files. When None, uses the default
         delimiter of the tabular agent.
-    tenant_id, created_by_user_id, job_id:
+    tenant_id:
+        Tenant owning every document this pipeline creates (``None`` = public).
+        Part of the :Document identity: versions are resolved within this
+        tenant only, and another tenant's document at the same path is never
+        touched.
+    created_by_user_id, job_id:
         Optional caller-supplied provenance metadata written verbatim onto
         every :Document node this pipeline creates (leaf tabular documents and
         their ancestor folder-parent nodes). Always SET (null when omitted).
@@ -73,7 +79,7 @@ async def run_tabular_pipeline(
     input_path = Path(input_raw)
 
     if not input_path.exists():
-        raise FileNotFoundError(f"--input-raw path not found: {input_raw}")
+        raise FileNotFoundError(f"input_raw path not found: {input_raw}")
 
     tabular_files = sorted(
         f for f in input_path.rglob("*")
@@ -138,17 +144,21 @@ async def run_tabular_pipeline(
         cfg = get_config()
         with driver.session(database=cfg.neo4j_database) as session:
             logger.info("Verifying previous documents")
+            # Versions are numbered per tenant: only this run's tenant's
+            # documents count (tenant_key: None -> the public scope).
             if update_mode:
                 result = session.run(
-                    "MATCH (d:Document {latest: true}) WHERE d.path IN $paths "
+                    "MATCH (d:Document {latest: true}) "
+                    "WHERE d.tenant_id = $tenant_id AND d.path IN $paths "
                     "RETURN max(d.version) AS max_version",
+                    tenant_id=tenant_key(tenant_id),
                     paths=all_paths,
                 )
             else:
-                
                 result = session.run(
-                    "MATCH (d:Document) WHERE d.path IN $paths "
+                    "MATCH (d:Document) WHERE d.tenant_id = $tenant_id AND d.path IN $paths "
                     "RETURN max(d.version) AS max_version",
+                    tenant_id=tenant_key(tenant_id),
                     paths=all_paths,
                 )
             record = result.single()
@@ -185,6 +195,9 @@ async def run_tabular_pipeline(
                                     filename=f.name,
                                     content_type=_content_type,
                                     folder_path=folder_path_str,
+                                    tenant_id=tenant_id,
+                                    created_by_user_id=created_by_user_id,
+                                    job_id=job_id,
                                 )
                             except Exception as store_exc:
                                 logger.warning(

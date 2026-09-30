@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from scinr.newton.converters.base import ConversionError, IntermediateDocument, IntermediatePage
+from scinr.newton.utils.redaction import redact_uri
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ class ApiXmlConverter:
             If the HTTP request fails or the XML cannot be parsed.
         """
         logger.info(
-            "Fetching XML API '%s' from %s", self._config.document_name, url
+            "Fetching XML API '%s' from %s", self._config.document_name, redact_uri(url)
         )
         elements = self._fetch_all_items(url, soap_body)
         logger.info(
@@ -324,7 +325,7 @@ class ApiXmlConverter:
                 )
             except httpx.RequestError as exc:
                 raise ConversionError(
-                    f"Network error POSTing to {url}: {exc}"
+                    f"Network error POSTing to {redact_uri(url)}: {exc}"
                 ) from exc
         else:
             request_headers = {
@@ -339,12 +340,12 @@ class ApiXmlConverter:
                 )
             except httpx.RequestError as exc:
                 raise ConversionError(
-                    f"Network error fetching {url}: {exc}"
+                    f"Network error fetching {redact_uri(url)}: {exc}"
                 ) from exc
 
         if response.is_error:
             raise ConversionError(
-                f"HTTP {response.status_code} from {url}: {response.text}"
+                f"HTTP {response.status_code} from {redact_uri(url)}: {response.text}"
             )
 
         return response.content

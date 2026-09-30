@@ -11,6 +11,7 @@ from scinr.newton.exceptions import (
     ConfigurationError,
     ConversionError,
     ExtractionError,
+    FreezeError,
     GraphConnectionError,
     IngestionError,
     ModelError,
@@ -20,7 +21,9 @@ from scinr.newton.exceptions import (
     StorageError,
     UnsupportedOperationError,
 )
-from scinr.newton.ingest.deletion import delete_document
+from scinr.newton.ingest.deletion import collect_orphans, delete_document
+from scinr.newton.ingest.freeze import export_document_snapshot, freeze_document
+from scinr.newton.ingest.restore import restore_document
 from scinr.newton.navigation import (
     GraphNavigator,
     get_graph_navigator,
@@ -30,7 +33,10 @@ from scinr.newton.pipeline import run_pipeline
 from scinr.newton.results import (
     DeletionResult,
     DocumentResult,
+    FreezeResult,
+    OrphanCollectionResult,
     PipelineResult,
+    RestoreResult,
     StageResult,
 )
 from scinr.newton.stages import (
@@ -63,11 +69,15 @@ __all__ = [
     "NavigationError",
     "GraphConnectionError",
     "UnsupportedOperationError",
+    "FreezeError",
     # Result dataclasses
     "DocumentResult",
     "StageResult",
     "PipelineResult",
     "DeletionResult",
+    "OrphanCollectionResult",
+    "FreezeResult",
+    "RestoreResult",
     # Unified pipeline
     "run_pipeline",
     # Individual stage functions
@@ -79,6 +89,11 @@ __all__ = [
     "run_tabular_pipeline",
     # Document deletion
     "delete_document",
+    "collect_orphans",
+    # Document freezing
+    "freeze_document",
+    "restore_document",
+    "export_document_snapshot",
     # Graph navigation (read-only)
     "get_graph_navigator",
     "graph_navigator",

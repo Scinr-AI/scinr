@@ -10,6 +10,7 @@ from neo4j import Driver
 from scinr.newton.config import get_config
 from scinr.newton.tabular.graph import tabular_graph
 from scinr.newton.tabular.state import TabularState
+from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,12 @@ async def run_tabular_agent(
     resolved_version : Pre-computed batch version.
     update_mode : If True, existing Table/Row subgraph is wiped before re-inserting.
     raw_file_id : MongoDB ObjectId string for the stored raw file, or "" when no storage backend is configured.
-    tenant_id, created_by_user_id, job_id : Optional caller-supplied provenance
-        metadata written verbatim onto the leaf :Document node and every ancestor
+    tenant_id : Optional caller-supplied tenant (``None`` = public document).
+        Normalized here, once, with :func:`~scinr.newton.utils.tenancy.tenant_key`;
+        the stored key is part of the :Document key and is carried in the graph
+        state down to every Table/Row node.
+    created_by_user_id, job_id : Optional caller-supplied provenance metadata
+        written verbatim onto the leaf :Document node and every ancestor
         folder-parent node (always SET; null when omitted).
     """
     from scinr.newton.ingest.nodes import (
@@ -52,6 +57,8 @@ async def run_tabular_agent(
         insert_folder_document_hierarchy,
         link_leaf_to_folder,
     )
+
+    tenant = tenant_key(tenant_id)
 
     # Step 1: create Document node + folder hierarchy
     cfg = get_config()
@@ -64,7 +71,7 @@ async def run_tabular_agent(
                         tx,
                         folder_path,
                         resolved_version,
-                        tenant_id=tenant_id,
+                        tenant_id=tenant,
                         created_by_user_id=created_by_user_id,
                         job_id=job_id,
                     )
@@ -76,12 +83,12 @@ async def run_tabular_agent(
                     raw_file_id,
                     is_folder=False,
                     context_instructions=None,
-                    tenant_id=tenant_id,
+                    tenant_id=tenant,
                     created_by_user_id=created_by_user_id,
                     job_id=job_id,
                 )
-                handle_versioning(tx, doc_path, resolved_version)
-                link_leaf_to_folder(tx, doc_path, resolved_version)
+                handle_versioning(tx, doc_path, resolved_version, tenant)
+                link_leaf_to_folder(tx, doc_path, resolved_version, tenant)
                 tx.commit()
                 logger.info(
                     "tabular agent: Document node created for '%s' (v%d)",
@@ -102,6 +109,9 @@ async def run_tabular_agent(
         "file_path": str(file_path),
         "document_name": document_name,
         "doc_path": doc_path,
+        "tenant_id": tenant,
+        "created_by_user_id": created_by_user_id,
+        "job_id": job_id,
         "update_mode": update_mode,
         "resolved_version": resolved_version,
         "raw_file_id": raw_file_id,

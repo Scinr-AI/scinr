@@ -56,6 +56,10 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` | Collection name for raw file metadata. |
 | `MONGODB_PAGES_COLLECTION` | `converted_pages` | Collection name for converted document pages. |
 | `MONGODB_GRIDFS_BUCKET` | `raw_binaries` | GridFS bucket name for binary file storage. |
+| `MONGODB_ENSURE_INDEXES` | `true` | Create the MongoDB indexes automatically on the first `get_storage()` call of the process. Set to `false` when the database user lacks the `createIndex` privilege and operations manage the indexes. |
+| `FREEZE_BACKEND` | *(inherits `STORAGE_BACKEND`)* | Backend for document snapshots (`freeze_document()`, `restore_document()`): `none`, `mongodb` or `custom`. See [Document Freezing](user-guides/document-freezing.md). |
+| `MONGODB_FROZEN_COLLECTION` | `frozen_documents` | Collection for snapshot metadata. |
+| `MONGODB_FROZEN_GRIDFS_BUCKET` | `frozen_snapshots` | GridFS bucket for snapshot files. |
 
 ### PDF / Mistral OCR
 
@@ -129,7 +133,12 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
+| `mongodb_ensure_indexes` | `bool \| None` | Create the MongoDB indexes automatically (default `True`). `False` skips it, for users without the `createIndex` privilege. |
 | `custom_storage` | `tuple \| None` | Custom storage backend tuple (driver, connection). |
+| `freeze_backend` | `str \| None` | Snapshot backend: `none`, `mongodb` or `custom`. Unset → `FREEZE_BACKEND`, else the resolved `storage_backend`. |
+| `mongodb_frozen_collection` | `str \| None` | Collection for snapshot metadata (default `frozen_documents`). |
+| `mongodb_frozen_gridfs_bucket` | `str \| None` | GridFS bucket for snapshot files (default `frozen_snapshots`). |
+| `custom_freeze_storage` | `FreezeRepository \| None` | Snapshot repository instance when `freeze_backend='custom'`. |
 
 ### Converter Parameters
 
@@ -402,7 +411,12 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **MongoDB Raw Files** | `mongodb_raw_files_collection` | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` |
 | **MongoDB Pages** | `mongodb_pages_collection` | `MONGODB_PAGES_COLLECTION` | `converted_pages` |
 | **MongoDB GridFS** | `mongodb_gridfs_bucket` | `MONGODB_GRIDFS_BUCKET` | `raw_binaries` |
+| **MongoDB Ensure Indexes** | `mongodb_ensure_indexes` | `MONGODB_ENSURE_INDEXES` | `True` |
 | **Custom Storage** | `custom_storage` | *(none)* | `None` |
+| **Freeze Backend** | `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` |
+| **MongoDB Frozen Collection** | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `frozen_documents` |
+| **MongoDB Frozen GridFS** | `mongodb_frozen_gridfs_bucket` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `frozen_snapshots` |
+| **Custom Freeze Storage** | `custom_freeze_storage` | *(none)* | `None` |
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
 | **OCR Max Pages** | `mistral_ocr_safe_max_pages` | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` |
 | **OCR Max Bytes** | `mistral_ocr_safe_max_bytes` | `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` |

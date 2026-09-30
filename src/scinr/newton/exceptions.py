@@ -56,6 +56,16 @@ class StorageError(ScinrError):
     """
 
 
+class FreezeError(ScinrError):
+    """
+    Raised when a document cannot be frozen, restored or snapshotted.
+
+    Examples: freezing a document that is already frozen, restoring a document
+    that is not frozen, a snapshot missing from the freeze backend, or a
+    snapshot whose tenant does not match the document it is restored into.
+    """
+
+
 class ConversionError(ScinrError):
     """
     Raised when a file converter fails to process a source file.
@@ -92,4 +102,17 @@ class UnsupportedOperationError(NavigationError):
 
     The canonical case is calling ``execute_raw`` / ``execute_raw_one`` on a
     backend that exposes no raw-query path.
+    """
+
+
+class ScopeError(NavigationError, StorageError):
+    """
+    Raised for an invalid read scope (``tenant_id`` / ``include_public`` /
+    ``created_by_user_id`` / ``job_id``): an empty ``tenant_id`` or an empty
+    list filter.
+
+    The same scope is accepted by the graph navigation API and by the storage
+    repositories, so it is both a :class:`NavigationError` and a
+    :class:`StorageError` — callers of either layer can keep catching their
+    own error type.
     """

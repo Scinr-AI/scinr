@@ -78,6 +78,7 @@ nav:
       - Neo4j Graph Storage: user-guides/neo4j-graph.md
       - Graph Navigation: user-guides/graph-navigation.md
       - Document Deletion: user-guides/document-deletion.md
+      - Document Freezing: user-guides/document-freezing.md
       - Storage Backends: user-guides/storage-backends.md
       - Performance Tuning: user-guides/performance-tuning.md
   - API Reference:
@@ -91,5 +92,6 @@ nav:
       - Navigation: api/navigation.md
       - Utilities: api/utilities.md
       - Exceptions: api/exceptions.md
-      - Deletion (delete_document): api/deletion.md
+      - Deletion (delete_document / collect_orphans): api/deletion.md
+      - Freezing (freeze_document / restore_document): api/freezing.md
       - Results: api/results.md

@@ -17,6 +17,11 @@ Usage:
 When *document_name* refers to a folder document (one that has children via
 IS_COMPOSED_OF in Neo4j), all **leaf** descendants are processed sequentially.
 A failure in one leaf is logged and the remaining leaves are still processed.
+
+Documents are always selected within one tenant (``tenant_id``, ``None`` =
+public): by ``doc_path`` when given, otherwise by ``document_name``. Each leaf
+is then processed by its ``(tenant_id, path)`` — a name never selects nodes of
+another document, or of another tenant.
 """
 from __future__ import annotations
 
@@ -37,6 +42,9 @@ async def _run_annotation_for_single_document(
     document_name: str,
     only_unannotated: bool = False,
     context_instructions_override: str | None = None,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> dict:
     """
     Run the annotation pipeline for exactly one document.
@@ -45,7 +53,9 @@ async def _run_annotation_for_single_document(
     concurrently, bounded by the global LLM_CONCURRENCY semaphore.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j.
+        document_name: Document display name (provenance on the decisions).
+        tenant_id: Owner of the document (``None`` = public).
+        doc_path: Path of the document — with *tenant_id*, the selector.
         only_unannotated: When True, only process nodes that do NOT already have
             a :HAS_MODEL_DECISION relationship.
         context_instructions_override: When provided, use this context string
@@ -54,11 +64,16 @@ async def _run_annotation_for_single_document(
     Returns:
         Final state dict with keys: document_name, nodes_to_annotate, errors.
     """
-    logger.info("Starting annotation agent for document: %r", document_name)
+    logger.info(
+        "Starting annotation agent for document: %r (path=%r, tenant=%r)",
+        document_name, doc_path, tenant_id,
+    )
     final_state = await _run_annotation_parallel(
         document_name,
         only_unannotated=only_unannotated,
         context_instructions_override=context_instructions_override,
+        tenant_id=tenant_id,
+        doc_path=doc_path,
     )
 
     n_nodes = len(final_state.get("nodes_to_annotate", []))
@@ -78,6 +93,9 @@ async def _run_annotation_parallel(
     document_name: str,
     only_unannotated: bool = False,
     context_instructions_override: str | None = None,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
 ) -> dict:
     """Run annotation for a single document using intra-document parallelism.
 
@@ -87,17 +105,20 @@ async def _run_annotation_parallel(
     Parameters
     ----------
     document_name:
-        Neo4j Document.name.
+        Neo4j Document.name (provenance only).
     only_unannotated:
         When True, skip nodes that already have a :HAS_MODEL_DECISION relationship.
     context_instructions_override:
         When provided, use this context string instead of fetching
         context_instructions from Neo4j.
+    tenant_id, doc_path:
+        Select the latest :Document to annotate.
 
     Returns
     -------
     dict
-        Compatible with AnnotationState: keys document_name, nodes_to_annotate, errors.
+        Compatible with AnnotationState: keys document_name, doc_path,
+        nodes_to_annotate, errors.
     """
     from scinr.newton.annotation.neo4j_ops import (
         ensure_catalog_models_once,
@@ -113,11 +134,15 @@ async def _run_annotation_parallel(
     driver = get_async_driver()
     await ensure_catalog_models_once(driver)
     await ensure_theme_structure_once(driver, theme_registry)
-    nodes = await fetch_nodes_to_annotate(driver, document_name, only_unannotated=only_unannotated)
+    nodes = await fetch_nodes_to_annotate(
+        driver, tenant_id=tenant_id, doc_path=doc_path, only_unannotated=only_unannotated
+    )
     if context_instructions_override is not None:
         doc_context = context_instructions_override
     else:
-        doc_context = await fetch_document_context_instructions(driver, document_name)
+        doc_context = await fetch_document_context_instructions(
+            driver, tenant_id=tenant_id, doc_path=doc_path
+        )
 
     logger.info(
         "_run_annotation_parallel: %d nodes to annotate for document %r",
@@ -125,7 +150,12 @@ async def _run_annotation_parallel(
     )
 
     if not nodes:
-        return {"document_name": document_name, "nodes_to_annotate": nodes, "errors": []}
+        return {
+            "document_name": document_name,
+            "doc_path": doc_path,
+            "nodes_to_annotate": nodes,
+            "errors": [],
+        }
 
     semaphore = get_llm_semaphore()
     raw_results = await asyncio.gather(
@@ -151,6 +181,7 @@ async def _run_annotation_parallel(
     )
     return {
         "document_name": document_name,
+        "doc_path": doc_path,
         "nodes_to_annotate": nodes,
         "errors": errors,
     }
@@ -166,6 +197,9 @@ async def run_annotation_agent(
     parallel_docs: int = 1,
     only_unannotated: bool = False,
     context_instructions_override: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> dict:
     """
     Run the full annotation pipeline for a document (or folder) already ingested in Neo4j.
@@ -180,7 +214,9 @@ async def run_annotation_agent(
     the resulting AnnotationDecision subgraph back to Neo4j.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j.
+        document_name: The exact Document.name as stored in Neo4j. Selects the
+            root document(s) only when *doc_path* is not given (every latest
+            document of the tenant with that name); otherwise it is only a label.
         parallel_docs: Maximum number of leaf documents to annotate concurrently.
             Defaults to ``1`` (sequential, backward-compatible behaviour).
         only_unannotated: When True, only process StructureNodes that do NOT already
@@ -188,6 +224,9 @@ async def run_annotation_agent(
         context_instructions_override: When provided, use this context string instead
             of fetching context_instructions from Neo4j. Defaults to None (Neo4j
             fetch is used).
+        tenant_id: Owner of the document (``None`` = public). Only that
+            tenant's documents are read or written.
+        doc_path: Path of the root document (preferred selector).
 
     Returns:
         If a single document: the final AnnotationState dict.
@@ -206,29 +245,39 @@ async def run_annotation_agent(
 
     from scinr.newton.exceptions import PreconditionError
     from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
+    from scinr.newton.utils.document_resolver import (
+        latest_document_pattern,
+        resolve_leaf_documents_async,
+    )
+    doc_pattern, doc_params = latest_document_pattern(
+        "d", tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    )
     cfg = get_config()
     driver = get_async_driver()
     async with driver.session(database=cfg.neo4j_database) as _session:
-        _result = await _session.run(
-            "MATCH (d:Document {name: $name, latest: true}) RETURN count(d) AS n",
-            name=document_name,
-        )
+        _result = await _session.run(f"MATCH {doc_pattern} RETURN count(d) AS n", **doc_params)
         _pre_row = await _result.single()
     if _pre_row["n"] == 0:
         raise PreconditionError(
-            f"Document '{document_name}' not found in Neo4j (latest=true). "
-            f"Run run_ingestion() before run_annotation_agent()."
+            f"Document '{doc_path or document_name}' (tenant={tenant_id!r}) not found in "
+            f"Neo4j (latest=true). Run run_ingestion() before run_annotation_agent()."
         )
 
-    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
+    leaves = await resolve_leaf_documents_async(
+        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    )
+    leaf_names = [leaf.name for leaf in leaves]
 
     # Single document (no IS_COMPOSED_OF children): original behaviour
-    if len(leaf_names) == 1 and leaf_names[0] == document_name:
+    if len(leaves) == 1 and (
+        leaves[0].path == doc_path if doc_path is not None else leaves[0].name == document_name
+    ):
         return await _run_annotation_for_single_document(
-            document_name,
+            leaves[0].name,
             only_unannotated=only_unannotated,
             context_instructions_override=context_instructions_override,
+            tenant_id=tenant_id,
+            doc_path=leaves[0].path,
         )
 
     # Multiple leaf documents: process with bounded concurrency, accumulate results
@@ -238,24 +287,29 @@ async def run_annotation_agent(
 
     semaphore = asyncio.Semaphore(parallel_docs)
 
-    async def _run_leaf(leaf_name: str) -> dict:
+    async def _run_leaf(leaf) -> dict:
         async with semaphore:
-            logger.info("Processing leaf document %r (parent: %r)", leaf_name, document_name)
+            logger.info(
+                "Processing leaf document %r (path=%r, parent: %r)",
+                leaf.name, leaf.path, doc_path or document_name,
+            )
             return await _run_annotation_for_single_document(
-                leaf_name,
+                leaf.name,
                 only_unannotated=only_unannotated,
                 context_instructions_override=context_instructions_override,
+                tenant_id=tenant_id,
+                doc_path=leaf.path,
             )
 
     leaf_results = await asyncio.gather(
-        *[_run_leaf(name) for name in leaf_names],
+        *[_run_leaf(leaf) for leaf in leaves],
         return_exceptions=True,
     )
 
-    for leaf_name, result in zip(leaf_names, leaf_results):
+    for leaf, result in zip(leaves, leaf_results):
         if isinstance(result, Exception):
-            logger.error("Annotation failed for leaf document %r: %s", leaf_name, result)
-            all_errors.append(f"[{leaf_name}] {result}")
+            logger.error("Annotation failed for leaf document %r: %s", leaf.path, result)
+            all_errors.append(f"[{leaf.name}] {result}")
         else:
             results.append(result)
             all_errors.extend(result.get("errors", []))
@@ -283,6 +337,9 @@ def run_annotation_agent_sync(
     parallel_docs: int = 1,
     only_unannotated: bool = False,
     context_instructions_override: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
 ) -> dict:
     """Synchronous wrapper around run_annotation_agent."""
     return asyncio.run(
@@ -291,11 +348,19 @@ def run_annotation_agent_sync(
             parallel_docs=parallel_docs,
             only_unannotated=only_unannotated,
             context_instructions_override=context_instructions_override,
+            tenant_id=tenant_id,
+            doc_path=doc_path,
         )
     )
 
 
-async def run_manual_annotation(document_name: str, model_class: str) -> int:
+async def run_manual_annotation(
+    document_name: str,
+    model_class: str,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
+) -> int:
     """
     Manually assign a fixed ModelDecision to all StructureNodes with InfoUnits
     for the specified document (or all leaf descendants if it is a folder).
@@ -310,9 +375,12 @@ async def run_manual_annotation(document_name: str, model_class: str) -> int:
     continue processing.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j.
+        document_name: The exact Document.name as stored in Neo4j (root
+                       selector only when *doc_path* is not given).
         model_class:   CamelCase name of the Pydantic model class to assign.
                        Must exist in the model registry.
+        tenant_id:     Owner of the document (``None`` = public).
+        doc_path:      Path of the root document (preferred selector).
 
     Returns:
         Total number of StructureNodes updated across all processed documents.
@@ -333,122 +401,41 @@ async def run_manual_annotation(document_name: str, model_class: str) -> int:
 
     from scinr.newton.annotation.neo4j_ops import write_manual_annotation
     from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
+    from scinr.newton.utils.document_resolver import resolve_leaf_documents_async
 
     driver = get_async_driver()
-    leaf_names = await resolve_leaf_document_names_async(driver, document_name)
+    leaves = await resolve_leaf_documents_async(
+        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    )
     total_count = 0
-    for leaf_name in leaf_names:
+    for leaf in leaves:
         try:
-            count = await write_manual_annotation(driver, leaf_name, model_class)
+            count = await write_manual_annotation(
+                driver, leaf.name, model_class, tenant_id=tenant_id, doc_path=leaf.path
+            )
             total_count += count
             logger.info(
                 "Manual annotation: assigned %r to %d nodes in %r",
                 model_class,
                 count,
-                leaf_name,
+                leaf.path,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Manual annotation failed for leaf document %r: %s", leaf_name, exc
+                "Manual annotation failed for leaf document %r: %s", leaf.path, exc
             )
 
     return total_count
 
 
-def run_manual_annotation_sync(document_name: str, model_class: str) -> int:
+def run_manual_annotation_sync(
+    document_name: str,
+    model_class: str,
+    *,
+    tenant_id: str | None = None,
+    doc_path: str | None = None,
+) -> int:
     """Synchronous wrapper around run_manual_annotation."""
-    return asyncio.run(run_manual_annotation(document_name, model_class))
-
-
-# CLI entry point
-if __name__ == "__main__":
-    import argparse
-    from pathlib import Path
-
-    from scinr.newton.utils.logging_config import setup_logging
-    setup_logging(log_dir=Path("logs"))
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "scinr-ingest annotation agent — assigns extraction models to StructureNodes.\n"
-            "\n"
-            "By default, runs the LLM annotation agent. Use --manual to assign a fixed\n"
-            "model class to all nodes without invoking the LLM.\n"
-            "\n"
-            "If --document refers to a folder (a document with IS_COMPOSED_OF children),\n"
-            "all leaf descendants are processed automatically."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    return asyncio.run(
+        run_manual_annotation(document_name, model_class, tenant_id=tenant_id, doc_path=doc_path)
     )
-    parser.add_argument(
-        "--document",
-        required=True,
-        help="Exact Document.name as stored in Neo4j.",
-    )
-    parser.add_argument(
-        "--manual",
-        action="store_true",
-        default=False,
-        help=(
-            "Manual override mode: assign a fixed model class to all StructureNodes "
-            "instead of running the LLM agent. Requires --model."
-        ),
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        metavar="CLASS_NAME",
-        help=(
-            "Exact CamelCase model class name to assign (e.g. 'DrugProductComposition'). "
-            "Required when --manual is specified."
-        ),
-    )
-    parser.add_argument(
-        "--parallel-docs",
-        type=int,
-        default=1,
-        metavar="N",
-        help=(
-            "Maximum number of leaf documents to process concurrently. "
-            "Defaults to 1 (sequential)."
-        ),
-    )
-    parser.add_argument(
-        "--only-unannotated",
-        action="store_true",
-        default=False,
-        help=(
-            "Only process StructureNodes that do not already have a "
-            ":HAS_MODEL_DECISION relationship."
-        ),
-    )
-    args = parser.parse_args()
-
-    if args.manual and not args.model:
-        parser.error("--model is required when --manual is specified.")
-    if args.model and not args.manual:
-        logger.warning("--model is ignored without --manual; running LLM agent.")
-
-    if args.manual:
-        try:
-            count = run_manual_annotation_sync(args.document, args.model)
-            print(f"Assigned '{args.model}' to {count} nodes in '{args.document}'.")
-        except KeyError as exc:
-            raise SystemExit(f"error: {exc}") from exc
-    else:
-        result = run_annotation_agent_sync(
-            args.document,
-            parallel_docs=args.parallel_docs,
-            only_unannotated=args.only_unannotated,
-        )
-        errors = result.get("errors", [])
-        n_nodes = len(result.get("nodes_to_annotate", []))
-
-        logger.info("Annotation complete: %d nodes processed", n_nodes)
-        if errors:
-            logger.info("Non-fatal errors (%d):", len(errors))
-            for e in errors:
-                logger.info("  - %s", e)
-        else:
-            logger.info("No errors.")

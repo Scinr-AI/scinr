@@ -91,7 +91,7 @@ class TestFullSuccessRawFile:
         )
         monkeypatch.setattr("scinr.newton.converters.main.convert_one", mock_convert_one)
 
-        extracted_doc = SimpleNamespace(document_name="doc1")
+        extracted_doc = SimpleNamespace(document_name="doc1", doc_path="doc1")
         mock_extract_one_intermediate = AsyncMock(return_value=extracted_doc)
         monkeypatch.setattr(
             "scinr.newton.stages.extraction.extract_one_intermediate",
@@ -760,6 +760,7 @@ class TestArtifactsReleasedPerStage:
 
         class _Extracted:
             document_name = "doc1"
+            doc_path = "doc1"
 
         refs: dict[str, weakref.ref] = {}
         seen: dict[str, bool] = {}
@@ -820,3 +821,126 @@ class TestArtifactsReleasedPerStage:
             "intermediate_freed_at_annotation": True,
             "extracted_freed_at_annotation": True,
         }
+
+
+class TestTenantAndPathReachStages3And4:
+    """Annotation / entity extraction select the document by (tenant, path),
+    never by name — see plans/multitenancy-document-identity-plan.md WP4."""
+
+    @staticmethod
+    def _ok(stage: str, name: str) -> StageResult:
+        return StageResult(
+            stage=stage,
+            success=True,
+            documents=[DocumentResult(name, 1, 0, [])],
+            total_processed=1,
+            total_failed=0,
+            duration_seconds=0.0,
+        )
+
+    async def test_pre_ingested_unit_forwards_run_tenant_and_leaf_path(self, monkeypatch):
+        unit = DocumentUnit(
+            kind="pre_ingested",
+            source_path=None,
+            doc_path="Folder/leaf",
+            relative_dir=Path("."),
+            document_name_hint="leaf",
+        )
+        ann = AsyncMock(return_value=self._ok("annotation", "leaf"))
+        ee = AsyncMock(return_value=self._ok("entity_extraction", "leaf"))
+        monkeypatch.setattr("scinr.newton.stages.run_annotation", ann)
+        monkeypatch.setattr("scinr.newton.stages.run_entity_extraction", ee)
+
+        result = await _process_document_unit(
+            unit,
+            **_base_kwargs(effective_stages=["annotation", "entity_extraction"], tenant_id="acme"),
+        )
+
+        assert result.unit_id == "leaf"
+        for mock in (ann, ee):
+            args, kwargs = mock.await_args
+            assert args[0] == "leaf"
+            assert kwargs["tenant_id"] == "acme"
+            assert kwargs["doc_path"] == "Folder/leaf"
+
+    async def test_ingestion_json_unit_uses_the_baked_tenant_when_run_has_none(
+        self, monkeypatch, tmp_path
+    ):
+        extract = tmp_path / "extract-doc.json"
+        extract.write_text(
+            '{"document_name": "doc", "doc_path": "F/doc", "tenant_id": "baked"}',
+            encoding="utf-8",
+        )
+        unit = DocumentUnit(
+            kind="ingestion_json",
+            source_path=extract,
+            doc_path="F/doc",
+            relative_dir=Path("."),
+            document_name_hint="doc",
+        )
+        monkeypatch.setattr(
+            "scinr.newton.ingest.loader.ingest_one_from_path", AsyncMock(return_value="doc")
+        )
+        ann = AsyncMock(return_value=self._ok("annotation", "doc"))
+        monkeypatch.setattr("scinr.newton.stages.run_annotation", ann)
+
+        await _process_document_unit(
+            unit, **_base_kwargs(effective_stages=["ingestion", "annotation"])
+        )
+
+        assert ann.await_args.kwargs["tenant_id"] == "baked"
+        assert ann.await_args.kwargs["doc_path"] == "F/doc"
+
+    async def test_extracted_document_path_wins_over_the_predicted_one(self, monkeypatch):
+        unit = DocumentUnit(
+            kind="extraction_json",
+            source_path=Path("/tmp/x.json"),
+            doc_path="predicted",
+            relative_dir=Path("."),
+            document_name_hint="x",
+        )
+        monkeypatch.setattr(
+            "scinr.newton.stages.extraction.extract_one_file",
+            AsyncMock(return_value=SimpleNamespace(document_name="x", doc_path="Real/x")),
+        )
+        monkeypatch.setattr("scinr.newton.ingest.loader.ingest_one", AsyncMock(return_value="x"))
+        ann = AsyncMock(return_value=self._ok("annotation", "x"))
+        monkeypatch.setattr("scinr.newton.stages.run_annotation", ann)
+
+        await _process_document_unit(
+            unit,
+            **_base_kwargs(effective_stages=["extraction", "ingestion", "annotation"], tenant_id=None),
+        )
+
+        assert ann.await_args.kwargs == {**ann.await_args.kwargs, "tenant_id": None, "doc_path": "Real/x"}
+
+
+class TestPreprocessStoresUnderTheUnitsOwner:
+    """The raw file / pages stored by preprocess carry the unit's tenant and
+    provenance (plans/multitenancy-document-storage-plan.md WP3)."""
+
+    async def test_convert_one_receives_tenant_and_provenance(self, monkeypatch):
+        unit = DocumentUnit(
+            kind="raw_file",
+            source_path=Path("/tmp/does-not-matter.pdf"),
+            doc_path="doc1",
+            relative_dir=Path("."),
+            document_name_hint="doc1",
+        )
+        mock_convert_one = AsyncMock(return_value=([], []))
+        monkeypatch.setattr("scinr.newton.converters.main.convert_one", mock_convert_one)
+
+        await _process_document_unit(
+            unit,
+            **_base_kwargs(
+                effective_stages=["preprocess"],
+                tenant_id="acme",
+                created_by_user_id="u1",
+                job_id="j1",
+            ),
+        )
+
+        kwargs = mock_convert_one.await_args.kwargs
+        assert (kwargs["tenant_id"], kwargs["created_by_user_id"], kwargs["job_id"]) == (
+            "acme", "u1", "j1",
+        )

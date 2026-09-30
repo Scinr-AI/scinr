@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from scinr.newton.navigation.models import (
@@ -14,7 +15,8 @@ from scinr.newton.navigation.models import (
     StructureNodeRef,
 )
 from scinr.newton.navigation.neo4j import _map
-from scinr.newton.navigation.neo4j._common import _Neo4jRuntime, selector_path
+from scinr.newton.navigation.neo4j._common import _Neo4jRuntime
+from scinr.newton.navigation.scope import make_scope, resolve_selector
 
 _DECISION_EXTRAS = (
     "[(md)-[:MATCHED_MODEL]->(cm) | cm.name][0] AS matched_model, "
@@ -23,12 +25,30 @@ _DECISION_EXTRAS = (
 )
 
 
+def _and(clauses: list[str]) -> str:
+    return f"WHERE {' AND '.join(clauses)} " if clauses else ""
+
+
 class _AnnotationMixin(_Neo4jRuntime):
-    async def get_model_decision(self, node_id: str) -> ModelDecisionRef | None:
+    async def get_model_decision(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> ModelDecisionRef | None:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        params: dict[str, Any] = {"node_id": node_id}
+        anchor_where = self._doc_where("sn", params, sc)
+        clauses: list[str] = []
+        self._scope_where("md", clauses, params, sc, tenant=False)
         rec = await self._read_one(
-            "MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(md:ModelDecision) "
+            f"MATCH (sn:StructureNode {{id: $node_id}}) {anchor_where}"
+            f"MATCH (sn)-[:HAS_MODEL_DECISION]->(md:ModelDecision) {_and(clauses)}"
             f"RETURN md, {_DECISION_EXTRAS}",
-            node_id=node_id,
+            **params,
         )
         if not rec:
             return None
@@ -46,21 +66,29 @@ class _AnnotationMixin(_Neo4jRuntime):
         version: int | None = None,
         matched_only: bool | None = None,
         depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ModelDecisionWithNode]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        path, sc = resolve_selector(document, sc)
         d = self._resolve_depth(depth)
-        params: dict[str, Any] = {"path": selector_path(document)}
+        params: dict[str, Any] = {"path": path}
         if version is not None:
             params["version"] = int(version)
-        clause = ""
+        doc_where = self._doc_where("doc", params, sc)
+        clauses: list[str] = []
         if matched_only is True:
-            clause = "WHERE md.matched_model_class IS NOT NULL "
+            clauses.append("md.matched_model_class IS NOT NULL")
         elif matched_only is False:
-            clause = "WHERE md.matched_model_class IS NULL "
+            clauses.append("md.matched_model_class IS NULL")
+        self._scope_where("md", clauses, params, sc, tenant=False)
         rows = await self._read(
-            f"MATCH {self._doc_match('doc', version=version)} "
+            f"MATCH {self._doc_match('doc', version=version)} {doc_where}"
             f"MATCH (doc)-[:HAS_STRUCTURE|HAS_CHILD*1..{d}]->(n:StructureNode)"
             "-[:HAS_MODEL_DECISION]->(md:ModelDecision) "
-            f"{clause}"
+            f"{_and(clauses)}"
             f"RETURN md, {_DECISION_EXTRAS}, n.id AS node_id, n.title AS node_title "
             "ORDER BY n.appearance_order",
             **params,
@@ -81,13 +109,26 @@ class _AnnotationMixin(_Neo4jRuntime):
         return out
 
     async def get_document_model_profile(
-        self, document: str | DocumentRef, *, version: int | None = None, depth: int | None = None
+        self,
+        document: str | DocumentRef,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> DocumentModelProfile | None:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        path, sc = resolve_selector(document, sc)
+        sc = await self._single_document_scope(path, version, sc)
         d = self._resolve_depth(depth)
-        params: dict[str, Any] = {"path": selector_path(document)}
+        params: dict[str, Any] = {"path": path}
         if version is not None:
             params["version"] = int(version)
-        base = self._doc_match("doc", version=version)
+        # Single document: the anchor carries the whole scope, everything
+        # below it belongs to it.
+        base = f"{self._doc_match('doc', version=version)} {self._doc_where('doc', params, sc, 'scalar')}"
         core = await self._read_one(
             f"""MATCH {base}
             MATCH (doc)-[:HAS_STRUCTURE|HAS_CHILD*1..{d}]->(n:StructureNode)
@@ -117,7 +158,7 @@ class _AnnotationMixin(_Neo4jRuntime):
         )
         return DocumentModelProfile(
             raw=dict(core),
-            path=selector_path(document),
+            path=path,
             version=int(core["version"]),
             matched=[_map.model_class_stat(r, kind="matched") for r in matched if r["model_class"]],
             complementary=[
@@ -130,54 +171,86 @@ class _AnnotationMixin(_Neo4jRuntime):
         )
 
     async def get_nodes_by_annotated_model(
-        self, model_class: str, *, document: str | DocumentRef | None = None
+        self,
+        model_class: str,
+        *,
+        document: str | DocumentRef | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
         params: dict[str, Any] = {"mc": model_class}
-        clause = ""
+        clauses: list[str] = []
         if document is not None:
-            clause = (
-                "WHERE EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) } "
+            path, sc = resolve_selector(document, sc)
+            clauses.append(
+                "EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) }"
             )
-            params["doc_path"] = selector_path(document)
+            params["doc_path"] = path
+        self._scope_where("n", clauses, params, sc)
         rows = await self._read(
             "MATCH (n:StructureNode)-[:HAS_MODEL_DECISION]->(:ModelDecision)"
             "-[:MATCHED_MODEL]->(:CatalogModel {name: $mc}) "
-            f"{clause}"
+            f"{_and(clauses)}"
             "RETURN DISTINCT n { .*, _labels: labels(n) } AS n ORDER BY n.id",
             **params,
         )
         return [_map.structure_node_ref(r["n"]) for r in rows]
 
     async def get_unannotated_nodes(
-        self, document: str | DocumentRef, *, version: int | None = None, depth: int | None = None
+        self,
+        document: str | DocumentRef,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[StructureNodeRef]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        path, sc = resolve_selector(document, sc)
         d = self._resolve_depth(depth)
-        params: dict[str, Any] = {"path": selector_path(document)}
+        params: dict[str, Any] = {"path": path}
         if version is not None:
             params["version"] = int(version)
+        doc_where = self._doc_where("doc", params, sc)
+        clauses = ["NOT (n)-[:HAS_MODEL_DECISION]->()"]
+        self._scope_where("n", clauses, params, sc, tenant=False)
         rows = await self._read(
-            f"MATCH {self._doc_match('doc', version=version)} "
+            f"MATCH {self._doc_match('doc', version=version)} {doc_where}"
             f"MATCH (doc)-[:HAS_STRUCTURE|HAS_CHILD*1..{d}]->(n:StructureNode) "
-            "WHERE NOT (n)-[:HAS_MODEL_DECISION]->() "
+            f"{_and(clauses)}"
             "RETURN n { .*, _labels: labels(n) } AS n ORDER BY n.appearance_order",
             **params,
         )
         return [_map.structure_node_ref(r["n"]) for r in rows]
 
     async def get_proposed_models(
-        self, *, document: str | DocumentRef | None = None
+        self,
+        *,
+        document: str | DocumentRef | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> list[ProposedModelRef]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
         params: dict[str, Any] = {}
-        clause = ""
+        clauses: list[str] = []
         if document is not None:
-            clause = (
-                "WHERE EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) } "
+            path, sc = resolve_selector(document, sc)
+            clauses.append(
+                "EXISTS { MATCH (n)<-[:HAS_STRUCTURE|HAS_CHILD*1..]-(:Document {path: $doc_path}) }"
             )
-            params["doc_path"] = selector_path(document)
+            params["doc_path"] = path
+        self._scope_where("pm", clauses, params, sc)
         rows = await self._read(
             "MATCH (n:StructureNode)-[:HAS_MODEL_DECISION]->(:ModelDecision)"
             "-[:HAS_PROPOSED_MODEL]->(pm:ProposedModel) "
-            f"{clause}"
+            f"{_and(clauses)}"
             "RETURN pm, [(pm)-[:HAS_PROPOSED_FIELD]->(f) | f { .* }] AS fields, n.id AS node_id "
             "ORDER BY pm.uid",
             **params,
@@ -188,14 +261,28 @@ class _AnnotationMixin(_Neo4jRuntime):
         ]
 
     async def get_annotation_coverage(
-        self, document: str | DocumentRef, *, version: int | None = None, depth: int | None = None
+        self,
+        document: str | DocumentRef,
+        *,
+        version: int | None = None,
+        depth: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
     ) -> AnnotationCoverage | None:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        path, sc = resolve_selector(document, sc)
+        sc = await self._single_document_scope(path, version, sc)
         d = self._resolve_depth(depth)
-        params: dict[str, Any] = {"path": selector_path(document)}
+        params: dict[str, Any] = {"path": path}
         if version is not None:
             params["version"] = int(version)
+        # Single document: the anchor carries the whole scope, so both sides
+        # of the ratio (annotated / total) are computed over the same nodes.
+        doc_where = self._doc_where("doc", params, sc, "scalar")
         rec = await self._read_one(
-            f"MATCH {self._doc_match('doc', version=version)} "
+            f"MATCH {self._doc_match('doc', version=version)} {doc_where}"
             f"MATCH (doc)-[:HAS_STRUCTURE|HAS_CHILD*1..{d}]->(n:StructureNode) "
             "OPTIONAL MATCH (n)-[:HAS_MODEL_DECISION]->(md:ModelDecision) "
             "RETURN doc.version AS version, count(n) AS total, count(md) AS annotated, "
@@ -210,7 +297,7 @@ class _AnnotationMixin(_Neo4jRuntime):
         annotated = int(rec["annotated"] or 0)
         return AnnotationCoverage(
             raw=dict(rec),
-            path=selector_path(document),
+            path=path,
             version=int(rec["version"]),
             total_nodes=total,
             annotated=annotated,

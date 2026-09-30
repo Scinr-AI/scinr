@@ -10,18 +10,22 @@ from neo4j import AsyncDriver
 
 from scinr.newton.config import get_config
 from scinr.newton.entity_extraction.state import ExtractionTarget
+from scinr.newton.utils.tenancy import tenant_key
 
 log = logging.getLogger(__name__)
 
 
 async def fetch_extraction_targets(
     driver: AsyncDriver,
-    document_name: str,
+    *,
+    tenant_id: str | None,
+    doc_path: str,
     only_unextracted: bool = False,
 ) -> list[ExtractionTarget]:
     """
     Fetch all StructureNodes that:
-      - belong to *document_name*
+      - belong to *tenant_id*'s (``None`` = public) latest document at
+        *doc_path* (never selected by name, which is not unique)
       - have a ModelDecision (matched or unmatched)
       - have at least one InfoUnit
 
@@ -40,7 +44,8 @@ async def fetch_extraction_targets(
         extra_filter += "\nAND NOT EXISTS { MATCH (n)-[:HAS_EXTRACTION]->(:ExtractionResult) }"
 
     query = f"""
-    MATCH (d:Document {{name: $doc_name, latest: true}})-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
+    MATCH (d:Document {{tenant_id: $tenant_id, path: $doc_path, latest: true}})
+          -[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
     MATCH (n)-[:HAS_MODEL_DECISION]->(md:ModelDecision)
     WHERE EXISTS {{
       MATCH (n)-[:HAS_INFO_UNIT]->(iu:InfoUnit)
@@ -74,7 +79,8 @@ async def fetch_extraction_targets(
     """
     # Fallback query without apoc if needed
     fallback_query = f"""
-    MATCH (d:Document {{name: $doc_name, latest: true}})-[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
+    MATCH (d:Document {{tenant_id: $tenant_id, path: $doc_path, latest: true}})
+          -[:HAS_STRUCTURE|HAS_CHILD*1..]->(n:StructureNode)
     MATCH (n)-[:HAS_MODEL_DECISION]->(md:ModelDecision)
     WHERE EXISTS {{
       MATCH (n)-[:HAS_INFO_UNIT]->(iu:InfoUnit)
@@ -104,17 +110,18 @@ async def fetch_extraction_targets(
            info_units
     ORDER BY n.appearance_order
     """
+    params = {"tenant_id": tenant_key(tenant_id), "doc_path": doc_path}
     cfg = get_config()
     async with driver.session(database=cfg.neo4j_database) as session:
         try:
-            result = await session.run(query, doc_name=document_name)
+            result = await session.run(query, **params)
             rows = await result.data()
         except Exception:
             log.warning(
                 "fetch_extraction_targets: apoc.coll.sortMaps unavailable, "
                 "falling back to unsorted query"
             )
-            result = await session.run(fallback_query, doc_name=document_name)
+            result = await session.run(fallback_query, **params)
             rows = await result.data()
 
         targets: list[ExtractionTarget] = []
@@ -133,9 +140,10 @@ async def fetch_extraction_targets(
             ))
 
     log.info(
-        "fetch_extraction_targets: found %d targets for document %r",
+        "fetch_extraction_targets: found %d targets for document %r (tenant=%r)",
         len(targets),
-        document_name,
+        doc_path,
+        tenant_id,
     )
     return targets
 

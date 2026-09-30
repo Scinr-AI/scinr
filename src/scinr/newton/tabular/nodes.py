@@ -84,6 +84,11 @@ async def load_sheets(state: TabularState) -> dict:
                         folder_path=folder_path,
                         page_index=i,
                         markdown="",
+                        # Same owner as the raw file stored by run_tabular_pipeline
+                        # (tenant_key is idempotent on the stored key).
+                        tenant_id=state.get("tenant_id"),
+                        created_by_user_id=state.get("created_by_user_id"),
+                        job_id=state.get("job_id"),
                     )
                     sheet_page_ids.append(page_id)
                     logger.debug(
@@ -456,6 +461,7 @@ async def write_tabular(state: TabularState) -> dict:
             update_mode=state.get("update_mode", False),
             theme=state.get("current_theme", "default"),
             sheet_page_id=sheet_page_id,
+            tenant_id=state["tenant_id"],
         )
         node_ids = list(state.get("ingested_table_node_ids", []))
         node_ids.append(table_id)

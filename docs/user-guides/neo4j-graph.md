@@ -35,15 +35,38 @@ Represents the original input file or folder that was ingested into the system. 
 |---|---|---|
 | `name` | String | Name of the file or folder as provided at ingestion time. Without extension. |
 | `path` | String | Full path identifier for this document within the ingestion hierarchy. Without extension. |
-| `version` | Integer | Version number. Starts at 1; increments on replacement or update. |
+| `version` | Integer | Version number. Starts at 1; increments on replacement or update. Numbered per tenant: another tenant's document at the same path does not affect it. |
 | `load_date` | DateTime | Timestamp when the document was first ingested. |
 | `latest` | Boolean | Indicates if this is the latest version of the document. |
 | `is_folder` | Boolean | Indicates if this node represents a folder (true) vs a file (false). |
 | `raw_file_id` | String | Storage-backend id of the stored raw file (empty for folders / when no storage backend is configured). |
 | `context_instructions` | String \| null | Free-text ingestion context passed via `run_pipeline(context_instructions=...)`; `null` when not supplied. |
-| `tenant_id` | String \| null | Caller-supplied multi-tenant owner id from `run_pipeline(tenant_id=...)`. Always set (`null` when not supplied). Written on leaf **and** folder-parent nodes. |
+| `tenant_id` | String | Owner tenant from `run_pipeline(tenant_id=...)`, or the reserved value `"__public__"` for a public document (no tenant supplied) — never `null`. **Part of the document identity**: a `:Document` is unique on `(tenant_id, path, version)`. Written on leaf **and** folder-parent nodes. See [Multi-tenancy](#multi-tenancy-the-tenant-is-part-of-the-document-identity). |
 | `created_by_user_id` | String \| null | Caller-supplied id of the user that launched the ingestion, from `run_pipeline(created_by_user_id=...)`. Always set (`null` when not supplied). |
 | `job_id` | String \| null | Caller-supplied ingestion job/run id from `run_pipeline(job_id=...)`. Always set (`null` when not supplied). Usable as a bulk-delete selector — see [Document Deletion](document-deletion.md). |
+| `frozen` | Boolean | `true` while the document is a frozen stub: its subtree is in a snapshot, not in the graph. Absent until the document is frozen for the first time, `false` after a restore. See [Document Freezing](document-freezing.md). |
+| `frozen_blob_id`, `frozen_at` | String | Id of the snapshot in the freeze backend, and ISO-8601 timestamp of the freeze. Only on a frozen stub; removed by the restore. |
+| `frozen_keep_structure_nodes`, `frozen_keep_annotations`, `frozen_keep_extraction_results` | Boolean | The `keep_*` flags the document was frozen with. Only on a frozen stub. |
+| `frozen_cleanup_pending` | Boolean | `true` from the moment the stub is marked until its subtree has been deleted and garbage-collected. Still there afterwards only if the freeze was interrupted. |
+| `last_backup_blob_id`, `last_backup_at` | String | Snapshot and ISO-8601 timestamp of the last `freeze_document(delete_after_export=False)`. |
+| `deletion_pending` | Boolean | Set by `delete_document()` before it deletes anything. A `:Document` that still carries it belongs to an interrupted deletion: call `delete_document()` again. |
+
+---
+
+### Multi-tenancy: the tenant is part of the document identity
+
+- **Key.** A `:Document` is identified by `(tenant_id, path, version)` (uniqueness constraint `constraint_document_tenant_path_version`). Two tenants that ingest the same path get two independent uploads: their own leaf and folder `:Document` nodes, versions, structure, annotations and extractions, with **no relationship between them**. Versioning (`latest`, `HAS_NEWER_VERSION`), `update_mode`, `replaces`, annotation, entity extraction and `delete_document()` only ever select documents of one tenant.
+- **Public documents.** A document ingested without a tenant is public: readable by every tenant, but still its own upload. It is stored with `tenant_id: "__public__"` (a non-null value, so it is indexed, usable in `MERGE`, and covered by the uniqueness constraint); on the write side `None` and `"__public__"` are the same thing (public), and `""` is rejected. Reads expose the stored value (`"__public__"`), so `None` stays free to mean "no tenant filter" — see [Graph Navigation — Scope](graph-navigation.md#scope-tenant-user-job).
+- **Everything below inherits it.** Every per-document node (`:StructureNode`, `:InfoUnit`, `:ModelDecision`, `:ExtractionResult`, …) carries the same scalar `tenant_id`, and the tenant is folded into the `uid` of the content-deduplicated nodes (`:ModelInstance`, `:LabeledEntity`, `:Entity`), so identical content from two tenants — or from a tenant and a public document — is never merged into one node. A tenant reading `tenant_id IN [$tenant, "__public__"]` may therefore see two `:ModelInstance` nodes for the same key (its own and the public one).
+- **No relationship crosses tenants — public included.** Every relationship an extraction writes targets a `uid` computed with its own tenant, so data relationships always stay inside one tenant. This is what lets the navigation API filter the tenant on the starting node only; the price is that a tenant's content is never linked to public content. See [Graph Navigation — Why a traversal cannot leave the tenant](graph-navigation.md#why-a-traversal-cannot-leave-the-tenant).
+- **Global catalog.** `:CatalogModel`, `:ModelField`, `:EntityLabel` and `:Theme` are shared by all tenants.
+
+```cypher
+// Tenant acme's latest documents plus the public ones
+MATCH (d:Document {latest: true})
+WHERE d.tenant_id IN ["acme", "__public__"]
+RETURN d.tenant_id, d.path, d.version;
+```
 
 ---
 
@@ -53,7 +76,7 @@ Represents a structural element within a document — a section, subsection, fre
 
 ```
 (:StructureNode:Section {
-  id: "M3- Notice to applicant::1::1-foreword",
+  id: "acme-corp::M3- Notice to applicant::1::1-foreword",
   node_id: "1-foreword",
   role: "section",
   title: "Foreword",
@@ -65,7 +88,7 @@ Represents a structural element within a document — a section, subsection, fre
 
 | Property | Type | Description |
 |---|---|---|
-| `id` | String | **Unique** hierarchical identifier for this structure node (the primary key; a uniqueness constraint is enforced). Use this to address a node. |
+| `id` | String | **Unique** hierarchical identifier for this structure node (the primary key; a uniqueness constraint is enforced): `{tenant_id}::{doc_path}::{version}::{ancestor node_ids/node_id}` — e.g. `__public__::M3/doc::2::5_3/5_3_1` for a nested node of a public document. The tenant prefix keeps two tenants' structure apart when they ingest the same path; the uids of `:InfoUnit`, `:ModelDecision`, `:ExtractionResult` and tabular rows are derived from it. Use this to address a node. |
 | `node_id` | String | Short local identifier derived from the heading number or appearance-order slug. Convenient for display, but **not guaranteed unique** across the graph — do not use it as a key. |
 | `role` | String | One of: `section`, `subsection`, `freeform_block`, `table`, `field_group`, `appendix`, `row`. Indexed. |
 | `title` | String | Heading text, if this node represents a section heading. Null for leaf blocks like paragraphs. |
@@ -112,7 +135,7 @@ Represents a stable, deduplicated entity value extracted from a field marked wit
 Key characteristics:
 
 - **Single label**: The node has a single `:LabeledEntity` label and uses a `label` property to store the entity category.
-- **Deduplication**: If the same `value` is extracted from multiple documents, a single `:LabeledEntity` node is reused. This enables cross-document entity matching and aggregation.
+- **Deduplication**: If the same `value` is extracted from multiple documents of the same tenant, a single `:LabeledEntity` node is reused. This enables cross-document entity matching and aggregation. Tenants (and public documents) never share one: the tenant is part of the `uid`.
 - **Stable identity**: The `uid` remains constant for a given value, allowing reliable joins and traces.
 
 ---
@@ -266,7 +289,7 @@ LIMIT 1;
 
 **Important caveats:**
 - The relationship to a shell target is created **unconditionally** as soon as the fixed `join_via` key fields are non-empty — there is no check that the target model will ever actually be extracted. If it never is, the shell simply stays a shell (3 properties) forever.
-- Orphaned shells are **not** garbage-collected automatically after ingestion. They are only cleaned up as a side effect of `delete_document()`, which runs a multi-pass query removing any `ModelInstance`/`Entity` no longer reachable from any `ExtractionResult` within 7 hops.
+- Orphaned shells are **not** garbage-collected automatically after ingestion. A shell goes when `delete_document()` or `freeze_document()` removes the last instance that referenced it, or when `collect_orphans()` sweeps the tenant: both delete any `ModelInstance`/`Entity` no longer reachable from any `ExtractionResult` within 7 hops (see [Document Deletion — Garbage Collection](document-deletion.md#garbage-collection)).
 - A list field driving `instance_relationships` (fan-out) creates **one shell per list item**, each with its own UID derived from the fixed anchor key(s) plus that one item's value.
 
 **Query: find shell nodes for any model class (generic property-count heuristic)**
@@ -393,6 +416,8 @@ In this pattern:
 
 When `update_mode=True`, the existing document and all its downstream nodes are replaced in-place. The `version` property on the `:Document` node is **reused** (it does **not** increment), and the `path` remains the same. The ingestion loader finds the latest version by `path`, deletes its `:StructureNode` / `:InfoUnit` descendants, and re-inserts the new structure at the same version number.
 
+The `:Entity` / `:ModelInstance` / `:LabeledEntity` nodes that only the old content reached are **not** deleted by the re-ingestion. `collect_orphans(tenant_id=...)` removes them (see [Document Deletion — Garbage Collection](document-deletion.md#garbage-collection)). The re-ingestion does not check whether the version is frozen either (see [Document Freezing — Caveats](document-freezing.md#caveats)).
+
 ```
 (:Document {
   name: "clinical_trial_report.pdf",
@@ -419,11 +444,23 @@ This preserves the full history of document versions in the graph, allowing quer
 
 When a document needs to be permanently removed from the graph (rather than updated in-place), use `delete_document()`. This function:
 
-- Removes the `:Document` node(s) matching the given `path` (and optionally `version`), **or** every `:Document` carrying a given `job_id` (`delete_document(job_id=...)`), optionally narrowed further by `tenant_id` / `created_by_user_id`.
+- Always acts within one tenant: `tenant_id` is mandatory (`None` / `"__public__"` = public documents).
+- Removes the tenant's `:Document` node(s) matching the given `path` (and optionally `version`), **or** every `:Document` of the tenant carrying a given `job_id` (`delete_document(job_id=..., tenant_id=...)`), optionally narrowed further by `created_by_user_id` (`job_id` and `created_by_user_id` accept a list).
 - Cascade-deletes all connected structure, annotation, and extraction nodes.
-- Runs garbage collection on orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes.
+- Garbage-collects the `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes of the tenant that the deletion left orphaned.
+- Works in bounded transactions, so a large folder does not overrun Neo4j's transaction memory; an interrupted deletion is finished by calling it again.
 
 Unlike `update_mode=True` re-ingestion, deletion is **irreversible** — there is no undo. See the [Document Deletion](document-deletion.md) guide for details.
+
+### Document Freezing
+
+`freeze_document()` is the reversible alternative. It exports the document's subgraph to a snapshot in the freeze backend and reduces the document to a stub:
+
+- The `:Document` node stays, with `frozen=true` and `frozen_blob_id`, so the document is still listed and its version chain is intact.
+- The `:StructureNode` tree, the `:InfoUnit` nodes, the annotations and the extraction results are deleted, unless `keep_structure_nodes`, `keep_annotations` or `keep_extraction_results` keep them. InfoUnits always go.
+- A kept `:ModelDecision` / `:ExtractionResult` whose `:StructureNode` was deleted hangs from the `:Document` instead, through a temporary `(:Document)-[:HAS_MODEL_DECISION|HAS_EXTRACTION]->()` relationship. The restore removes it.
+
+`restore_document()` rebuilds the subgraph from the snapshot, with the same ids and uids and no LLM calls. See the [Document Freezing](document-freezing.md) guide.
 
 ---
 
@@ -533,41 +570,84 @@ ORDER BY old.version;
 
 ## Indexes and Constraints
 
-For production workloads, create the following indexes and constraints to ensure performant lookups:
+`setup_schema()` (run by `run_ingestion`, the pipeline, the tabular pipeline and the loader) creates every constraint and index below with `IF NOT EXISTS`; there is nothing to create by hand. The authoritative list is `ingest/schema.py`.
+
+### Unique constraints
+
+| Label | Key | Notes |
+|---|---|---|
+| `:Document` | `(tenant_id, path, version)` | The document identity. `setup_schema()` drops the legacy `constraint_document_path_version`. |
+| `:StructureNode` | `id` | The id is tenant-prefixed. |
+| `:InfoUnit`, `:ExtractionResult`, `:ModelInstance`, `:LabeledEntity`, `:Entity` | `uid` | The uid hashes the tenant. |
+| `:ModelField` | `(name, model)` | Catalog. |
+| `:EntityLabel` | `label` | Catalog. |
+
+A lookup by id / uid is a seek on these constraints, as long as the pattern carries the **label**.
+
+### Single-property indexes
+
+`tenant_id` on `Document`, `StructureNode`, `InfoUnit`, `ExtractionResult`, `ModelInstance`, `ModelDecision`, `LabeledEntity` and `Entity`; `created_by_user_id` / `job_id` on `Document`, `StructureNode` and `ExtractionResult`; plus `Document(name)`, `Document(latest)`, `Document(path)`, `StructureNode(role)`, `StructureNode(row_index)`, `StructureNode(source_page_ids)`, `LabeledEntity(label)`, `ExtractionResult(node_full_id)` and `ModelInstance(model_class)`.
+
+`uid` on `ModelDecision`, `ProposedModel`, `ProposedField`, `ComplementaryMatch` and `SupplementaryField`, and `CatalogModel(name)`. These are plain indexes, not constraints, because older graphs may hold duplicates. `restore_document()` looks nodes up through them, and creates them itself when they are missing (a graph ingested before they existed).
+
+### Composite tenant indexes
+
+| Index | Properties | Serves |
+|---|---|---|
+| `idx_model_instance_tenant_model_class` | `ModelInstance(tenant_id, model_class)` | `get_model_instances_by_class` / `count_model_instances_by_class`, properties by class |
+| `idx_document_tenant_latest` | `Document(tenant_id, latest)` | `get_documents`, `list_root_documents` / `count_root_documents` with `latest_only`, graph summary |
+| `idx_document_tenant_name` | `Document(tenant_id, name)` | lookups by name within a tenant (e.g. the `replaces=` resolution) |
+| `idx_structure_node_tenant_role` | `StructureNode(tenant_id, role)` | `find_structure_nodes(role=...)` |
+| `idx_labeled_entity_tenant_label` | `LabeledEntity(tenant_id, label)` | `get_labeled_entities(label=...)` |
+
+The single `tenant_id` indexes are kept: a query over all tenants (`tenant_id=None`) has no tenant predicate and cannot use a composite index.
+
+### `instance_key` indexes
+
+For every distinct field name marked `instance_key: True` in the registered models, `ensure_catalog_models()` creates
 
 ```cypher
--- Unique constraint on document path + version combination (enforces deduplication at ingestion)
-CREATE CONSTRAINT constraint_document_path_version
-FOR (d:Document) REQUIRE (d.path, d.version) IS UNIQUE;
-
--- Unique constraint on labeled entity UID
-CREATE CONSTRAINT constraint_labeled_entity_key
-FOR (e:LabeledEntity) REQUIRE e.uid IS UNIQUE;
-
--- Index on labeled entity label (accelerates label-based queries)
-CREATE INDEX idx_labeled_entity_label
-FOR (e:LabeledEntity) ON (e.label);
-
--- Unique constraint on model instance UID
-CREATE CONSTRAINT constraint_model_instance_uid
-FOR (m:ModelInstance) REQUIRE m.uid IS UNIQUE;
-
--- Index on model instance model_class (accelerates model class filtering)
-CREATE INDEX idx_model_instance_model_class
-FOR (m:ModelInstance) ON (m.model_class);
-
--- Unique constraint on structure node id
-CREATE CONSTRAINT constraint_structure_node_id
-FOR (s:StructureNode) REQUIRE s.id IS UNIQUE;
-
--- Index on structure node role (accelerates role-based queries)
-CREATE INDEX idx_structure_node_role
-FOR (s:StructureNode) ON (s.role);
-
--- Index on document latest property (accelerates latest version filtering)
-CREATE INDEX idx_document_latest
-FOR (d:Document) ON (d.latest);
+CREATE INDEX idx_mi_key_<field> IF NOT EXISTS
+FOR (mi:ModelInstance) ON (mi.tenant_id, mi.`<field>`)
 ```
+
+The label is always `:ModelInstance`, so models sharing a key field name share the index. Names that are not plain identifiers are sanitized to `[A-Za-z0-9_]` with a short hash suffix. New indexes are built in the background (`POPULATING`) and do not block ingestion.
+
+- **Full key**: use `nav.get_model_instance_by_key(...)` — it rebuilds the `uid` and seeks on the unique constraint. Do not filter with `toLower(mi.field) = ...`: a function on the property prevents any index from being used. Key values are stored normalized (`normalize_key`).
+- **Part of the key**: `where={"field": normalize_key(value)}` with the tenant uses `idx_mi_key_<field>`.
+- If a field stops being a key its index is **not** dropped (it is harmless). To clean it up: `SHOW INDEXES YIELD name WHERE name STARTS WITH 'idx_mi_key_'`, then `DROP INDEX <name>`.
+
+### How the planner uses them
+
+Checked with `EXPLAIN ... USING INDEX` on Neo4j 2026.05 Community (a hint the planner cannot honour is an error):
+
+1. `tenant_id IN [t, '__public__']` can seek on the `tenant_id` prefix of a composite index, so `include_public=True` still uses it.
+2. A composite index is only used when the query constrains **every** property in it (`IS NOT NULL` counts). `path + latest` cannot use `(tenant_id, path, version)`; "latest version of this path" uses `idx_document_path` instead, and `path` is very selective.
+3. **One index per node.** With single indexes only, "instances of class X for tenant T" seeks on one of them and filters every node for the other — hence the composite indexes.
+4. **No label, no index.** `MATCH (n {uid: $uid})` scans every node of every tenant. Every pattern that looks a node up by a property must carry its label; `tests/unit/test_cypher_label_guard.py` fails on any unlabelled `(var {prop: ...})` pattern in the library.
+
+Known limitation: `get_document_stats`' per-role counts traverse from the document and use no role index.
+
+A predicate placed after a `WITH` (`WITH n, x WHERE n.tenant_id = ...`) is not a condition of the preceding `MATCH` and cannot drive its index seek: keep tenant and class filters in the `MATCH`'s own `WHERE`.
+
+### Community edition
+
+Neo4j Community does not support property existence constraints (`IS NOT NULL`), node key constraints or property type constraints; `setup_schema()` does not create them. Range indexes (single and composite), unique constraints (also composite) and fulltext indexes are all available, and are the only kinds scinr uses.
+
+### Verifying index usage
+
+`tests/integration/test_index_usage.py` checks that the representative queries **can** use their index — it does not measure time and needs no data volume:
+
+- **Neo4j**: runs `setup_schema()`, creates one `instance_key` index, and runs `EXPLAIN <query> USING INDEX <expected index>` for each navigation query (captured from the real navigator), the `instance_key` lookup and the `graph_mapper` writes. Nothing is executed.
+- **MongoDB**: in a throwaway `scinr_it_<uuid>` database (dropped afterwards), checks that `get_storage()` created the indexes, inserts a few documents and asserts `IXSCAN` on the expected index and no `COLLSCAN` for the page, raw-file inventory and delete queries.
+
+```bash
+NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=... NEO4J_DATABASE=neo4j \
+MONGODB_URI=mongodb://user:pass@localhost:27017/?authSource=admin \
+pytest -m integration tests/integration/test_index_usage.py
+```
+
+Each backend is skipped when its variables are missing or the server is unreachable. The Neo4j user needs schema privileges (it runs `setup_schema()`); the MongoDB user needs to create and drop a database.
 
 ---
 

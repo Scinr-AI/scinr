@@ -1,6 +1,6 @@
 # scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.3.10)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.4.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
@@ -51,9 +51,10 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Global entity deduplication** — `LabeledEntity` singletons keyed by `(label, normalized_value)` enable cross-document dedup in the graph
 - **Cross-document model linking** — `instance_relationships` create typed edges between `ModelInstance` nodes across different document sections; forward-reference shell nodes are merged when the target model is later extracted
 - **Versioning & folder hierarchy** — full document version chain in Neo4j; folder structure mirrored as `IS_COMPOSED_OF` relationships
+- **Document lifecycle** — `delete_document()` removes a document and its whole cascade; `freeze_document()` archives its subgraph to a snapshot and leaves a stub in the graph, and `restore_document()` rebuilds it with no LLM calls. All three are tenant-scoped and work in bounded transactions, so they fit in Neo4j's transaction memory whatever the size of the folder. See the [Document Freezing guide](https://scinr-ai.github.io/scinr/user-guides/document-freezing/)
 - **Read-back navigation API** — `scinr.newton.navigation`: a read-only, `async`, engine-abstracted layer of ~90 typed methods over the graph (documents, structure nodes, model instances, entities, schema introspection) — no Cypher required. See the [Graph Navigation guide](https://scinr-ai.github.io/scinr/user-guides/graph-navigation/)
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
-- **Parallel processing** — `--parallel-docs N` for concurrent document handling at every stage
+- **Parallel processing** — `parallel_docs=N` for concurrent document handling at every stage
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs
 - **Optional storage layer** — MongoDB backend for raw file + page storage; pipeline runs without it
 - **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + `neo4j_retry` (deadlock-safe writes)
@@ -139,7 +140,7 @@ uv sync --all-extras
 
 ## Quick Start
 
-### Library mode (recommended)
+### Configuration in code
 
 ```python
 from scinr.newton import configure, run_pipeline
@@ -176,9 +177,9 @@ configure(
 )
 ```
 
-### CLI mode
+### Configuration from environment variables
 
-Copy `.env.example` to `.env` and fill in the required values:
+Every `configure()` parameter you omit is read from the environment. Copy `.env.example` to `.env` and fill in the required values:
 
 ```bash
 cp .env.example .env
@@ -204,16 +205,12 @@ MONGODB_URI=mongodb://localhost:27017
 MONGODB_DATABASE=scinr
 ```
 
-Run the full pipeline:
+Then pass only the LLM in code and run the pipeline:
 
-```bash
-newton --stage all --input-raw files/
-```
+```python
+configure(llm=ChatOpenAI(model="gpt-4o"))  # Neo4j, Mistral and storage come from the environment
 
-Run with parallel processing:
-
-```bash
-newton --stage all --input-raw files/ --parallel-docs 4
+result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
 ```
 
 ---
@@ -238,9 +235,9 @@ newton --stage all --input-raw files/ --parallel-docs 4
 
 For the full parameter reference, see the [module README](src/scinr/newton/README.md#configure).
 
-### Environment variables (CLI mode)
+### Environment variables
 
-The LLM is **not** an environment variable — build a LangChain chat model and pass it to `configure(llm=...)`. Provider SDK settings (`AWS_DEFAULT_REGION`, `OPENAI_API_KEY`, …) come from the environment as each SDK expects.
+`configure()` reads these when the matching parameter is omitted. The LLM is **not** an environment variable — build a LangChain chat model and pass it to `configure(llm=...)`. Provider SDK settings (`AWS_DEFAULT_REGION`, `OPENAI_API_KEY`, …) come from the environment as each SDK expects.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -255,6 +252,9 @@ The LLM is **not** an environment variable — build a LangChain chat model and 
 | `MONGODB_RAW_FILES_COLLECTION` | No | `raw_files` | Collection for raw file metadata |
 | `MONGODB_PAGES_COLLECTION` | No | `converted_pages` | Collection for converted page content |
 | `MONGODB_GRIDFS_BUCKET` | No | `raw_binaries` | GridFS bucket for raw binary files |
+| `FREEZE_BACKEND` | No | the storage backend | Backend for document snapshots (`freeze_document()` / `restore_document()`): `none`, `mongodb` or `custom` |
+| `MONGODB_FROZEN_COLLECTION` | No | `frozen_documents` | Collection for snapshot metadata |
+| `MONGODB_FROZEN_GRIDFS_BUCKET` | No | `frozen_snapshots` | GridFS bucket for snapshot files |
 | `EXTRACTION_BATCH_SIZE` | No | `1` | Pages per extraction chunk |
 | `LLM_CONCURRENCY` | No | `4` | Max concurrent LLM calls |
 | `PROMPT_CACHING_ENABLED` | No | `true` | Enable Bedrock prompt caching (`cachePoint`) |
@@ -298,25 +298,7 @@ The LLM is **not** an environment variable — build a LangChain chat model and 
 | 4 | Entity Extract | Annotated StructureNodes → `ExtractionResult` + entity nodes | Yes |
 | — | Tabular | CSV / XLSX → Neo4j Table + Row nodes | Yes (3 calls/sheet) |
 
-**CLI flag reference:**
-
-| Flag | Values | Default | Description |
-|---|---|---|---|
-| `--stage` | `preprocess` \| `extract` \| `ingest` \| `annotate` \| `entity_extract` \| `tabular` \| `all` | `all` | Pipeline stage(s) to run |
-| `--input-raw` | `DIR` | — | Raw source files folder (Stage 0 input) |
-| `--input` | `DIR` | `data/json/` | Intermediate JSON folder (Stage 1 input) |
-| `--output` | `DIR` | `data/output/` | Extracted JSON folder (Stage 1 output / Stage 2 input) |
-| `--document` | `NAME` | — | Document name — required for `annotate` and `entity_extract` |
-| `--update` | flag | off | Re-ingest into the existing latest version without creating a new one |
-| `--replaces` | `NAME` | — | Link the ingested document as successor of this existing document |
-| `--parallel-docs` | `N` | `1` | Concurrent documents (1 = sequential) |
-| `--only-unannotated` | flag | off | `annotate`: skip nodes that already have a `ModelDecision` |
-| `--only-unextracted` | flag | off | `entity_extract`: skip nodes that already have an `ExtractionResult` |
-| `--manual` | flag | off | `annotate`: assign a fixed model to all nodes without LLM |
-| `--model` | `CLASS_NAME` | — | CamelCase model class name for `--manual` annotation |
-| `--context` | `TEXT` | — | Free-text context passed to extraction and annotation LLMs as additional guidance |
-
-For per-stage CLI commands, input/output formats, and agent diagrams, see the [module README](src/scinr/newton/README.md#pipeline-stages--detailed-reference).
+Run them all with `run_pipeline()`, a subset with `run_pipeline(stages=[...])`, or one at a time with `run_preprocess()`, `run_extraction()`, `run_ingestion()`, `run_annotation()`, `run_entity_extraction()` and `run_tabular_pipeline()`. For every parameter, see the [Running the Pipeline guide](docs/user-guides/running-pipeline.md); for per-stage examples, input/output formats, and agent diagrams, see the [module README](src/scinr/newton/README.md#pipeline-stages--detailed-reference).
 
 ---
 
@@ -358,7 +340,6 @@ scinr/
     └── scinr/
         └── newton/                 ← scinr.newton package
             ├── __init__.py         ← Public API
-            ├── cli.py              ← CLI entry point (newton)
             ├── config.py           ← ScinrConfig + configure()
             ├── pipeline.py         ← run_pipeline()
             ├── results.py          ← Result dataclasses
@@ -366,11 +347,12 @@ scinr/
             ├── stages/             ← Stage runner functions
             ├── converters/         ← Stage 0: file → paged JSON
             ├── extraction/         ← Stage 1: paged JSON → Document tree
-            ├── ingest/             ← Stage 2: Document tree → Neo4j
+            ├── ingest/             ← Stage 2: Document tree → Neo4j; delete / freeze / restore
             ├── annotation/         ← Stage 3: LangGraph annotation agent
             ├── entity_extraction/  ← Stage 4: LangGraph entity extraction
             ├── tabular/            ← Tabular bypass pipeline
             ├── storage/            ← Optional MongoDB storage layer
+            ├── freeze/             ← Snapshot backend for document freezing
             ├── models/             ← Extraction domain models
             │   └── default/        ← Built-in open-source models
             ├── utils/              ← Shared utilities
@@ -408,7 +390,7 @@ Contributions are welcome! Please follow these steps:
 ### Reporting issues
 
 Please open a GitHub issue with:
-- A minimal reproducible example (document type, CLI command used)
+- A minimal reproducible example (document type, the `run_pipeline()` / `run_*()` call used)
 - The full error traceback
 - Your Python version, OS, and Neo4j version
 

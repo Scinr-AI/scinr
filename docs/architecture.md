@@ -31,6 +31,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 6. [Data Flow](#6-data-flow)
 7. [Neo4j Schema](#7-neo4j-schema)
 8. [Storage Backends](#8-storage-backends)
+   - [Document Lifecycle: Delete, Freeze, Restore](#8c-document-lifecycle-delete-freeze-restore)
 9. [Prompt System](#9-prompt-system)
 10. [Error Handling](#10-error-handling)
 11. [Result Types](#11-result-types)
@@ -249,7 +250,7 @@ The ingestion module (`ingest/`) provides:
 
 **Node Properties:**
 
-- `:Document`: `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions` (plus `tenant_id` / `created_by_user_id` / `job_id` when provided)
+- `:Document`: `tenant_id`, `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions`, `created_by_user_id`, `job_id` — keyed by `(tenant_id, path, version)`; `tenant_id` is `"__public__"` for public documents
 - `:StructureNode`: `id` (composite key), `title`, `role`, `appearance_order`, `theme`, `source_page_ids`, `row_index` (tabular only)
 - `:InfoUnit`: `uid`, `title`, `order`, `description`
 
@@ -440,11 +441,15 @@ The tabular pipeline (`tabular/`) uses a **LangGraph**-based state machine (`tab
 
 1. **`load_sheets`** — Reads the file (CSV via pandas, XLSX/XLS via openpyxl), extracts headers and a 5-row preview, and stores per-sheet data in the `TabularState`.
 
-2. **`decide_model`** — Makes one LLM call per sheet to decide which extraction model to use. The LLM receives the sheet headers, preview rows, and the catalog of available models. Returns the `matched_model_class`.
+2. **`prepare_sheet`** — Selects the next pending sheet and loads it as the current sheet (headers, preview, row count).
 
-3. **`map_columns`** — Makes one LLM call per sheet to map column names to model fields. The LLM receives the sheet headers, the selected model's field definitions, and returns a column-to-field mapping.
+3. **`classify_theme`** — Makes one LLM call per sheet (`ThemeClassification`) to detect the sheet's thematic domain from its name, headers, and preview. Falls back to `"default"` if classification fails.
 
-4. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph directly to Neo4j. Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
+4. **`decide_model`** — Makes one LLM call per sheet to decide which extraction model to use. The LLM receives the sheet headers, preview rows, and the model catalog of the classified theme only (not the full catalog). Returns an `AnnotationDecision` with the `matched_model_class`, optional complementary models, and supplementary fields.
+
+5. **`map_columns`** — Makes one LLM call per sheet to map column names to model fields. The LLM receives the sheet headers, the selected model's field definitions, and returns a column-to-field mapping. If no model matched, the LLM call is skipped and all columns are mapped to `__extra__`.
+
+6. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph directly to Neo4j. Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
 
 **Per-File Process:**
 
@@ -618,7 +623,8 @@ scinr.newton/
 ├── config.py                   # ScinrConfig, configure(), get_config(), semaphore helpers
 ├── pipeline.py                 # run_pipeline() orchestrator + _process_document_unit()
 ├── pipeline_units.py           # DocumentUnit discovery (raw_file, extraction_json, ingestion_json, pre_ingested)
-├── results.py                  # PipelineResult, StageResult, DocumentResult dataclasses
+├── results.py                  # PipelineResult, StageResult, DocumentResult, DeletionResult,
+│                               #   OrphanCollectionResult, FreezeResult, RestoreResult dataclasses
 ├── exceptions.py               # ScinrError hierarchy
 │
 ├── annotation/                 # Stage 3: LLM classification
@@ -661,11 +667,23 @@ scinr.newton/
 │   ├── compact_extraction.py   # compact_extraction() — merge chunk results into document tree
 │   └── prompts/                # Extraction-specific prompt templates
 │
-├── ingest/                     # Stage 2: Neo4j ingestion
+├── freeze/                     # Freeze backend: where document snapshots are stored
+│   ├── base.py                 # FreezeRepository ABC, SnapshotRecord
+│   ├── factory.py              # get_freeze_storage() — backend factory
+│   └── mongodb/
+│       └── repository.py       # MongoDBFreezeRepository (GridFS + metadata collection)
+│
+├── ingest/                     # Stage 2: Neo4j ingestion, and the document lifecycle
 │   ├── config.py               # get_driver(), get_async_driver() — Neo4j driver singletons
 │   ├── loader.py               # load_documents(), load_files(), load_folder(), version resolution
 │   ├── nodes.py                # insert_document(), insert_structure_node(), insert_info_unit()
-│   └── schema.py               # setup_schema() — constraints and indexes
+│   ├── schema.py               # setup_schema(), ensure_indexes() — constraints and indexes
+│   ├── deletion.py             # delete_document(), collect_orphans()
+│   ├── freeze.py               # freeze_document(), export_document_snapshot()
+│   ├── restore.py              # restore_document()
+│   ├── _cascade.py             # Subtree deletion in bounded transactions (shared by delete and freeze)
+│   ├── _gc.py                  # Orphan collection: OrphanCollector (scoped) and sweep_tenant()
+│   └── _json_stream.py         # Streaming JSON writer for snapshots
 │
 ├── models/                     # Core Pydantic models
 │   ├── document_structure.py   # Document, StructureNode, InfoUnit, DocumentStructure, NodeRole
@@ -702,6 +720,7 @@ scinr.newton/
 ├── storage/                    # Storage backends
 │   ├── base.py                 # RawFileRepository, PageRepository ABCs
 │   ├── factory.py              # get_storage() — backend factory
+│   ├── filters.py              # scope_to_mongo() — shared read scope rendered for MongoDB
 │   ├── null.py                 # NullRawFileRepository, NullPageRepository (no-op)
 │   ├── config.py               # Storage configuration
 │   ├── models.py               # RawFileRecord, PageRecord Pydantic models
@@ -732,7 +751,6 @@ scinr.newton/
     ├── neo4j_retry.py          # Neo4j operation retry with exponential backoff
     ├── neo4j_concurrency.py    # Neo4j concurrency utilities
     ├── document_resolver.py    # resolve_leaf_document_names() — folder → leaf resolution
-    ├── file_archiver.py        # File archiving utilities
     ├── logging_config.py       # Structured logging setup
     └── uid.py                  # Deterministic UID generation (make_uid, make_instance_uid)
 ```
@@ -817,7 +835,7 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 
 | Label | Description | Primary Key |
 |---|---|---|
-| `:Document` | Ingested document (versioned) | `(path, version)` composite |
+| `:Document` | Ingested document (versioned, per tenant) | `(tenant_id, path, version)` composite |
 | `:StructureNode` | Structural division (section, table, row, etc.) | `id` |
 | `:InfoUnit` | Semantic information unit | `uid` |
 | `:ModelDecision` | Annotation decision for a node | — |
@@ -855,10 +873,10 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 
 ### Constraints and Indexes
 
-See `ingest/schema.py` for the complete DDL. Key constraints:
-- **10 unique constraints** ensuring node identity and preventing duplicates
-- **9 regular indexes** for query performance
-- **2 fulltext indexes** for semantic search on InfoUnit content
+See `ingest/schema.py` for the complete DDL, and [Neo4j Graph Storage — Indexes and Constraints](user-guides/neo4j-graph.md#indexes-and-constraints) for the list:
+- **Unique constraints** ensuring node identity and preventing duplicates
+- **Regular indexes** for query performance: tenant, user and job filters, composite tenant indexes, and the `uid` lookups `restore_document()` relies on
+- **Fulltext indexes** for semantic search on InfoUnit content
 
 ---
 
@@ -877,16 +895,28 @@ The storage layer abstracts raw file and converted page persistence behind repos
 ### MongoDB Structure
 
 When `storage_backend="mongodb"`:
-- **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path)
+- **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path, tenant_id, created_by_user_id, job_id)
 - **`raw_files` collection** (`mongodb_raw_files_collection`): Raw file metadata records
 - **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, images, and dimensions
 
+Every record carries the stored `tenant_id` (`"__public__"` for public uploads), `created_by_user_id` and `job_id` of the upload.
+
 ### Repository Interfaces
 
-- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path) -> str` and `delete(raw_file_id) -> None`
-- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown) -> str`, `get_pages(raw_file_id) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id) -> int`
+- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`
+- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
+
+`<owner>` is `tenant_id` / `created_by_user_id` / `job_id` (writes; `None` = public). `<scope>` is the navigation scope — `tenant_id` (`None` = all tenants), `include_public`, `created_by_user_id`, `job_id` — shared through `utils/scope.py`. Ingestion verifies that a document's `raw_file_id` belongs to its tenant (`ingest/raw_file_check.py`). See [Storage Backends — Multi-tenancy](user-guides/storage-backends.md#multi-tenancy).
 
 Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used when `storage_backend="none"`.
+
+### Freeze Backend
+
+Document snapshots (see [8c](#8c-document-lifecycle-delete-freeze-restore)) are stored by a separate repository, `FreezeRepository` (`freeze/base.py`), obtained with `get_freeze_storage()`:
+
+- `freeze_backend` is `"none"`, `"mongodb"` or `"custom"`. Unset, it inherits the resolved `storage_backend`.
+- With `"mongodb"`, the snapshot file goes to the GridFS bucket `mongodb_frozen_gridfs_bucket` (default `"frozen_snapshots"`) and its metadata to `mongodb_frozen_collection` (default `"frozen_documents"`), in the same database as the storage backend.
+- With `"custom"`, `custom_freeze_storage` is a `FreezeRepository`: `store_snapshot`, `read_snapshot_to_file`, `delete_snapshot`, and optionally `find_snapshots`. Every method is tenant-scoped.
 
 ---
 
@@ -923,6 +953,40 @@ Neo4j
 
 See the [Graph Navigation user guide](user-guides/graph-navigation.md) and the
 [Navigation API reference](api/navigation.md).
+
+---
+
+## 8c. Document Lifecycle: Delete, Freeze, Restore
+
+Five public `async` functions act on documents that are already in the graph. They are not pipeline stages: each opens and closes its own Neo4j driver, and none of them calls an LLM.
+
+| Function | Module | What it does |
+|---|---|---|
+| `delete_document()` | `ingest/deletion.py` | Removes the `:Document` node(s), their whole subtree and their stored raw files and pages. Irreversible. |
+| `freeze_document()` | `ingest/freeze.py` | Exports the subtree to a snapshot in the freeze backend and reduces the document to a stub (`frozen=true`). `delete_after_export=False` only stores the snapshot (a backup). |
+| `restore_document()` | `ingest/restore.py` | Rebuilds the subtree from its snapshot: a frozen stub, or a document that no longer exists. |
+| `export_document_snapshot()` | `ingest/freeze.py` | The same snapshot as a `dict`, a file or a stored snapshot, without touching the graph. |
+| `collect_orphans()` | `ingest/deletion.py` | Maintenance: deletes every orphaned `:Entity` / `:ModelInstance` / `:LabeledEntity` of one tenant. |
+
+**One selector.** All of them take a mandatory keyword-only `tenant_id` (`None` / `"__public__"` = public documents). Delete, freeze, restore and export then take exactly one of `path` (with an optional `version`) or `job_id`, plus an optional `created_by_user_id` filter, and cascade downwards through `IS_COMPOSED_OF*`.
+
+**Bounded transactions.** Neo4j caps the memory of all running transactions (`dbms.memory.transaction.total.max`, a fixed size on Aura), so none of these operations runs in one transaction:
+
+- Delete and freeze share `ingest/_cascade.py`: documents are processed 50 at a time and each delete commits every 1,000 nodes (`CALL { ... } IN TRANSACTIONS`).
+- The restore writes idempotent batches (`batch_size` rows, `concurrency` transactions in flight).
+- The price is atomicity, so each operation can be called again to finish. The `:Document` carries a mark while the work is in progress: `deletion_pending`, or `frozen_cleanup_pending` on a stub.
+
+**Snapshot first.** A freeze stores the complete snapshot before it deletes anything, and marks the stubs with its id. Whatever happens afterwards, the document can be restored.
+
+**Garbage collection** (`ingest/_gc.py`). An `:Entity` / `:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when nothing points at it.
+
+- Delete and freeze collect only what they can have orphaned: the nodes the deleted `:ExtractionResult` nodes pointed at, then what each deleted orphan pointed at (`OrphanCollector`). The cost follows the operation, not the tenant.
+- `collect_orphans()` checks every such node of a tenant (`sweep_tenant()`). The same sweep runs when a call finishes an interrupted delete or freeze, and when a restore finds extraction results written onto a frozen document.
+- Everything is scoped to one tenant.
+
+**Snapshot format.** A streaming JSON document with one entry per document. Nodes are identified by business key (`(tenant_id, path, version)`, `id`, `uid`), never by element id, so a snapshot can be restored into a graph where the nodes no longer exist. It is written with `ingest/_json_stream.py` and read with `ijson`, never loaded whole.
+
+See the [Document Deletion](user-guides/document-deletion.md) and [Document Freezing](user-guides/document-freezing.md) guides.
 
 ---
 
@@ -967,13 +1031,15 @@ ScinrError (base)
 ├── IngestionError          # Neo4j write failed
 ├── ModelError              # Pydantic model resolution failure
 ├── StorageError            # MongoDB unavailable/misconfigured
-└── ConversionError         # File converter failure
+├── FreezeError             # A document cannot be frozen, restored or snapshotted
+├── ConversionError         # File converter failure
+└── NavigationError         # Graph navigation (GraphConnectionError, UnsupportedOperationError, ScopeError)
 ```
 
 ### Retry Mechanisms
 
 - **LLM Retry** (`utils/llm_retry.py`): Exponential backoff retry for LLM calls
-- **Neo4j Retry** (`utils/neo4j_retry.py`): Exponential backoff retry for Neo4j operations
+- **Neo4j Retry** (`utils/neo4j_retry.py`): Exponential backoff retry for Neo4j operations, on transient errors (deadlocks, a full transaction memory pool), an expired session and whatever the driver declares retryable (a leader change in a cluster)
 - **JSON Repair** (`utils/llm_repair.py`): Secondary LLM call to repair malformed JSON output
 - **Bedrock Retry** (`utils/bedrock_retry.py`): Bedrock-specific retry with service-aware backoff
 
@@ -1023,8 +1089,9 @@ DocumentResult
 └── errors: list[str]
 
 DeletionResult
-├── path: str
+├── path: str | None
 ├── version: int | None
+├── job_id, tenant_id, created_by_user_id   (the selector, as passed)
 ├── found: bool
 ├── versions_deleted: list[int]
 ├── documents_deleted: int
@@ -1037,7 +1104,38 @@ DeletionResult
 ├── gc_entity_model_instance_deleted: int
 ├── gc_entity_model_instance_passes: int
 ├── gc_labeled_entity_deleted: int
-└── gc_labeled_entity_passes: int
+├── gc_labeled_entity_passes: int
+├── raw_files_deleted: int
+└── converted_pages_deleted: int
+
+OrphanCollectionResult                       (collect_orphans)
+├── tenant_id: str | None
+└── gc_entity_model_instance_deleted / _passes, gc_labeled_entity_deleted / _passes
+
+FreezeResult                                 (freeze_document)
+├── path, version, job_id, tenant_id, created_by_user_id   (the selector, as passed)
+├── found: bool
+├── mode: "freeze" | "backup"
+├── frozen_blob_id: str | None
+├── versions_frozen: list[int]
+├── documents_frozen: int
+├── structure_nodes_deleted / _kept, info_units_deleted
+├── model_decisions_deleted / _kept, proposed_models_deleted, proposed_fields_deleted
+├── extraction_results_deleted / _kept
+└── gc_entity_model_instance_deleted / _passes, gc_labeled_entity_deleted / _passes
+
+RestoreResult                                (restore_document)
+├── path, version, job_id, tenant_id, created_by_user_id   (the selector, as passed)
+├── found: bool
+├── versions_restored: list[int]
+├── documents_restored: int
+├── documents_recreated: int
+├── frozen_blob_ids: list[str]
+├── snapshots_deleted: int
+├── nodes_created: int
+├── nodes_reused: int
+├── relationships_created: int
+└── gc_entity_model_instance_deleted / _passes, gc_labeled_entity_deleted / _passes
 ```
 
 ### Result Semantics

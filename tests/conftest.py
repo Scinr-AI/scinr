@@ -1,20 +1,13 @@
 """
 tests/conftest.py — Shared fixtures for the scinr-ingest test suite.
 
-The import chain scinr.newton.__init__ → cli → (many heavy modules) triggers
-get_config() at module load time, which requires a configured LLM. We break
-this chain by pre-stubbing scinr.newton.cli in sys.modules before any test
-module is collected.
-
 All module-level statements here run before pytest collects any test file.
 """
 from __future__ import annotations
 
 import os
-import sys
-import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -35,33 +28,6 @@ except ImportError:
 os.environ.pop("MODEL_ID", None)
 os.environ.pop("REPAIR_MODEL_ID", None)
 os.environ.pop("STORAGE_BACKEND", None)
-
-# ---------------------------------------------------------------------------
-# Step 3: Pre-stub scinr.newton.cli in sys.modules so that __init__.py's
-# "from scinr.newton.cli import ..." does not trigger the heavy import chain.
-# ---------------------------------------------------------------------------
-
-
-def _make_stub_module(name: str, **attrs) -> types.ModuleType:
-    """Create a minimal stub module with the given attributes."""
-    mod = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(mod, k, v)
-    return mod
-
-
-# Stub for scinr.newton.cli — provides all symbols that __init__.py imports
-_cli_stub = _make_stub_module(
-    "scinr.newton.cli",
-    run_preprocess=AsyncMock(),
-    run_extraction=AsyncMock(),
-    run_ingestion=AsyncMock(),
-    run_annotation=AsyncMock(),
-    run_entity_extraction=AsyncMock(),
-    run_tabular_pipeline=AsyncMock(),
-    main=MagicMock(),
-)
-sys.modules["scinr.newton.cli"] = _cli_stub
 
 
 # ---------------------------------------------------------------------------

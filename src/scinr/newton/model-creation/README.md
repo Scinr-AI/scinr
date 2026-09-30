@@ -126,6 +126,15 @@ its **composite key** for `ModelInstance` deduplication. The engine combines all
 Every model that is referenced as a `target_model` in an `instance_relationships`
 declaration **must** mark its key fields with `instance_key: True`.
 
+Marking a field with `instance_key` also **indexes it per tenant**: the catalog setup
+creates a `(tenant_id, <field>)` index on `:ModelInstance` (`idx_mi_key_<field>`), shared by
+every model with a key field of that name. Key values are stored normalized
+(`normalize_key`: lower-cased, accents stripped, whitespace collapsed). To look an instance
+up by its **full** key use `nav.get_model_instance_by_key(model_class, {...})`, which
+normalizes the values and rebuilds the `uid`; do not write `toLower(mi.field) = ...` —
+a function applied to the property prevents the planner from using any index. A filter on
+**part** of the key (`where={"field": normalize_key(value)}`) uses the per-field index.
+
 > **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Cross-Section `:ModelInstance` Linking via `instance_key`](../../../../docs/user-guides/neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) shows this exact mechanism (UID hashing, shell-node lifecycle) against a real, populated graph example (`CTDSectionSpec`).
 
 ### LabeledEntity

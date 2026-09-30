@@ -19,7 +19,7 @@ def generate_llms_txt() -> None:
 > AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine.
 
 ## Overview
-scinr is a Python library and CLI tool (`newton`) designed to process complex life sciences documents (PDFs, Word documents, PowerPoint presentations, Excel spreadsheets, CSVs) into structured graph knowledge in Neo4j and MongoDB.
+scinr is a Python library designed to process complex life sciences documents (PDFs, Word documents, PowerPoint presentations, Excel spreadsheets, CSVs) into structured graph knowledge in Neo4j and MongoDB.
 
 ## Key Capabilities
 - **5-Stage Document Ingestion Pipeline**: Preprocess -> Extract -> Ingest -> Annotate -> Entity Extraction.
@@ -31,7 +31,6 @@ scinr is a Python library and CLI tool (`newton`) designed to process complex li
 - [Getting Started](getting-started.md): Installation, prerequisites, and quick start example.
 - [Architecture](architecture.md): Overview of stages 0-4 and internal storage model.
 - [Configuration](configuration.md): Environment settings, database connections, LLM provider setup.
-- [CLI Reference](cli.md): `newton` CLI command line tools and options.
 - [User Guides - Custom Models](user-guides/custom-models.md): Defining Pydantic extraction models.
 - [User Guides - Tabular Pipeline](user-guides/tabular-pipeline.md): Processing Excel and CSV spreadsheets.
 - [User Guides - Neo4j Graph](user-guides/neo4j-graph.md): Neo4j graph schema and triple storage.

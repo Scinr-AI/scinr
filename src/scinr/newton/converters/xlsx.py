@@ -2,7 +2,7 @@
 converters/xlsx.py — XLSX/XLS files are handled by the tabular ingestion pipeline.
 
 XLSX/XLS files do not require conversion to an intermediate format.
-Use: python main.py --stage tabular --input-raw <carpeta>
+Use: run_tabular_pipeline(<carpeta>) or run_pipeline(input_raw=<carpeta>)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class XlsxConverter(BaseConverter):
         raise ConversionError(
             f"El fichero XLSX/XLS '{source.name}' es totalmente compatible con el pipeline de "
             "ingesta tabular, que lo procesa de forma directa y eficiente sin conversión previa. "
-            "Usa: python main.py --stage tabular --input-raw <carpeta>. "
+            "Usa: run_tabular_pipeline(<carpeta>) o run_pipeline(input_raw=<carpeta>). "
             "No utilices el módulo converters para ficheros XLSX/XLS."
         )
 

@@ -1,7 +1,7 @@
 """
 tests/unit/test_csv_reader.py — Unit tests for scinr.newton.tabular.reader
 
-Imports directly from the submodule to avoid triggering the CLI import chain.
+Imports directly from the submodule to avoid triggering the package's heavy import chain.
 """
 from __future__ import annotations
 

@@ -259,15 +259,20 @@ class Document(StrictModel):
     context_instructions: str | None = Field(
         default=None,
         description=(
-            "Free-text user-provided context injected at ingestion time via --context. "
+            "Free-text user-provided context injected at ingestion time via context_instructions. "
             "Used by LLM stages to focus extraction and annotation."
         ),
     )
     tenant_id: str | None = Field(
         default=None,
         description=(
-            "Multi-tenant owner id, supplied by the caller at ingestion time and "
-            "persisted verbatim on the :Document node. Never populated by the LLM."
+            "Multi-tenant owner id, supplied by the caller at ingestion time. Part of "
+            "the document identity: a :Document is keyed by (tenant_id, path, version), "
+            "so two tenants ingesting the same path get independent documents. None "
+            "means a public document, readable by every tenant and never merged with a "
+            "tenant's content; it is stored as the reserved value '__public__' "
+            "(see utils/tenancy.py), which is rejected as an input. Never populated "
+            "by the LLM."
         ),
     )
     created_by_user_id: str | None = Field(

@@ -22,6 +22,7 @@ from scinr.newton.annotation.agent import (
     _run_annotation_parallel,
     run_annotation_agent,
 )
+from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
 # Helpers — fake async Neo4j driver/session (async context manager protocol)
@@ -59,7 +60,7 @@ class _FakeAsyncDriver:
     that returns a fresh async-context-manager session each call.
     """
 
-    def session(self):
+    def session(self, **kwargs):
         return _FakeAsyncSession()
 
 
@@ -103,7 +104,7 @@ class TestRunAnnotationParallelConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_fetch(driver, document_name, only_unannotated=False):
+        async def _tracking_fetch(driver, *, tenant_id, doc_path, only_unannotated=False):
             await tracker.track()
             return []
 
@@ -134,13 +135,13 @@ class TestRunAnnotationParallelConcurrency:
             ),
         ):
             results = await asyncio.gather(
-                _run_annotation_parallel("docA"),
-                _run_annotation_parallel("docB"),
+                _run_annotation_parallel("docA", tenant_id=None, doc_path="docA"),
+                _run_annotation_parallel("docB", tenant_id=None, doc_path="docB"),
             )
 
         assert results == [
-            {"document_name": "docA", "nodes_to_annotate": [], "errors": []},
-            {"document_name": "docB", "nodes_to_annotate": [], "errors": []},
+            {"document_name": "docA", "doc_path": "docA", "nodes_to_annotate": [], "errors": []},
+            {"document_name": "docB", "doc_path": "docB", "nodes_to_annotate": [], "errors": []},
         ]
         assert tracker.max_in_flight == 2
 
@@ -153,7 +154,7 @@ class TestRunAnnotationParallelConcurrency:
 class TestRunAnnotationAgentPreconditionConcurrency:
     async def test_two_concurrent_calls_overlap_during_leaf_resolution(self):
         """Two concurrent `run_annotation_agent()` calls must overlap during
-        `resolve_leaf_document_names_async()` — proving the precondition-
+        `resolve_leaf_documents_async()` — proving the precondition-
         check / leaf-resolution plumbing (async driver session,
         `await session.run(...)`, `await result.single()`) no longer blocks
         the event loop synchronously either.
@@ -165,9 +166,9 @@ class TestRunAnnotationAgentPreconditionConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_resolve(driver, document_name):
+        async def _tracking_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
             await tracker.track()
-            return [document_name]
+            return [LeafDocument(document_name, document_name)]
 
         fake_driver = _FakeAsyncDriver()
 
@@ -177,13 +178,13 @@ class TestRunAnnotationAgentPreconditionConcurrency:
                 MagicMock(return_value=fake_driver),
             ),
             patch(
-                "scinr.newton.utils.document_resolver.resolve_leaf_document_names_async",
+                "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
                 AsyncMock(side_effect=_tracking_resolve),
             ),
             patch(
                 "scinr.newton.annotation.agent._run_annotation_for_single_document",
                 AsyncMock(
-                    side_effect=lambda document_name, only_unannotated=False, context_instructions_override=None: {
+                    side_effect=lambda document_name, only_unannotated=False, context_instructions_override=None, *, tenant_id, doc_path: {
                         "document_name": document_name,
                         "nodes_to_annotate": [],
                         "errors": [],
@@ -209,25 +210,24 @@ class TestRunAnnotationAgentPreconditionConcurrency:
 
 
 class TestDocumentResolverAsyncMigration:
-    def test_resolve_leaf_document_names_async_is_a_coroutine_function(self):
+    def test_resolve_leaf_documents_async_is_a_coroutine_function(self):
         """Guard against a future regression that quietly turns
-        `resolve_leaf_document_names_async()` back into a synchronous
+        `resolve_leaf_documents_async()` back into a synchronous
         function without anyone noticing.
         """
-        from scinr.newton.utils.document_resolver import resolve_leaf_document_names_async
+        from scinr.newton.utils.document_resolver import resolve_leaf_documents_async
 
-        assert inspect.iscoroutinefunction(resolve_leaf_document_names_async) is True
+        assert inspect.iscoroutinefunction(resolve_leaf_documents_async) is True
 
-    def test_sync_resolve_leaf_document_names_still_exists(self):
-        """The original synchronous `resolve_leaf_document_names()` must
-        remain untouched — `run_manual_annotation()`'s sibling code path and
+    def test_sync_resolve_leaf_documents_still_exists(self):
+        """The synchronous `resolve_leaf_documents()` must remain —
         `pipeline_units._discover_pre_ingested_units()` (via
-        `asyncio.to_thread()`) still depend on it directly.
+        `asyncio.to_thread()`) depends on it directly.
         """
-        from scinr.newton.utils.document_resolver import resolve_leaf_document_names
+        from scinr.newton.utils.document_resolver import resolve_leaf_documents
 
-        assert inspect.iscoroutinefunction(resolve_leaf_document_names) is False
-        assert callable(resolve_leaf_document_names)
+        assert inspect.iscoroutinefunction(resolve_leaf_documents) is False
+        assert callable(resolve_leaf_documents)
 
 
 if __name__ == "__main__":

@@ -89,6 +89,162 @@ depend on its shape).
 
 ---
 
+## Scope: tenant, user, job
+
+Every navigation method — except the global-catalogue ones and `execute_raw` —
+takes four keyword-only filters that restrict what it sees:
+
+```python
+tenant_id: str | None = None                            # None = all tenants
+include_public: bool = False                            # add the public documents
+created_by_user_id: str | Sequence[str] | None = None   # one value or several
+job_id: str | Sequence[str] | None = None               # one value or several
+```
+
+| `tenant_id` | `include_public` | What is returned |
+|---|---|---|
+| `None` | any | **Everything** — every tenant, public and legacy data (no tenant filter) |
+| `"__public__"` | any | Only public documents |
+| `"acme"` | `False` | Only tenant `acme` |
+| `"acme"` | `True` | `acme` **plus** public documents |
+| `""` | — | `NavigationError` |
+
+`created_by_user_id` and `job_id` match with **any-of**: `job_id=["j1", "j2"]`
+returns what either job produced (a `ModelInstance` shared by both is returned
+once). They combine by AND with each other and with the tenant. An empty list
+raises `NavigationError`.
+
+```python
+async with graph_navigator() as nav:
+    docs = await nav.get_documents(tenant_id="acme", include_public=True)
+    rows = await nav.get_model_instances_by_class(
+        "VariationModel", tenant_id="acme", job_id=["job-1", "job-2"]
+    )
+```
+
+Stored tenants are exposed as they are: a public document's `DocumentRef.tenant_id`
+is `"__public__"` (never `None`, which is reserved for "no filter").
+
+### Always fix the scope once: `nav.scoped(...)`
+
+Because the default is **all tenants**, an API layer that forgets to pass
+`tenant_id` exposes everything. `scoped()` returns a navigator that fills the
+scope into every call and refuses to widen it:
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+await acme.get_documents()                       # acme + public
+await acme.get_documents(job_id="job-1")         # narrowing is fine
+await acme.get_documents(tenant_id="globex")     # NavigationError — outside the scope
+await acme.execute_raw("MATCH (n) RETURN n")     # NavigationError — cannot be scoped
+```
+
+Catalogue methods (`list_catalog_models`, `get_catalog_graph`, `list_themes`,
+`list_relationship_types`, `list_node_labels`) are global and take no scope.
+
+### How the filters behave
+
+- **Lists return every match in scope.** With `tenant_id=None`, a path that exists
+  in two tenants yields both documents; each `DocumentRef` carries its tenant.
+- **Single-document methods** (`get_one_document`, `get_latest_version`,
+  `get_document_tree`, `get_document_parent`, `get_document_ancestors`,
+  `get_document_stats`, `get_document_model_profile`, `get_annotation_coverage`)
+  raise `NavigationError("... exists in several tenants ...")` when the path is
+  ambiguous — pass `tenant_id`. With `include_public=True`, a tenant's document
+  **shadows** the public one at the same path.
+- **A `DocumentRef` selector is authoritative**: it carries its own tenant; an
+  explicit, different `tenant_id` raises `NavigationError`.
+- **By-id lookups** (`get_structure_node`, `get_structure_nodes_by_ids`,
+  `get_model_instance`, …) only resolve
+  inside the scope: another tenant's id behaves as if it did not exist.
+- **Trees and spines** (`get_document_tree`, `get_structure_subtree`,
+  `get_model_instance_subtree`, ancestors): `created_by_user_id` / `job_id` filter
+  the **anchor** only, so no intermediate node is dropped and orphaned. Flat lists
+  filter every element.
+- **Folder documents** are re-`MERGE`d on each ingestion, so their `job_id` /
+  `created_by_user_id` are those of the last run that touched them.
+- **`get_model_instance_by_key`** cannot span tenants (the instance `uid` embeds
+  the tenant): pass a concrete `tenant_id` or `"__public__"`; `None` raises
+  `NavigationError`. With `include_public=True` the tenant's instance is tried
+  first, then the public one.
+- **`get_entity_triples(value)`** matches by value: with `tenant_id=None` the same
+  value extracted by several tenants comes back once per tenant. Pass a tenant.
+- **Free graph walks** (`neighbors`, `shortest_path`, `subgraph`): with a tenant,
+  every intermediate node must belong to it, and catalogue nodes (shared by all
+  tenants) can only be the far end of a path — never a bridge into another
+  tenant. With `tenant_id=None` the walk is unrestricted.
+- **`get_graph_summary`** counts only the scope's nodes (catalogue nodes are
+  reported unfiltered).
+- **`execute_raw`** is an administrative tool outside this contract.
+
+### Why a traversal cannot leave the tenant
+
+Most methods apply the **tenant** predicate to their anchor (the document, node,
+instance or entity they start from) and filter the nodes they reach only by
+`created_by_user_id` / `job_id`. They do not re-check the tenant on every hop:
+isolation comes from how the graph is written, not from the reads.
+
+**The invariant.** No relationship between data nodes ever connects two
+tenants, and "public" (`"__public__"`) counts as one more tenant:
+
+- a document's content (`:Document` → `:StructureNode` → `:InfoUnit` /
+  `:ModelDecision` / `:ExtractionResult` → …) is keyed by the document's
+  `(tenant_id, path, version)`, so it all has the document's tenant;
+- the content-deduplicated nodes (`:ModelInstance`, `:LabeledEntity`, `:Entity`)
+  fold the tenant into their `uid` hash. When an extraction links to one
+  (`REFERENCES`, `HAS_*` containment, instance-to-instance relationships,
+  entity relationships, triples), it computes the target's `uid` with **its own**
+  tenant, so it can only `MERGE` onto a node of that same tenant;
+- versioning (`HAS_NEWER_VERSION`, `replaces`) and folders (`IS_COMPOSED_OF`) are
+  tenant-scoped.
+
+The only nodes shared across tenants are the global catalogue ones
+(`:CatalogModel`, `:ModelField`, `:EntityLabel`, `:Theme`). The dedicated
+methods never walk *through* them into data of another tenant, and the free
+walks (`neighbors`, `shortest_path`, `subgraph`) only accept them as the far end
+of a path. So starting from a node inside the scope, every node reachable along
+data relationships is inside the scope too, whatever the depth.
+
+**The trade-off: public content is not linked to any tenant.** Because the
+public tenant is isolated in the same way, a tenant's extraction never reuses
+or links to public nodes. If `acme` extracts an entity that a public document
+already contains, `acme` gets its own `:LabeledEntity` / `:ModelInstance`;
+nothing connects it to the public one. Consequences:
+
+- With `include_public=True` a tenant sees **its own nodes and the public nodes
+  side by side**, possibly two nodes for the same key (e.g.
+  `get_model_instances_by_class`, `get_labeled_entities`). Correlate them by
+  value or key (`get_model_instance_by_key`, `normalized_value`), not by
+  following relationships.
+- Relationship-following methods (`get_entity_relationships`,
+  `get_model_instances_referencing_entity`, `get_related_model_instances`,
+  `get_documents_for_model_instance`, `get_entity_triples`, …) never go from a
+  tenant's node to a public one, or back.
+
+This is a deliberate choice: it is what keeps the anchor-based filtering safe.
+**Any change that links tenant data to public data** — reusing public nodes
+from a tenant extraction, or adding explicit tenant → public relationships —
+would let a traversal go `acme → public → globex`. Such a change must, in the
+same step, make every navigation method check the tenant on **every** reached
+node (including the intermediate nodes of variable-length paths and the
+children of `get_model_instance_subtree`), as the free walks already do.
+
+### Known limitations
+
+- Public content is not linked to tenant content (see
+  [Why a traversal cannot leave the tenant](#why-a-traversal-cannot-leave-the-tenant)).
+- `job_ids` / `created_by_user_ids` on merged nodes (`ModelInstance`,
+  `LabeledEntity`, `Entity`) are cumulative provenance: after deleting a job's
+  documents, surviving shared nodes keep listing that job.
+- A `job_id` filter on merged nodes without a `tenant_id` scans the label (the
+  arrays are not indexable); with a tenant, the `tenant_id` index narrows first.
+- Navigation does not filter on `frozen`: a frozen document is still listed, but
+  its structure, annotations and extractions are not in the graph until
+  `restore_document()` (see [Document Freezing](document-freezing.md)). Check the
+  `frozen` property of the `:Document` when that matters.
+
+---
+
 ## Documents and folders
 
 "Root" (parent) documents are those with **no incoming `IS_COMPOSED_OF`**.
@@ -126,6 +282,7 @@ applied to prevent runaway traversals; pass an explicit `depth` to exceed it).
 nodes   = await nav.get_structure_nodes("doc", roles=["table"], title_contains="capsule")
 roots   = await nav.get_root_structure_nodes("doc")            # HAS_STRUCTURE only
 node    = await nav.get_structure_node(node_id)
+batch   = await nav.get_structure_nodes_by_ids([id_a, id_b])   # one lookup, request order, found only
 kids    = await nav.get_child_nodes(node_id, depth=2)
 subtree = await nav.get_structure_subtree(node_id, include_info_units=True)
 parent  = await nav.get_parent_node(node_id)
@@ -358,19 +515,83 @@ with no raw path raises `UnsupportedOperationError`.
 
 ## Reading source text
 
-`scinr.newton.navigation.pages` resolves the verbatim converted markdown behind a
-node / info unit / document. It uses the **storage** abstraction, so it needs a
-persistent storage backend.
+The navigator resolves the verbatim converted markdown behind structure nodes,
+an info unit or a document. These methods combine the graph with the
+**storage** abstraction, so they need a persistent storage backend. Like every
+other method they take the four scope filters.
 
 ```python
-from scinr.newton.navigation.pages import (
-    get_node_source_page_ids, get_node_source_text,
-    get_info_unit_source_text, get_document_source_text,
-)
-
-ids   = await get_node_source_page_ids(nav, node_id)      # no storage needed
-pages = await get_node_source_text(nav, node_id)          # raises StorageError if storage_backend="none"
+result = await nav.get_structure_nodes_source_pages([id_a, id_b])  # StructureNodesSourcePages
+pages  = await nav.get_info_unit_source_text(uid)                  # list[PageText]
+pages  = await nav.get_document_source_text("Reports/annual", version=2)
 ```
+
+A `PageText` carries `page_id`, `index`, `markdown`, and the `raw_file_id`,
+`filename` and `folder_path` of the upload it comes from. The functions are
+also available in `scinr.newton.navigation.pages`, taking the navigator as
+first argument (`get_structure_nodes_source_pages(nav, [id_a, id_b], ...)`).
+A node's page ids need no storage: read `source_page_ids` from
+`get_structure_nodes_by_ids()` (or `get_structure_node()`).
+
+**Structure nodes are read in batches.** `get_structure_nodes_source_pages`
+takes the unique `id`s (`StructureNodeRef.id`, not the short local `node_id`)
+of one or more `:StructureNode`s — pass a single id for one node. Each page is
+returned once, in `pages` (`page_id → PageText`), even when several nodes share
+it; each node lists its `page_ids`, ordered by page index. Individual ids never
+raise; they are reported in status groups:
+
+| Field | Meaning |
+| --- | --- |
+| `nodes` | One `StructureNodeSourcePages` (`structure_node_id`, `page_ids`, `not_found_page_ids`) per node with pages, in request order |
+| `pages` | `page_id → PageText`, each page once |
+| `not_found_structure_nodes` | Ids that do not exist **or** are outside the scope (not told apart, so nothing leaks about another tenant) |
+| `structure_nodes_without_pages` | Nodes in scope with empty `source_page_ids` |
+| `not_found_page_ids` (per node) | Page ids missing from storage or belonging to another tenant |
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+result = await acme.get_structure_nodes_source_pages([table_id, section_id, "unknown"])
+for entry in result.nodes:
+    text = "\n\n".join(result.pages[p].markdown for p in entry.page_ids)
+    print(entry.structure_node_id, len(text), entry.not_found_page_ids)
+print(result.not_found_structure_nodes)       # ["unknown"]
+```
+
+Duplicate ids are ignored. `StorageError` is raised only when there are pages
+to read and `storage_backend="none"`. There is no size limit on the list (the
+lookup uses the unique `id` constraint); an API layer should cap the request
+size itself.
+
+**The original uploaded file.** `nav.get_document_original(document, version=None)`
+returns an `OriginalFile` — the stored `RawFileRecord` (`filename`,
+`content_type`, `size_bytes`, …) plus a single-use stream of the binary — or
+`None` when the document is not found or has no stored original:
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+original = await acme.get_document_original("Reports/annual")
+if original is not None:
+    async for chunk in original.stream:                   # constant memory
+        response.write(chunk)
+    # or: data = await original.read()
+```
+
+**How the pages are read.** The structure nodes are looked up in one graph
+query (for an info unit, the node that owns it), and only their
+`source_page_ids` are read from storage, by id — one read per stored tenant of
+the nodes (normally one; two with `include_public=True`). The owning `:Document` is not resolved and its other pages
+are never loaded, so the cost depends on the size of the node, not of the
+document. `get_document_source_text` reads every page of the document, and
+`get_document_original` reads the file record and its binary with a single
+lookup.
+
+**Tenancy.** The node / document is resolved in the graph with the scope (pass
+`tenant_id=...`, or use a scoped navigator in a multi-tenant API). The storage
+read is then also filtered by the resolved node's / `:Document`'s own stored
+tenant (a public node or document only reads public pages): even a page id or
+`raw_file_id` pointing at another tenant's upload returns nothing (for a
+structure node, it is reported in `not_found_page_ids`). See
+[Storage Backends — Multi-tenancy](storage-backends.md#multi-tenancy).
 
 ---
 

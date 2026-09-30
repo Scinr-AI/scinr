@@ -146,7 +146,9 @@ async def run_pipeline(
             requested stages) — see that entry for the full explanation.
         stages: Ordered list of stage names to execute (`"preprocess"`, `"extraction"`, `"ingestion"`,
             `"annotation"`, `"entity_extraction"`, `"tabular"`). Default runs full pipeline.
-        document_names: Explicit list of Neo4j `document_name` values for Stage 3/4 runs.
+        document_names: Explicit list of Neo4j `document_name` values for Stage 3/4 runs,
+            resolved to leaf documents among `tenant_id`'s documents only (`None` =
+            public documents); each leaf is then processed by its path.
             Ignored (silently) if `extraction_input_dir` or `ingestion_input_dir` is also
             provided — see the precedence note on those two parameters.
         document_names_dir: Directory of `extract-*.json` files to extract document names from.
@@ -157,7 +159,8 @@ async def run_pipeline(
         only_unextracted: Skip nodes that already have extracted entities.
         context_instructions: Custom instructions injected into converter and annotation prompts.
         update_mode: If `True`, Stage 2 replaces latest document version in Neo4j without incrementing version.
-        replaces: `document_name` of existing document superseded by newly ingested document.
+        replaces: `document_name` of existing document superseded by newly ingested document
+            (looked up among `tenant_id`'s documents only).
         parallel_docs: Maximum number of documents processed concurrently (default: `5`).
         on_partial_failure: Control behavior when a stage fails
             (`"abort"`, `"continue"`, or `"warn"`).
@@ -206,21 +209,30 @@ async def run_pipeline(
 
         tabular_extensions: File extensions to process via tabular pipeline (default: `.csv`, `.xlsx`, `.xls`).
         tabular_delimiter: Delimiter character for CSV tabular files.
-        tenant_id: Optional caller-supplied multi-tenant owner id. When provided, it is
-            written verbatim onto every `:Document` node this run creates — leaf
-            documents, ancestor folder-parent nodes, and tabular documents alike —
-            and is serialized into any `extract-*.json` produced by the extraction
-            stage. Always SET on the node (stored as null when omitted), mirroring
-            `context_instructions`. A value passed here overrides any value already
-            baked into an `extract-*.json` being ingested; omitting it leaves that
-            baked-in value untouched. Not threaded through the standalone
+        tenant_id: Tenant that owns everything this run writes, and **part of the
+            document identity**: a `:Document` is keyed by `(tenant_id, path,
+            version)`, so two tenants ingesting the same path get two independent
+            uploads — their own documents, folders, versions, structure,
+            annotations and extractions, with no relationship between them.
+            Versions are numbered per tenant, and `update_mode` / `replaces` /
+            annotation / entity extraction only ever select this tenant's
+            documents. `None` means a **public** document: readable by every
+            tenant, but still its own upload whose content (including merged
+            `ModelInstance` / `LabeledEntity` / `Entity` nodes) is never merged
+            with any tenant's. Public is stored in Neo4j as the reserved value
+            `"__public__"` (see `utils/tenancy.py`), which is rejected as an
+            input here. Serialized into any `extract-*.json` produced by the
+            extraction stage; a value passed here overrides any value already
+            baked into an `extract-*.json` being ingested, and omitting it leaves
+            that baked-in value in force. Not threaded through the standalone
             `preprocess` stage — supply it on the `run_pipeline()` call that
             performs extraction and/or ingestion.
         created_by_user_id: Optional caller-supplied id of the user that launched this
-            ingestion. Same write/override semantics as `tenant_id`.
+            ingestion. Written verbatim onto every `:Document` node this run creates
+            (null when omitted), with the same override semantics as `tenant_id`.
         job_id: Optional caller-supplied ingestion job/run id. Same write/override
-            semantics as `tenant_id`. Doubles as a bulk-delete selector for
-            `delete_document(job_id=...)`.
+            semantics as `created_by_user_id`. Doubles as a bulk-delete selector for
+            `delete_document(job_id=..., tenant_id=...)`.
         fast_extraction: Opt-in, resolved once per call and passed explicitly through
             every layer down to Stage 1 — never read from global config, by design,
             so that concurrent `run_pipeline()` calls with different values never
@@ -389,10 +401,11 @@ async def run_pipeline(
         )
 
     # ── 10. Replaces pre-flight check ─────────────────────────────────────────
+    replaced_path: str | None = None
     if replaces is not None and "ingestion" in effective_stages:
         _driver = get_driver()
         try:
-            preflight_check_replaces(_driver, replaces)
+            replaced_path = preflight_check_replaces(_driver, replaces, tenant_id=tenant_id)["path"]
             logger.info(
                 "Pre-flight check passed: document '%s' found in Neo4j.", replaces
             )
@@ -493,7 +506,11 @@ async def run_pipeline(
     # <- ingested names -> document_names -> document_names_dir) into a
     # single discovery call. Precedence matches the real branches of the
     # legacy sequential code above (see Coder report for the full analysis).
-    from scinr.newton.pipeline_units import _discover_units, build_all_paths_for_versioning
+    from scinr.newton.pipeline_units import (
+        _discover_units,
+        build_all_paths_for_versioning,
+        unit_tenant,
+    )
 
     if ingestion_input_dir is not None:
         units = await _discover_units(ingestion_input_dir=ingestion_input_dir)
@@ -516,7 +533,7 @@ async def run_pipeline(
     ):
         units = await _discover_units(ingestion_input_dir=extraction_output_dir)
     elif document_names is not None:
-        units = await _discover_units(document_names=document_names)
+        units = await _discover_units(document_names=document_names, tenant_id=tenant_id)
     elif document_names_dir is not None:
         units = await _discover_units(document_names_dir=document_names_dir)
     else:
@@ -550,8 +567,9 @@ async def run_pipeline(
             sync_driver = get_driver()
             setup_schema(sync_driver)
             all_paths = build_all_paths_for_versioning(units)
+            batch_tenants = list(dict.fromkeys(unit_tenant(u, tenant_id) for u in units))
             shared_ingest_version = await asyncio.to_thread(
-                resolve_batch_version_sync, sync_driver, all_paths, update_mode
+                resolve_batch_version_sync, sync_driver, all_paths, update_mode, batch_tenants
             )
 
         if ("annotation" in effective_stages or "entity_extraction" in effective_stages) and units:
@@ -673,7 +691,13 @@ async def run_pipeline(
                 ]
                 _driver = get_driver()
                 try:
-                    apply_replacement(_driver, replaces, ingested_doc_names)
+                    apply_replacement(
+                        _driver,
+                        replaces,
+                        ingested_doc_names,
+                        tenant_id=tenant_id,
+                        replaced_path=replaced_path,
+                    )
                 finally:
                     _driver.close()
 
@@ -795,14 +819,18 @@ async def _process_document_unit(
         extraction_input_dir: Root input folder for ``extraction_json`` units, used to mirror the
             relative subdirectory structure under *extraction_output_dir*.
         raw_file_repo: Optional ``RawFileRepository`` forwarded to ``convert_one()``.
+            The raw file and its pages are stored under this unit's tenant and
+            provenance (``tenant_id`` / ``created_by_user_id`` / ``job_id``).
         page_repo: Optional ``PageRepository`` forwarded to ``convert_one()``.
         context_instructions: Free-text context forwarded to ``convert_one()`` and
             ``run_annotation()``.
-        tenant_id: Provenance metadata forwarded to ``extract_one_intermediate()`` /
+        tenant_id: Tenant forwarded to ``extract_one_intermediate()`` /
             ``extract_one_file()`` (so it is serialized into ``extract-*.json``) and
             to ``ingest_one()`` / ``ingest_one_from_path()`` (so it wins over any
-            value already baked into an ingested ``extract-*.json``). Ends up on
-            every ``:Document`` node this unit creates.
+            value already baked into an ingested ``extract-*.json``). Part of the
+            identity of every ``:Document`` this unit creates, and — with the
+            unit's document path — the selector ``run_annotation()`` /
+            ``run_entity_extraction()`` receive (see ``pipeline_units.unit_tenant``).
         created_by_user_id: Provenance metadata, same forwarding as *tenant_id*.
         job_id: Provenance metadata, same forwarding as *tenant_id*.
         update_mode: Forwarded to ``ingest_one()`` / ``ingest_one_from_path()``.
@@ -837,12 +865,16 @@ async def _process_document_unit(
     """
     from scinr.newton.converters.main import convert_one
     from scinr.newton.ingest.loader import ingest_one, ingest_one_from_path
-    from scinr.newton.pipeline_units import UnitResult
+    from scinr.newton.pipeline_units import UnitResult, unit_tenant
     from scinr.newton.stages import run_annotation, run_entity_extraction
     from scinr.newton.stages.extraction import extract_one_file, extract_one_intermediate
 
     stage_results: dict[str, DocumentResult] = {}
     current_name = unit.document_name_hint
+    # Annotation / entity extraction select the document by (tenant, path) —
+    # never by name, which is not unique within a tenant nor across tenants.
+    current_path = unit.doc_path
+    doc_tenant = unit_tenant(unit, tenant_id)
 
     async with document_semaphore:
         try:
@@ -861,6 +893,9 @@ async def _process_document_unit(
                     page_repo=page_repo,
                     _relative_prefix=relative_prefix,
                     context_instructions=context_instructions,
+                    tenant_id=doc_tenant,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
                 )
                 if failures:
                     stage_results["preprocess"] = DocumentResult(
@@ -907,6 +942,7 @@ async def _process_document_unit(
                     )
                     return UnitResult(current_name, stage_results, "extraction", None)
                 current_name = doc_obj.document_name
+                current_path = doc_obj.doc_path or doc_obj.document_name
                 stage_results["extraction"] = DocumentResult(current_name, 1, 0, [])
             # The intermediate document is only needed by Stage 1: release it so
             # it does not stay alive through ingestion/annotation/entity extraction.
@@ -944,9 +980,8 @@ async def _process_document_unit(
             doc_obj = None
 
             # ── pre_ingested passthrough (no preprocess/extraction/ingestion
-            # applies to this kind — the ifs above simply never matched) ──
-            if unit.kind == "pre_ingested":
-                current_name = unit.doc_path
+            # applies to this kind — the ifs above simply never matched):
+            # current_name / current_path already hold the unit's document. ──
 
             # ── Stage: annotation ──────────────────────────────────────
             if "annotation" in effective_stages:
@@ -957,6 +992,8 @@ async def _process_document_unit(
                     parallel_docs=1,
                     only_unannotated=only_unannotated,
                     context_instructions_override=context_instructions,
+                    tenant_id=doc_tenant,
+                    doc_path=current_path,
                 )
                 combined = _combine_stage_documents(current_name, sr.documents)
                 stage_results["annotation"] = combined
@@ -979,6 +1016,8 @@ async def _process_document_unit(
                     current_name,
                     parallel_docs=1,
                     only_unextracted=only_unextracted,
+                    tenant_id=doc_tenant,
+                    doc_path=current_path,
                 )
                 combined = _combine_stage_documents(current_name, sr.documents)
                 stage_results["entity_extraction"] = combined

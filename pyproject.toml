@@ -1,6 +1,6 @@
 [project]
 name = "scinr"
-version = "0.3.10"
+version = "0.4.0"
 description = "AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,7 @@ dependencies = [
     "Pillow>=10.3",
     "pypdf>=5.0",  # PDF splitting
     "tiktoken>=0.13",  # token-count estimation for consolidation batching (o200k_base approximation)
+    "ijson>=3.2",  # incremental JSON parsing of document snapshots (restore_document)
 ]
 
 [project.optional-dependencies]
@@ -45,10 +46,6 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
-
-
-[project.scripts]
-newton = "scinr.newton.cli:main_sync"
 
 [project.entry-points."scinr.newton.models"]
 # Built-in default models are always included.

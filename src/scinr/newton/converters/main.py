@@ -1,47 +1,39 @@
 """
-converters/main.py — CLI entry point for the converters module.
+converters/main.py — Conversion API of the converters module.
+
+Converts source files and API responses to the intermediate JSON format
+consumed by the extraction stage. ``run_preprocess()`` and ``run_pipeline()``
+call these functions; they can also be called directly.
 
 Usage examples
 --------------
-Process all files in files/ (dev mode)::
+Convert every file of a folder::
 
-    python converters/main.py --input files/ --dev
-
-Process all files in files/ (prod mode)::
-
-    python converters/main.py --input files/ --output data/input/
+    written, failures = await convert_folder(Path("files/"), Path("data/json/"))
 
 Convert a single file::
 
-    python converters/main.py --file files/report.pdf --dev
+    output_path = await convert_single_file(Path("files/report.pdf"), Path("data/json/"))
 
-Fetch from a JSON API::
+Fetch from a JSON or XML/SOAP API::
 
-    python converters/main.py --api-config files/api_config.yaml \\
-        --api-url https://api.example.com/records --dev
-
-Fetch from an XML/SOAP API::
-
-    python converters/main.py --api-config files/soap_config.yaml \\
-        --api-url https://api.example.com/soap --api-type xml \\
-        --api-header "Authorization=Bearer token" --dev
-
-Dry run (no files written)::
-
-    python converters/main.py --input files/ --dev --dry-run
+    output_path = convert_api(
+        config_path=Path("files/api_config.yaml"),
+        url="https://api.example.com/records",
+        output_dir=Path("data/json/"),
+        headers={"Authorization": "Bearer token"},
+        api_type="json",  # or "xml"
+    )
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
 import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-from scinr.newton.storage.factory import get_storage
 
 if TYPE_CHECKING:
     from scinr.newton.storage.base import PageRepository, RawFileRepository
@@ -54,12 +46,11 @@ from scinr.newton.converters.base import (
     IntermediateDocument,
     UnsupportedFormatError,
 )
-from scinr.newton.converters.config import DEFAULT_SOURCE_DIR, resolve_output_dir
 from scinr.newton.converters.registry import get_converter
+from scinr.newton.utils.redaction import redact_uri
 
 # ---------------------------------------------------------------------------
-# Module logger — basicConfig is deferred to main() to avoid hijacking the
-# root logger on import.
+# Module logger
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
@@ -89,33 +80,6 @@ async def _run_convert(converter: BaseConverter, source: Path) -> IntermediateDo
     if getattr(converter, "is_async", False):
         return await converter.convert(source)
     return await asyncio.to_thread(converter.convert, source)
-
-
-def _parse_headers(header_list: list[str]) -> dict[str, str]:
-    """Convert a list of ``"Key=Value"`` strings to a dict.
-
-    Splits each entry on the first ``"="`` (``maxsplit=1``).  Entries that
-    do not contain ``"="`` are logged as warnings and skipped.
-
-    Parameters
-    ----------
-    header_list:
-        List of raw header strings, e.g.
-        ``["Authorization=Bearer xxx", "X-Custom=val"]``.
-
-    Returns
-    -------
-    dict[str, str]
-        Parsed header key-value pairs.
-    """
-    headers: dict[str, str] = {}
-    for entry in header_list:
-        if "=" not in entry:
-            logger.warning("Ignoring malformed --api-header entry (no '=' found): %r", entry)
-            continue
-        key, value = entry.split("=", maxsplit=1)
-        headers[key.strip()] = value.strip()
-    return headers
 
 
 def _load_document_name(config_path: Path) -> str:
@@ -157,119 +121,6 @@ def _load_document_name(config_path: Path) -> str:
     return str(data["document_name"])
 
 
-def _parse_args() -> argparse.Namespace:
-    """Build and return the CLI argument parser namespace.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(
-        prog="converters",
-        description=(
-            "scinr-ingest converters: convert files or API responses to the "
-            "intermediate JSON format consumed by the extraction pipeline."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    # ------------------------------------------------------------------
-    # Mutually exclusive source group: --input | --file | --api-config
-    # ------------------------------------------------------------------
-    source_group = parser.add_mutually_exclusive_group()
-    source_group.add_argument(
-        "--input",
-        default=None,
-        metavar="DIR",
-        help=(
-            "Folder of source files to convert (default: files/). "
-            "Mutually exclusive with --file and --api-config."
-        ),
-    )
-    source_group.add_argument(
-        "--file",
-        default=None,
-        metavar="PATH",
-        help=("Single source file to convert. Mutually exclusive with --input and --api-config."),
-    )
-    source_group.add_argument(
-        "--api-config",
-        default=None,
-        metavar="PATH",
-        help=(
-            "Path to the YAML/JSON config file for ApiJsonConverter or "
-            "ApiXmlConverter. Mutually exclusive with --input and --file."
-        ),
-    )
-
-    # ------------------------------------------------------------------
-    # Output / mode flags
-    # ------------------------------------------------------------------
-    parser.add_argument(
-        "--output",
-        default=None,
-        metavar="DIR",
-        help="Output directory. Overrides the default set by --dev.",
-    )
-    parser.add_argument(
-        "--dev",
-        action="store_true",
-        default=False,
-        help="Use the dev output directory (data/input-pruebas/) as default.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Log what would be done but do not write any files.",
-    )
-
-    # ------------------------------------------------------------------
-    # API-specific flags
-    # ------------------------------------------------------------------
-    parser.add_argument(
-        "--api-url",
-        default=None,
-        metavar="URL",
-        help="URL of the API endpoint. Required when --api-config is specified.",
-    )
-    parser.add_argument(
-        "--api-header",
-        action="append",
-        default=[],
-        metavar="K=V",
-        dest="api_header",
-        help=(
-            "HTTP header to include in API requests (repeatable). "
-            'Example: --api-header "Authorization=Bearer token"'
-        ),
-    )
-    parser.add_argument(
-        "--api-type",
-        choices=["json", "xml"],
-        default="json",
-        metavar="TYPE",
-        help="API response format: 'json' (default) or 'xml'.",
-    )
-
-    # ------------------------------------------------------------------
-    # Context instructions
-    # ------------------------------------------------------------------
-    parser.add_argument(
-        "--context",
-        type=str,
-        default=None,
-        metavar="TEXT",
-        help=(
-            "Free-text context instructions about the document(s) being ingested. "
-            "Injected into the intermediate JSON for use by downstream LLM stages."
-        ),
-    )
-
-    return parser.parse_args()
-
-
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -284,6 +135,10 @@ async def convert_one(
     _relative_prefix: Path | None = None,  # internal: relative path from the original input_dir
     context_instructions: str | None = None,
     parallel_docs: int = 1,
+    *,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[list[tuple[Path, Path | None, IntermediateDocument]], list[tuple[Path, str]]]:
     """Convert a single directory entry (a file or a subdirectory).
 
@@ -377,6 +232,13 @@ async def convert_one(
         Forwarded to the recursive :func:`convert_folder` call when *entry*
         is a subdirectory (see "Design decision" above). Ignored for file
         entries.
+    tenant_id:
+        Tenant owning the converted file(s) (``None`` = public). Written on the
+        stored raw file and pages (as :func:`~scinr.newton.utils.tenancy.tenant_key`)
+        and stamped on the ``IntermediateDocument``.
+    created_by_user_id, job_id:
+        Provenance of the upload, written on the stored raw file and pages and
+        stamped on the ``IntermediateDocument``.
 
     Returns
     -------
@@ -411,6 +273,9 @@ async def convert_one(
             _relative_prefix=sub_prefix,
             context_instructions=context_instructions,
             parallel_docs=parallel_docs,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
         )
         return sub_written, []
 
@@ -452,6 +317,9 @@ async def convert_one(
                 filename=entry.name,
                 content_type=_guess_content_type(entry),
                 folder_path=folder_path_str,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
 
         # 2. Convert to IntermediateDocument (existing behaviour)
@@ -461,6 +329,9 @@ async def convert_one(
         doc.raw_file_id = raw_file_id  # None when no repo
         doc.context_instructions = context_instructions
         doc.document_name = entry.stem  # stem of the original source file
+        doc.tenant_id = tenant_id
+        doc.created_by_user_id = created_by_user_id
+        doc.job_id = job_id
 
         # 3. Store converted pages in MongoDB (if repos provided)
         if page_repo is not None and raw_file_id is not None:
@@ -471,6 +342,9 @@ async def convert_one(
                     folder_path=folder_path_str,
                     page_index=page.index,
                     markdown=page.markdown,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
                 )
 
         # 4. Write JSON to output (now includes page_ids and raw_file_id),
@@ -502,6 +376,10 @@ async def convert_folder(
     _relative_prefix: Path | None = None,  # internal: relative path from the original input_dir
     context_instructions: str | None = None,
     parallel_docs: int = 1,
+    *,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[list[tuple[Path, Path, IntermediateDocument]], list[tuple[Path, str]]]:
     """Convert all supported files in *input_dir* (recursively) to *output_dir*.
 
@@ -554,6 +432,13 @@ async def convert_folder(
         directory level (and, independently, within each subdirectory level
         during recursion). Defaults to ``1`` (sequential, matching
         pre-existing behaviour). Must be ``>= 1``.
+    tenant_id:
+        Tenant owning the converted file(s) (``None`` = public). Written on the
+        stored raw file and pages (as :func:`~scinr.newton.utils.tenancy.tenant_key`)
+        and stamped on the ``IntermediateDocument``.
+    created_by_user_id, job_id:
+        Provenance of the upload, written on the stored raw file and pages and
+        stamped on the ``IntermediateDocument``.
 
     Returns
     -------
@@ -603,6 +488,9 @@ async def convert_folder(
                 _relative_prefix=_relative_prefix,
                 context_instructions=context_instructions,
                 parallel_docs=parallel_docs,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
 
     tasks = [asyncio.create_task(_convert_one_bounded(entry)) for entry in entries]
@@ -645,6 +533,10 @@ async def convert_single_file(
     raw_file_repo: RawFileRepository | None = None,
     page_repo: PageRepository | None = None,
     context_instructions: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
 ) -> Path | None:
     """Convert a single file to *output_dir*.
 
@@ -665,6 +557,13 @@ async def convert_single_file(
     context_instructions:
         Optional free-text context injected into the ``IntermediateDocument``
         before it is written to disk.
+    tenant_id:
+        Tenant owning the converted file(s) (``None`` = public). Written on the
+        stored raw file and pages (as :func:`~scinr.newton.utils.tenancy.tenant_key`)
+        and stamped on the ``IntermediateDocument``.
+    created_by_user_id, job_id:
+        Provenance of the upload, written on the stored raw file and pages and
+        stamped on the ``IntermediateDocument``.
 
     Returns
     -------
@@ -714,6 +613,9 @@ async def convert_single_file(
             raise ConversionError(f"Failed to convert {path}: {exc}") from exc
         doc.context_instructions = context_instructions
         doc.document_name = path.stem
+        doc.tenant_id = tenant_id
+        doc.created_by_user_id = created_by_user_id
+        doc.job_id = job_id
         resolved_output_path.write_text(doc.to_json(), encoding="utf-8")
         logger.info("Written: %s (%d page(s))", resolved_output_path, len(doc.pages))
         return resolved_output_path
@@ -727,6 +629,9 @@ async def convert_single_file(
         filename=path.name,
         content_type=_guess_content_type(path),
         folder_path=None,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
     )
 
     # 2. Convert to IntermediateDocument
@@ -734,6 +639,9 @@ async def convert_single_file(
     doc.raw_file_id = raw_file_id
     doc.context_instructions = context_instructions
     doc.document_name = path.stem
+    doc.tenant_id = tenant_id
+    doc.created_by_user_id = created_by_user_id
+    doc.job_id = job_id
 
     # 3. Store converted pages
     if page_repo is not None:
@@ -744,6 +652,9 @@ async def convert_single_file(
                 folder_path=None,
                 page_index=page.index,
                 markdown=page.markdown,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
             )
 
     # 4. Write JSON (now includes raw_file_id and page_ids)
@@ -800,7 +711,7 @@ def convert_api(
     output_path = output_dir / f"{document_name}.json"
 
     if dry_run:
-        logger.info("DRY-RUN: would fetch %s (%s) → %s", url, api_type, output_path)
+        logger.info("DRY-RUN: would fetch %s (%s) → %s", redact_uri(url), api_type, output_path)
         return None
 
     if api_type == "json":
@@ -821,89 +732,3 @@ def convert_api(
         len(document.pages),
     )
     return output_path
-
-
-# ---------------------------------------------------------------------------
-# Main orchestrator
-# ---------------------------------------------------------------------------
-
-
-async def main() -> None:
-    """Orchestrate the converter CLI."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    args = _parse_args()
-
-    # ------------------------------------------------------------------
-    # Validations
-    # ------------------------------------------------------------------
-    if args.api_config and not args.api_url:
-        raise SystemExit(
-            "error: --api-url is required when --api-config is specified.\n"
-            "       Example: python converters/main.py --api-config files/api.yaml "
-            "--api-url https://api.example.com/records"
-        )
-
-    if args.output and args.dev:
-        logger.warning("--output %r overrides --dev flag.", args.output)
-
-    # ------------------------------------------------------------------
-    # Resolve output directory
-    # ------------------------------------------------------------------
-    output_dir = resolve_output_dir(dev=args.dev, output_override=args.output)
-    logger.info("Output directory: %s", output_dir)
-
-    if args.dry_run:
-        logger.info("DRY-RUN mode: no files will be written.")
-
-    # ------------------------------------------------------------------
-    # Dispatch by mode
-    # ------------------------------------------------------------------
-    if args.file:
-        path = Path(args.file)
-        result = await convert_single_file(
-            path, output_dir, dry_run=args.dry_run, context_instructions=args.context
-        )
-        if result is not None:
-            logger.info("Converted: %s", result)
-
-    elif args.api_config:
-        headers = _parse_headers(args.api_header)
-        result = convert_api(
-            config_path=Path(args.api_config),
-            url=args.api_url,
-            output_dir=output_dir,
-            headers=headers,
-            api_type=args.api_type,
-            dry_run=args.dry_run,
-        )
-        if result is not None:
-            logger.info("API conversion complete: %s", result)
-
-    else:
-        # --input mode (default)
-        input_dir = Path(args.input) if args.input else DEFAULT_SOURCE_DIR
-        logger.info("Input directory: %s", input_dir)
-        raw_file_repo, page_repo = get_storage()
-        written, failures = await convert_folder(
-            input_dir,
-            output_dir,
-            dry_run=args.dry_run,
-            raw_file_repo=raw_file_repo,
-            page_repo=page_repo,
-            context_instructions=args.context,
-        )
-        logger.info("Done. %d file(s) written, %d failed.", len(written), len(failures))
-        if failures:
-            for path, msg in failures:
-                logger.warning("  %s: %s", path, msg)
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(main())
