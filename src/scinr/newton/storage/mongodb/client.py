@@ -11,9 +11,10 @@ get_client()
     Return the singleton Motor client (creates it on first call).
 get_db()
     Return the configured Motor database object.
-get_gridfs_bucket()
+get_gridfs_bucket(bucket_name=None)
     Return an :class:`~motor.motor_asyncio.AsyncIOMotorGridFSBucket` for
-    binary file storage.
+    binary file storage (raw files by default; the freeze backend passes its
+    own snapshot bucket).
 ensure_indexes()
     Coroutine — create all required indexes (idempotent).
 ensure_indexes_sync()
@@ -86,20 +87,24 @@ def get_db():
     return get_client()[cfg.mongodb_database]
 
 
-def get_gridfs_bucket() -> AsyncIOMotorGridFSBucket:
-    """Return the GridFS bucket for binary file storage.
+def get_gridfs_bucket(bucket_name: str | None = None) -> AsyncIOMotorGridFSBucket:
+    """Return a GridFS bucket for binary file storage.
 
-    The bucket name is read from ``cfg.mongodb_gridfs_bucket``
-    (default ``"raw_binaries"``).
+    Parameters
+    ----------
+    bucket_name:
+        Bucket to open.  ``None`` (default) opens the raw-files bucket,
+        ``cfg.mongodb_gridfs_bucket`` (default ``"raw_binaries"``).
 
     Returns
     -------
     AsyncIOMotorGridFSBucket
         GridFS bucket ready for upload/download operations.
     """
-    from scinr.newton.config import get_config
-    cfg = get_config()
-    return AsyncIOMotorGridFSBucket(get_db(), bucket_name=cfg.mongodb_gridfs_bucket)
+    if bucket_name is None:
+        from scinr.newton.config import get_config
+        bucket_name = get_config().mongodb_gridfs_bucket
+    return AsyncIOMotorGridFSBucket(get_db(), bucket_name=bucket_name)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +144,28 @@ _INDEX_SPECS: tuple[tuple[str, list[tuple[str, int]], str], ...] = (
         "mongodb_raw_files_collection",
         [("tenant_id", 1), ("job_id", 1)],
         "raw_files_by_tenant_job",
+    ),
+    # frozen_documents: snapshot metadata by document / by ingestion run
+    (
+        "mongodb_frozen_collection",
+        [("tenant_id", 1), ("path", 1), ("version", 1)],
+        "frozen_by_tenant_path_version",
+    ),
+    (
+        "mongodb_frozen_collection",
+        [("tenant_id", 1), ("job_id", 1)],
+        "frozen_by_tenant_job",
+    ),
+    # restore_document() without a frozen stub: snapshots holding a document
+    (
+        "mongodb_frozen_collection",
+        [("tenant_id", 1), ("documents.path", 1), ("documents.version", 1), ("stored_at", -1)],
+        "frozen_by_tenant_document",
+    ),
+    (
+        "mongodb_frozen_collection",
+        [("tenant_id", 1), ("documents.job_id", 1), ("stored_at", -1)],
+        "frozen_by_tenant_document_job",
     ),
 )
 

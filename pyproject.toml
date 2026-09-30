@@ -25,6 +25,7 @@ dependencies = [
     "Pillow>=10.3",
     "pypdf>=5.0",  # PDF splitting
     "tiktoken>=0.13",  # token-count estimation for consolidation batching (o200k_base approximation)
+    "ijson>=3.2",  # incremental JSON parsing of document snapshots (restore_document)
 ]
 
 [project.optional-dependencies]

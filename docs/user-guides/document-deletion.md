@@ -16,10 +16,10 @@ It is an `async` function — `await` it (or wrap it with `asyncio.run()`). It:
 
 1. **Locates** the target `:Document` node(s) **within one tenant** — `tenant_id` is mandatory (`None` = public documents) — by either `path` (optionally narrowed by `version`) **or** `job_id`; exactly one of the two must be given. `created_by_user_id` is an optional extra filter on top of either selector.
 2. **Cascade-deletes** the document and every node reachable from it:
-   - Folder-parent documents and siblings via `IS_COMPOSED_OF*`
+   - The descendants of a matched folder document via `IS_COMPOSED_OF*` (downwards only — a leaf's parent folder and siblings are never touched)
    - All `:StructureNode` descendants via `HAS_STRUCTURE*` / `HAS_CHILD*`
    - All `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children
-3. **Garbage-collects** orphaned `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes in two independent passes.
+3. **Garbage-collects** the `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes of the tenant that the deletion left orphaned.
 
 The function opens and closes its own Neo4j driver — you do not need to manage connections manually.
 
@@ -148,11 +148,11 @@ These values are populated by `run_pipeline(tenant_id=..., created_by_user_id=..
 
 ## Understanding the Cascade
 
-When you call `delete_document()`, the following nodes are deleted in a single transaction:
+When you call `delete_document()`, the following nodes are deleted:
 
 ### Target Document(s)
 
-The tenant's `:Document` node(s) matching the `path` (and `version`, if specified). If the document is part of a folder hierarchy, every `:Document` reachable via `IS_COMPOSED_OF*` is also deleted — this includes folder-parent documents and their sibling documents.
+The tenant's `:Document` node(s) matching the `path` (and `version`, if specified). If a matched document is a folder, every `:Document` below it via `IS_COMPOSED_OF*` (subfolders and leaves) is also deleted. The cascade only goes **downwards**: deleting a leaf never deletes its parent folder or its siblings.
 
 ### Structure Tree
 
@@ -161,7 +161,7 @@ For each deleted document, all descendants are removed:
 - `:StructureNode` nodes reached via `HAS_STRUCTURE*` and `HAS_CHILD*`
 - `:InfoUnit` nodes attached to those structure nodes
 - `:ModelDecision` nodes (annotation results)
-- `:ProposedModel` and `:ProposedField` nodes (annotation details)
+- `:ProposedModel`, `:ProposedField`, `:ComplementaryMatch` and `:SupplementaryField` nodes (annotation details)
 - `:ExtractionResult` nodes (entity extraction results)
 
 ### Visual Representation
@@ -169,7 +169,7 @@ For each deleted document, all descendants are removed:
 ```
 (:Document {tenant_id: "acme", path: "/path/to/document.pdf"})
   │
-  ├─[:IS_COMPOSED_OF]→ (:Document)  [folder parent — also deleted]
+  ├─[:IS_COMPOSED_OF]→ (:Document)  [child of a folder — also deleted; never the parent]
   │
   └─[:HAS_STRUCTURE]→ (:StructureNode)
                          ├─[:HAS_CHILD]→ (:StructureNode)
@@ -181,41 +181,92 @@ For each deleted document, all descendants are removed:
                          └─[:HAS_CHILD]→ (:StructureNode)
 ```
 
-All of the above are `DETACH DELETE`d in a single query, meaning all their relationships are severed before the nodes are removed.
+All of the above are `DETACH DELETE`d, meaning all their relationships are severed before the nodes are removed.
+
+### Bounded transactions
+
+The cascade does **not** run in one transaction. A transaction keeps everything it deletes in memory until it commits, and Neo4j caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura). Deleting a folder of a few hundred documents at once goes over that cap and fails with `MemoryPoolOutOfMemoryError`. So:
+
+- the `:Document` nodes are marked `deletion_pending = true` before anything is deleted;
+- the documents are processed 50 at a time;
+- each delete commits every 1,000 nodes (`CALL { ... } IN TRANSACTIONS`), children before parents;
+- the `:Document` nodes go last — after the garbage collection — descendants before the matched documents;
+- each query is retried on transient errors (deadlocks, a full memory pool, a lost connection or a leader change in a cluster).
+
+The cascade is therefore not atomic. If it fails half-way, part of the subtree is gone but the `:Document` nodes are still there, so **calling `delete_document()` again with the same selector deletes what is left**. The storage records were already deleted by then (that step comes first).
+
+When a delete query had to be retried, the batches it committed before failing are not counted again, so the `*_deleted` counters of the result are then a lower bound.
 
 ---
 
 ## Garbage Collection
 
-After the cascade delete, two independent garbage-collection passes run to clean up orphaned nodes that were not directly connected to the deleted documents.
+Deleting an `:ExtractionResult` can leave what hung from it with no owner. Two rules say what an orphan is:
 
-### Pass 1: Entity / ModelInstance
+- an `:Entity` or `:ModelInstance` is an orphan when **no `:ExtractionResult` reaches it** within 7 hops;
+- a `:LabeledEntity` is an orphan when **nothing points at it**.
 
-Finds `:Entity` and `:ModelInstance` nodes that are no longer reachable from any `:ExtractionResult` within 7 hops:
+`delete_document()` deletes the orphans **it causes**, and only looks where it can have caused one:
+
+1. Before the `:ExtractionResult` nodes of a chunk of documents are deleted, it reads what they point at. Those nodes are the candidates.
+2. Once the subtree is gone, each candidate is checked against the two rules, and the orphans are deleted 1,000 per transaction.
+3. What a deleted orphan pointed at becomes a candidate in turn (a nested `:ModelInstance`, the `:LabeledEntity` values it referenced), and so on until a round deletes nothing.
+
+A node still used by another document is checked and left alone: the same `:LabeledEntity` or keyed `:ModelInstance` shared with a document that stays in the graph is never deleted.
+
+The cost follows the size of the deletion, not of the tenant. Deleting one document from a tenant with millions of entities checks the few hundred nodes that document pointed at.
+
+Everything is **scoped to the deletion's tenant** (`tenant_id = $tenant_id`, the stored key — `"__public__"` for public documents): the deleted subtree belongs to one tenant and no data relationship crosses tenants. Nodes without `tenant_id` (graphs written before multi-tenancy) are never collected. `freeze_document()` collects its orphans the same way (see [Document Freezing](document-freezing.md)).
+
+> This is what reclaims `:ModelInstance` **shell nodes** — targets created by an `instance_relationships` reference whose actual model was never extracted from any document section — once the instance that referenced them is gone. See [Cross-Section `:ModelInstance` Linking via `instance_key`](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for how shells are created.
+
+### What it does not collect
+
+Orphans that this deletion did not cause stay in the graph. Two things leave them:
+
+- **Other write paths.** Re-ingesting with `update_mode=True` and re-running the extraction on a node delete the old `:ExtractionResult` nodes without collecting what hung from them.
+- **An interrupted delete or freeze.** The candidates are held in memory by the process that read them. If it dies between deleting the `:ExtractionResult` nodes and collecting, they are lost.
+
+The second case repairs itself: a `delete_document()` or `freeze_document()` that finds the mark of an interrupted run (`deletion_pending`, or `frozen_cleanup_pending` on a stub) checks **every** `:Entity`, `:ModelInstance` and `:LabeledEntity` of the tenant instead of its own candidates, and logs a warning saying so. For the first case, run `collect_orphans()`.
+
+### collect_orphans(): sweeping a whole tenant
+
+```python
+from scinr.newton import collect_orphans
+
+result = await collect_orphans(tenant_id="acme")
+print(result.gc_entity_model_instance_deleted, result.gc_labeled_entity_deleted)
+```
+
+`collect_orphans()` applies the same two rules to every node of the tenant, in two passes:
 
 ```cypher
 MATCH (mi:Entity|ModelInstance)
-WHERE NOT EXISTS {
-  MATCH (e:ExtractionResult)-[*1..7]->(mi)
+WHERE mi.tenant_id = $tenant_id AND NOT EXISTS {
+  MATCH (:ExtractionResult)-[*1..7]->(mi)
 }
-DETACH DELETE mi
+CALL (mi) {
+  DETACH DELETE mi
+} IN TRANSACTIONS OF 1000 ROWS
 ```
-
-> This pass is precisely what reclaims orphaned `:ModelInstance` **shell nodes** — targets created by an `instance_relationships` reference whose actual model was never extracted from any document section. See [Cross-Section `:ModelInstance` Linking via `instance_key`](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for how shells are created and why they are never garbage-collected automatically outside of `delete_document()`.
-
-### Pass 2: LabeledEntity
-
-Finds `:LabeledEntity` nodes with no incoming relationships at all:
 
 ```cypher
 MATCH (mi:LabeledEntity)
-WHERE NOT EXISTS { (mi)<--() }
-DETACH DELETE mi
+WHERE mi.tenant_id = $tenant_id AND NOT EXISTS { (mi)<--() }
+CALL (mi) {
+  DETACH DELETE mi
+} IN TRANSACTIONS OF 1000 ROWS
 ```
 
-### Iteration Behavior
+Each pass is repeated until an iteration deletes nothing, up to **7 iterations** (`GC_MAX_PASSES = 7`): deleting a `:LabeledEntity` can leave the one it pointed at with nothing pointing at it.
 
-Each pass runs up to **7 iterations** (`GC_MAX_PASSES = 7`). A pass stops early as soon as an iteration deletes zero nodes. This handles cascading orphans — deleting a batch of `:Entity` nodes might reveal new orphaned `:LabeledEntity` nodes that were only reachable through the deleted entities.
+Things to know before scheduling it:
+
+- `tenant_id` is mandatory, as in `delete_document()` (`None` = public documents). There is no sweep across tenants.
+- Its cost grows with the tenant, whatever there is to collect: it starts from the tenant's indexes and checks every node. Run it from time to time (after a batch of re-ingestions, from a scheduled job), not after every operation.
+- Do not run it while the same tenant is being ingested. The pipeline writes some nodes just before the `:ExtractionResult` link that will reach them; for that instant they look like orphans.
+
+It returns an `OrphanCollectionResult` with `tenant_id` and the four `gc_*` counters (here `*_passes` counts iterations over the whole tenant).
 
 ---
 
@@ -239,10 +290,12 @@ Each pass runs up to **7 iterations** (`GC_MAX_PASSES = 7`). A pass stops early 
 | `proposed_models_deleted` | `int` | Number of `:ProposedModel` nodes deleted. |
 | `proposed_fields_deleted` | `int` | Number of `:ProposedField` nodes deleted. |
 | `extraction_results_deleted` | `int` | Number of `:ExtractionResult` nodes deleted. |
-| `gc_entity_model_instance_deleted` | `int` | Total `:Entity`/`:ModelInstance` nodes deleted across all GC iterations. |
-| `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at 7). |
-| `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
-| `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at 7). |
+| `gc_entity_model_instance_deleted` | `int` | `:Entity`/`:ModelInstance` nodes this deletion left orphaned, and deleted. |
+| `gc_entity_model_instance_passes` | `int` | GC rounds run over `:Entity`/`:ModelInstance` candidates: `0` when there was none, one more each time a deleted node turned what it pointed at into candidates. |
+| `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes this deletion left orphaned, and deleted. |
+| `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates. |
+
+When the call finished an interrupted delete or freeze, the `gc_*` counters are those of a sweep of the whole tenant (see [What it does not collect](#what-it-does-not-collect)).
 
 ### Example Output
 
@@ -287,11 +340,21 @@ Unlike `update_mode=True` re-ingestion (which preserves the `:Document` node and
 
 ### IS_COMPOSED_OF Cascade Scope
 
-If the target document is part of a folder hierarchy (connected via `IS_COMPOSED_OF`), the cascade delete reaches **all** documents connected through that relationship — including folder-parent documents and their siblings. This means deleting a leaf document in a folder hierarchy may also delete the parent folder document and its other children.
+`IS_COMPOSED_OF` goes from a folder to its children, and the cascade (`(d)-[:IS_COMPOSED_OF*]->(cd)`) only follows it **downwards** from the documents the selector matched:
 
-If you need to delete only a single document without affecting its folder hierarchy, consider using `update_mode=True` re-ingestion instead, or manually manage the folder structure before deletion.
+- Deleting a **folder** document deletes its whole subtree (subfolders and leaves).
+- Deleting a **leaf** by `path` deletes only that leaf: its parent folder and its siblings are untouched (the parent keeps an `IS_COMPOSED_OF` fewer).
 
-The same cascade applies in `job_id` mode: `delete_document(job_id=...)` seeds the cascade with every `:Document` carrying that `job_id`, then follows `IS_COMPOSED_OF*` to their descendants. In the normal case every document produced by one `run_pipeline()` call shares the `job_id`, so this simply deletes the whole run. The edge case to be aware of is a folder-parent node that was first created by job A and later reused (via `MERGE`) by a document of the same tenant ingested under job B — deleting job A will also remove that job-B leaf through the cascade. Folder nodes are never shared across tenants, so this cannot reach another tenant's documents.
+The same cascade applies in `job_id` mode: `delete_document(job_id=...)` seeds the cascade with every `:Document` carrying that `job_id`, then follows `IS_COMPOSED_OF*` to their descendants. If the job created both a folder and its children, they are all matched directly as independent seeds — the cascade does not go up, several documents simply start matched. In the normal case every document produced by one `run_pipeline()` call shares the `job_id`, so this simply deletes the whole run. The edge case to be aware of is a folder-parent node that was first created by job A and later reused (via `MERGE`) by a document of the same tenant ingested under job B — deleting job A will also remove that job-B leaf through the cascade. Folder nodes are never shared across tenants, so this cannot reach another tenant's documents.
+
+### Frozen Documents
+
+`delete_document()` does not know about frozen documents (see [Document Freezing](document-freezing.md)). It deletes a frozen stub and whatever of its subtree is still hanging from the structure tree, but:
+
+- the snapshot in the freeze backend is **not** deleted (its id is the stub's `frozen_blob_id`);
+- with `keep_structure_nodes=False`, the `:ModelDecision` / `:ExtractionResult` nodes kept by `keep_annotations` / `keep_extraction_results` hang directly from the `:Document` and are **not** reached by the cascade.
+
+To delete a frozen document completely, `restore_document()` it first and then delete it.
 
 ### Version Isolation
 

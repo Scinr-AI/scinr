@@ -125,6 +125,11 @@ class ScinrConfig:
     mongodb_gridfs_bucket: str = "raw_binaries"
     mongodb_ensure_indexes: bool = True
     custom_storage: tuple | None = None  # (RawFileRepository, PageRepository)
+    # Freeze (document snapshots) — resolved: never None after configure()
+    freeze_backend: str = "none"  # "none" | "mongodb" | "custom"
+    mongodb_frozen_collection: str = "frozen_documents"
+    mongodb_frozen_gridfs_bucket: str = "frozen_snapshots"
+    custom_freeze_storage: Any = None  # FreezeRepository
     # Converters
     extra_converters: dict[str, type] = field(default_factory=dict)
     # PDF
@@ -230,6 +235,11 @@ def configure(
     mongodb_gridfs_bucket: str | None = None,
     mongodb_ensure_indexes: bool | None = None,
     custom_storage: tuple | None = None,
+    # Freeze (document snapshots)
+    freeze_backend: Literal["none", "mongodb", "custom"] | None = None,
+    mongodb_frozen_collection: str | None = None,
+    mongodb_frozen_gridfs_bucket: str | None = None,
+    custom_freeze_storage: Any | None = None,
     # Converters
     extra_converters: dict[str, type] | None = None,
     # PDF
@@ -291,6 +301,17 @@ def configure(
             lacks the `createIndex` privilege and indexes are managed by operations.
             Env: `MONGODB_ENSURE_INDEXES`. Default: `True`.
         custom_storage: Tuple `(RawFileRepository, PageRepository)` when `storage_backend='custom'`.
+        freeze_backend: Backend for document snapshots (`freeze_document()`,
+            `restore_document()`, `export_document_snapshot(destination='storage')`):
+            `'none'`, `'mongodb'` or `'custom'`. Resolution: this argument, else env
+            `FREEZE_BACKEND`, else **inherits the resolved `storage_backend`**. Leaving it
+            `None` (not specified) inherits; passing `'none'` explicitly disables freezing
+            even when `storage_backend='mongodb'`. Reuses `mongodb_uri` / `mongodb_database`.
+        mongodb_frozen_collection: Collection for snapshot metadata.
+            Env: `MONGODB_FROZEN_COLLECTION`. Default: `'frozen_documents'`.
+        mongodb_frozen_gridfs_bucket: GridFS bucket for snapshot files.
+            Env: `MONGODB_FROZEN_GRIDFS_BUCKET`. Default: `'frozen_snapshots'`.
+        custom_freeze_storage: A `FreezeRepository` instance when `freeze_backend='custom'`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
         mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
@@ -463,6 +484,19 @@ def configure(
     if resolved_storage_backend not in ("none", "mongodb", "custom"):
         raise ConfigurationError(
             f"Unknown storage_backend: {resolved_storage_backend!r}. "
+            f"Valid values: 'none', 'mongodb', 'custom'."
+        )
+
+    # ── Freeze ────────────────────────────────────────────────────────────────
+    # No default of its own: when neither the argument nor FREEZE_BACKEND is
+    # set, freezing inherits the resolved storage backend. An explicit 'none'
+    # is kept (disables freezing without disabling raw-file storage).
+    resolved_freeze_backend = (
+        freeze_backend or os.getenv("FREEZE_BACKEND") or resolved_storage_backend
+    )
+    if resolved_freeze_backend not in ("none", "mongodb", "custom"):
+        raise ConfigurationError(
+            f"Unknown freeze_backend: {resolved_freeze_backend!r}. "
             f"Valid values: 'none', 'mongodb', 'custom'."
         )
 
@@ -640,6 +674,16 @@ def configure(
             else os.getenv("MONGODB_ENSURE_INDEXES", "true").lower() == "true"
         ),
         custom_storage=custom_storage,
+        freeze_backend=resolved_freeze_backend,
+        mongodb_frozen_collection=(
+            mongodb_frozen_collection
+            or os.getenv("MONGODB_FROZEN_COLLECTION", "frozen_documents")
+        ),
+        mongodb_frozen_gridfs_bucket=(
+            mongodb_frozen_gridfs_bucket
+            or os.getenv("MONGODB_FROZEN_GRIDFS_BUCKET", "frozen_snapshots")
+        ),
+        custom_freeze_storage=custom_freeze_storage,
         extra_converters=extra_converters or {},
         mistral_api_key=mistral_api_key or os.getenv("MISTRAL_API_KEY"),
         mistral_ocr_safe_max_pages=resolved_mistral_ocr_safe_max_pages,

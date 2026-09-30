@@ -11,3 +11,4 @@
         - ModelError
         - StorageError
         - ConversionError
+        - FreezeError

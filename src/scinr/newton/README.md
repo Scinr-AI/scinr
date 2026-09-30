@@ -195,10 +195,13 @@ Behavior:
 1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
 2. Read-only check: finds every `:Document` of the tenant matching the selector (`path` or `job_id`) and the optional filters (all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
 3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the Neo4j driver is still closed via the `finally` block).
-4. Cascade delete (single write transaction): deletes the matched `:Document` node(s), everything reachable via `IS_COMPOSED_OF*` (folder-parent Documents, sibling documents), and every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children.
-5. Global garbage collection, run **after** the cascade delete completes: two independent passes, each re-run up to `GC_MAX_PASSES` (7) times, stopping as soon as an iteration deletes 0 nodes:
-   - **Pass 1:** deletes orphaned `:Entity`/`:ModelInstance` nodes (no `:ExtractionResult` reaches them within 7 hops).
-   - **Pass 2** (runs only after Pass 1 fully finishes): deletes orphaned `:LabeledEntity` nodes (no incoming relationship at all).
+4. Cascade delete (bounded transactions — documents 50 at a time, each delete committing every 1,000 nodes — so a large folder does not overrun Neo4j's transaction memory): marks the `:Document` node(s) `deletion_pending`, then deletes every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) of the matched `:Document` node(s) and of their `IS_COMPOSED_OF*` descendants, together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, `:ComplementaryMatch`, `:SupplementaryField` and `:ExtractionResult` children. The `:Document` nodes go last, after step 5. Not atomic: if it fails half-way, calling `delete_document()` again with the same selector deletes what is left.
+5. Garbage collection of the orphans the deletion caused, scoped to the tenant:
+   - an `:Entity`/`:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when it has no incoming relationship at all;
+   - only the nodes the deleted `:ExtractionResult` nodes pointed at are checked, and then what each deleted orphan pointed at, until a round deletes nothing — the cost follows the deletion, not the size of the tenant;
+   - a call that finishes an interrupted delete or freeze (the documents carry `deletion_pending` / `frozen_cleanup_pending`) checks every such node of the tenant instead.
+
+`collect_orphans(tenant_id=...)` runs that whole-tenant check on demand (two passes, each repeated up to `GC_MAX_PASSES` = 7 times until one deletes nothing). Use it to collect what `delete_document()` does not: the orphans left by re-ingestion with `update_mode=True` and by re-extraction. Returns `OrphanCollectionResult` (`tenant_id` plus the four `gc_*` counters). Do not run it while the same tenant is being ingested.
 
 > **Breaking change note:** if you configure `storage_backend="custom"`, your custom `RawFileRepository`/`PageRepository` implementations must now also implement `delete(raw_file_id)` / `delete_pages(raw_file_id)` respectively (see [Storage Layer](#storage-layer)) — these are new abstract methods on the base interfaces.
 
@@ -271,10 +274,10 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 | `proposed_models_deleted` | `int` | Number of `:ProposedModel` nodes deleted. |
 | `proposed_fields_deleted` | `int` | Number of `:ProposedField` nodes deleted. |
 | `extraction_results_deleted` | `int` | Number of `:ExtractionResult` nodes deleted. |
-| `gc_entity_model_instance_deleted` | `int` | Total `:Entity`/`:ModelInstance` nodes deleted across all GC iterations. |
-| `gc_entity_model_instance_passes` | `int` | Number of GC iterations actually run for the Entity/ModelInstance pass (capped at `GC_MAX_PASSES`). |
-| `gc_labeled_entity_deleted` | `int` | Total `:LabeledEntity` nodes deleted across all GC iterations. |
-| `gc_labeled_entity_passes` | `int` | Number of GC iterations actually run for the LabeledEntity pass (capped at `GC_MAX_PASSES`). |
+| `gc_entity_model_instance_deleted` | `int` | `:Entity`/`:ModelInstance` nodes this deletion left orphaned, and deleted. |
+| `gc_entity_model_instance_passes` | `int` | GC rounds run over `:Entity`/`:ModelInstance` candidates (0 when there was none). |
+| `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes this deletion left orphaned, and deleted. |
+| `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates (0 when there was none). |
 | `raw_files_deleted` | `int` | Number of `RawFileRecord` (binaries) deleted from the storage layer for the `raw_file_id`s referenced by the deleted Document(s) and their descendants. |
 | `converted_pages_deleted` | `int` | Number of `ConvertedPageRecord` (converted Markdown pages) deleted from the storage layer for the same `raw_file_id`s. |
 

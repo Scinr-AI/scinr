@@ -56,6 +56,16 @@ class StorageError(ScinrError):
     """
 
 
+class FreezeError(ScinrError):
+    """
+    Raised when a document cannot be frozen, restored or snapshotted.
+
+    Examples: freezing a document that is already frozen, restoring a document
+    that is not frozen, a snapshot missing from the freeze backend, or a
+    snapshot whose tenant does not match the document it is restored into.
+    """
+
+
 class ConversionError(ScinrError):
     """
     Raised when a file converter fails to process a source file.

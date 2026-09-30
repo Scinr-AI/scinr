@@ -47,6 +47,13 @@ Regular indexes (query performance):
     :ModelInstance(tenant_id)
     :InfoUnit(tenant_id)
     :ModelDecision(tenant_id)
+    :ModelDecision(uid), :ProposedModel(uid), :ProposedField(uid),
+    :ComplementaryMatch(uid), :SupplementaryField(uid)
+        — lookups by uid (restore_document(), the tabular ModelDecision);
+        plain indexes, not constraints: legacy graphs may hold duplicates
+    :CatalogModel(name)
+        — the MERGE of the catalog model by name (annotation, extraction,
+        restore_document())
 
 Composite tenant indexes (tenant-scoped filters on a second property):
     :ModelInstance(tenant_id, model_class)
@@ -274,6 +281,36 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX idx_model_decision_tenant_id IF NOT EXISTS "
         "FOR (md:ModelDecision) ON (md.tenant_id)",
     ),
+    (
+        "idx_model_decision_uid",
+        "CREATE INDEX idx_model_decision_uid IF NOT EXISTS "
+        "FOR (n:ModelDecision) ON (n.uid)",
+    ),
+    (
+        "idx_proposed_model_uid",
+        "CREATE INDEX idx_proposed_model_uid IF NOT EXISTS "
+        "FOR (n:ProposedModel) ON (n.uid)",
+    ),
+    (
+        "idx_proposed_field_uid",
+        "CREATE INDEX idx_proposed_field_uid IF NOT EXISTS "
+        "FOR (n:ProposedField) ON (n.uid)",
+    ),
+    (
+        "idx_complementary_match_uid",
+        "CREATE INDEX idx_complementary_match_uid IF NOT EXISTS "
+        "FOR (n:ComplementaryMatch) ON (n.uid)",
+    ),
+    (
+        "idx_supplementary_field_uid",
+        "CREATE INDEX idx_supplementary_field_uid IF NOT EXISTS "
+        "FOR (n:SupplementaryField) ON (n.uid)",
+    ),
+    (
+        "idx_catalog_model_name",
+        "CREATE INDEX idx_catalog_model_name IF NOT EXISTS "
+        "FOR (n:CatalogModel) ON (n.name)",
+    ),
     # -- Composite tenant indexes ------------------------------------------
     # Neo4j uses one index per node, so "tenant T and property P" with two
     # single indexes seeks on one and filters every node for the other.
@@ -400,3 +437,41 @@ def setup_schema(driver: Driver) -> None:
         len(_REGULAR_INDEXES),
         len(_FULLTEXT_INDEXES),
     )
+
+
+def ensure_indexes(
+    driver: Driver, names: tuple[str, ...], *, database: str, await_timeout: int = 300
+) -> int:
+    """Create the named indexes of :data:`_REGULAR_INDEXES` if missing (idempotent).
+
+    For operations that depend on indexes added after a graph was ingested
+    (``restore_document()`` looks nodes up by ``uid``): ``setup_schema()``
+    only runs at ingestion time. When at least one index is created, waits up
+    to *await_timeout* seconds for it to come ONLINE, so the caller's
+    queries can use it.
+
+    Best-effort: a failure (e.g. a user without schema privileges) is logged
+    and the caller carries on — only slower.
+
+    Returns:
+        The number of indexes created.
+    """
+    statements = dict(_REGULAR_INDEXES)
+    unknown = [name for name in names if name not in statements]
+    if unknown:
+        raise ValueError(f"Unknown index name(s): {unknown!r}")
+    created = 0
+    try:
+        with driver.session(database=database) as session:
+            for name in names:
+                summary = session.execute_write(
+                    lambda tx, q=statements[name]: tx.run(q).consume()
+                )
+                if summary.counters.indexes_added:
+                    logger.info("Created missing index %s.", name)
+                    created += summary.counters.indexes_added
+            if created:
+                session.run("CALL db.awaitIndexes($timeout)", timeout=await_timeout).consume()
+    except Exception as exc:
+        logger.warning("Could not ensure indexes %s: %s", names, exc)
+    return created

@@ -5,9 +5,10 @@ Unlike ``delete_document_content()`` in ``ingest/nodes.py`` (which only wipes
 structure/annotation data for a single version to support in-place
 re-ingestion via ``update_mode=True``, keeping the :Document node itself), the
 public :func:`delete_document` here removes the :Document node(s) as well
-as their entire composed/structural subtree, and then runs a two-pass
-global garbage collector to remove any resulting orphaned :Entity,
-:ModelInstance, and :LabeledEntity nodes.
+as their entire composed/structural subtree, and collects the :Entity,
+:ModelInstance and :LabeledEntity nodes that deletion leaves orphaned
+(``ingest/_gc.py``). :func:`collect_orphans` sweeps every orphan of a tenant,
+whatever left it.
 
 Before touching Neo4j, it also deletes the corresponding documental storage
 records (raw binaries + converted Markdown pages) for every ``raw_file_id``
@@ -24,6 +25,8 @@ Public API
     # scoped to exactly one tenant, or to the public documents.
     # optional AND filters in either mode: version=, created_by_user_id=
     # opens its own driver
+
+    result = await collect_orphans(tenant_id="acme")    # maintenance sweep
 """
 
 from __future__ import annotations
@@ -33,15 +36,23 @@ import logging
 from collections.abc import Sequence
 
 from scinr.newton.config import get_config
+from scinr.newton.ingest._cascade import (
+    DELETE_BATCH_ROWS,
+    DOCS_BY_KEY,
+    delete_documents,
+    run_count_query,
+    run_subtree_steps,
+    subtree_steps,
+)
+from scinr.newton.ingest._gc import GC_MAX_PASSES, OrphanCollector, sweep_tenant
 from scinr.newton.ingest.config import get_driver
-from scinr.newton.results import DeletionResult
+from scinr.newton.results import DeletionResult, OrphanCollectionResult
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
-GC_MAX_PASSES = 7
-"""Maximum number of iterations run for each garbage-collection pass."""
+__all__ = ["GC_MAX_PASSES", "collect_orphans", "delete_document"]
 
 
 def _as_list(name: str, value: str | Sequence[str] | None) -> list[str] | None:
@@ -112,48 +123,24 @@ WHERE n IS NOT NULL AND n.raw_file_id IS NOT NULL AND n.raw_file_id <> ''
 RETURN DISTINCT n.raw_file_id AS raw_file_id, n.tenant_id AS tenant_id
 """
 
-_CASCADE_DELETE_TAIL = """
-OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd)
-WITH collect(DISTINCT d) + collect(DISTINCT cd) AS documentNodes
-UNWIND documentNodes AS documentNode
-WITH DISTINCT documentNode
-OPTIONAL MATCH (documentNode)-[:HAS_STRUCTURE*..]->(parentStructureNode)
-OPTIONAL MATCH (parentStructureNode)-[:HAS_CHILD*..]->(childStructureNode)
-WITH documentNode, collect(DISTINCT parentStructureNode) + collect(DISTINCT childStructureNode) AS docStructureNodes
-UNWIND (CASE WHEN docStructureNodes = [] THEN [NULL] ELSE docStructureNodes END) AS structureNode
-OPTIONAL MATCH (structureNode)-[:HAS_INFO_UNIT]->(iu)
-OPTIONAL MATCH (structureNode)-[:HAS_MODEL_DECISION]->(md)
-OPTIONAL MATCH (md)-[:HAS_PROPOSED_MODEL]-(pm)
-OPTIONAL MATCH (pm)-[:HAS_PROPOSED_FIELD]->(pf)
-OPTIONAL MATCH (structureNode)-[:HAS_EXTRACTION]->(e)
-DETACH DELETE documentNode, structureNode, iu, md, pm, pf, e
-RETURN
-  count(DISTINCT documentNode) AS documents_deleted,
-  count(DISTINCT structureNode) AS structure_nodes_deleted,
-  count(DISTINCT iu) AS info_units_deleted,
-  count(DISTINCT md) AS model_decisions_deleted,
-  count(DISTINCT pm) AS proposed_models_deleted,
-  count(DISTINCT pf) AS proposed_fields_deleted,
-  count(DISTINCT e) AS extraction_results_deleted
+# The documents the cascade works on: the matched ones and their descendants.
+# ``interrupted``: an earlier delete_document() or freeze_document() stopped
+# half-way through this document.
+_DOCUMENT_KEYS_TAIL = """
+OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd:Document)
+WITH collect(DISTINCT d) AS seeds, collect(DISTINCT cd) AS descendants
+UNWIND seeds + descendants AS doc
+WITH DISTINCT doc, seeds
+RETURN doc.path AS path, doc.version AS version, doc.tenant_id AS tenant_id,
+       doc IN seeds AS is_seed,
+       coalesce(doc.deletion_pending, doc.frozen_cleanup_pending, false) AS interrupted
 """
 
-_GC_ENTITY_MODEL_INSTANCE_QUERY = """
-MATCH (mi:Entity|ModelInstance)
-WHERE NOT EXISTS {
-  MATCH (e:ExtractionResult)-[*1..7]->(mi)
-}
-DETACH DELETE mi
-RETURN count(mi) AS borrados
-"""
+# Set before anything is deleted, and gone with the Document itself: a
+# Document that still carries it was left half-deleted.
+_MARK_PENDING_QUERY = DOCS_BY_KEY + "SET d.deletion_pending = true\nRETURN count(d) AS n\n"
 
-_GC_LABELED_ENTITY_QUERY = """
-MATCH (mi:LabeledEntity)
-WHERE NOT EXISTS { (mi)<--() }
-DETACH DELETE mi
-RETURN count(mi) AS borrados
-"""
-
-# Cascade-delete counter fields, in the order returned by _CASCADE_DELETE_TAIL.
+# Cascade-delete counter fields of DeletionResult.
 _CASCADE_COUNTER_FIELDS = (
     "documents_deleted",
     "structure_nodes_deleted",
@@ -170,9 +157,60 @@ _CASCADE_COUNTER_FIELDS = (
 # ---------------------------------------------------------------------------
 
 
-def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
-    """Run the cascade delete query in a single write transaction and sum
-    the per-row counters returned (the query can yield multiple rows).
+def _fetch_document_keys(driver, filters: dict) -> tuple[list[dict], bool]:
+    """Resolve the selector to the ``{"path", "version"}`` keys of the matched
+    Documents and their ``IS_COMPOSED_OF*`` descendants — descendants first,
+    matched documents last (the order they are deleted in) — and whether an
+    earlier delete or freeze of any of them was interrupted.
+
+    A Document that cannot be addressed by its key — no ``path`` /
+    ``version``, or another tenant's (impossible under the write invariant) —
+    is left alone, with a warning.
+    """
+    tenant = filters["tenant_id"]
+
+    def _do_query() -> list[dict]:
+        cfg = get_config()
+        match_clause, params = _build_doc_match(filters)
+        with driver.session(database=cfg.neo4j_database) as session:
+            result = session.run(match_clause + _DOCUMENT_KEYS_TAIL, **params)
+            return [dict(record) for record in result]
+
+    rows = with_neo4j_retry_sync(_do_query)
+    addressable = [
+        row
+        for row in rows
+        if row["path"] is not None and row["version"] is not None and row["tenant_id"] == tenant
+    ]
+    if len(addressable) != len(rows):
+        logger.warning(
+            "delete_document: %d Document(s) reached by the selector have no path/version "
+            "or belong to another tenant than %r; they are left untouched.",
+            len(rows) - len(addressable),
+            tenant,
+        )
+    addressable.sort(key=lambda row: row["is_seed"])
+    keys = [{"path": row["path"], "version": row["version"]} for row in addressable]
+    return keys, any(row["interrupted"] for row in addressable)
+
+
+def _run_cascade_delete(driver, filters: dict) -> tuple[dict[str, int], dict[str, int]]:
+    """Delete the subtree of the selected Documents, collect the orphans and
+    then delete the Documents themselves, in bounded transactions
+    (``ingest/_cascade.py``). Returns the cascade counters and the ``gc_*``
+    counters.
+
+    Not atomic — a single transaction holding the subtree of hundreds of
+    documents overruns the server's transaction memory. The Documents are
+    marked ``deletion_pending`` first and go last (descendants before the
+    matched documents), so after a failure the selector still matches and the
+    same call deletes what is left.
+
+    The orphans are collected among what the deleted :ExtractionResult nodes
+    pointed at (``OrphanCollector``). Those candidates only live in this
+    process: when a Document carries the mark of an interrupted delete or
+    freeze, the candidates of that run are lost and the whole tenant is swept
+    instead.
 
     Parameters
     ----------
@@ -184,82 +222,59 @@ def _run_cascade_delete(driver, filters: dict) -> dict[str, int]:
         stored key) always becomes a WHERE condition, the others only when
         not None — see :func:`_build_doc_match`.
     """
-
-    def _do_delete() -> dict[str, int]:
-        local_counters = dict.fromkeys(_CASCADE_COUNTER_FIELDS, 0)
-        cfg = get_config()
-        match_clause, params = _build_doc_match(filters)
-        with driver.session(database=cfg.neo4j_database) as session:
-            with session.begin_transaction() as tx:
-                try:
-                    result = tx.run(match_clause + _CASCADE_DELETE_TAIL, **params)
-                    for record in result:
-                        for field_name in _CASCADE_COUNTER_FIELDS:
-                            local_counters[field_name] += record[field_name]
-                    tx.commit()
-                except Exception:
-                    tx.rollback()
-                    logger.exception(
-                        "delete_document: cascade delete transaction rolled back for filters=%r",
-                        filters,
-                    )
-                    raise
-        return local_counters
-
-    return with_neo4j_retry_sync(_do_delete)
-
-
-def _run_gc_pass(driver, query: str, label: str) -> tuple[int, int]:
-    """Run a single garbage-collection query up to GC_MAX_PASSES times,
-    stopping as soon as an execution deletes zero nodes.
-
-    Each individual execution runs in its own write transaction, wrapped
-    in with_neo4j_retry_sync.
-
-    Parameters
-    ----------
-    driver:
-        An open, authenticated Neo4j driver instance.
-    query:
-        The GC Cypher query to run (must return a single ``borrados`` count).
-    label:
-        Human-readable label used only for logging.
-
-    Returns
-    -------
-    tuple[int, int]
-        (total nodes deleted across all iterations, number of iterations run).
-    """
-    total_deleted = 0
-    passes_run = 0
-
-    def _do_gc_iteration() -> int:
-        try:
-            cfg = get_config()
-            with driver.session(database=cfg.neo4j_database) as session:
-                return session.execute_write(lambda tx: tx.run(query).single()["borrados"])
-        except Exception:
-            logger.exception(
-                "delete_document: GC pass (%s) iteration %d raised an exception.",
-                label,
-                passes_run + 1,
-            )
-            raise
-
-    for _ in range(GC_MAX_PASSES):
-        deleted = with_neo4j_retry_sync(_do_gc_iteration)
-        passes_run += 1
-        total_deleted += deleted
-        logger.info(
-            "delete_document: GC pass (%s) iteration %d deleted %d node(s).",
-            label,
-            passes_run,
-            deleted,
+    database = get_config().neo4j_database
+    tenant = filters["tenant_id"]
+    keys, interrupted = _fetch_document_keys(driver, filters)
+    orphans = None
+    if interrupted:
+        logger.warning(
+            "delete_document: an earlier delete or freeze of filters=%r was interrupted; "
+            "collecting the orphans of the whole tenant %r instead of only those of "
+            "this deletion.",
+            filters,
+            tenant,
         )
-        if deleted == 0:
-            break
-
-    return total_deleted, passes_run
+    else:
+        orphans = OrphanCollector(
+            driver, tenant_id=tenant, database=database, caller="delete_document"
+        )
+    try:
+        for start in range(0, len(keys), DELETE_BATCH_ROWS):
+            run_count_query(
+                driver,
+                database,
+                _MARK_PENDING_QUERY,
+                tenant_id=tenant,
+                keys=keys[start : start + DELETE_BATCH_ROWS],
+            )
+        subtree_counts = run_subtree_steps(
+            driver,
+            database,
+            tenant,
+            keys,
+            subtree_steps(),
+            caller="delete_document",
+            orphans=orphans,
+        )
+        if orphans is not None:
+            orphans.collect()
+            gc_counts = orphans.counts()
+        else:
+            gc_counts = sweep_tenant(
+                driver, tenant_id=tenant, database=database, caller="delete_document"
+            )
+        documents_deleted = delete_documents(driver, database, tenant, keys)
+    except Exception:
+        logger.exception(
+            "delete_document: cascade delete interrupted for filters=%r. Part of the "
+            "subtree may be gone; the Document node(s) still there are deleted by calling "
+            "delete_document() again with the same selector.",
+            filters,
+        )
+        raise
+    counters = {name: subtree_counts.get(name, 0) for name in _CASCADE_COUNTER_FIELDS}
+    counters["documents_deleted"] = documents_deleted
+    return counters, gc_counts
 
 
 def _fetch_existing_versions(driver, filters: dict) -> list[int]:
@@ -376,8 +391,11 @@ async def delete_document(
     in-place re-ingestion and keeps the :Document node), this permanently
     removes every :Document node matching the selector below along with:
 
-    - Every descendant reached via ``IS_COMPOSED_OF*`` (folder-parent
-      Document nodes, sibling documents, etc.).
+    - Every descendant reached via ``IS_COMPOSED_OF*`` **downwards** from
+      the matched nodes: deleting a folder deletes its whole subtree, while
+      deleting a leaf by *path* leaves its parent folder and siblings
+      untouched (they only go too when they match the selector themselves,
+      e.g. the same *job_id*).
     - All :StructureNode descendants (``HAS_STRUCTURE`` / ``HAS_CHILD``),
       their :InfoUnit, :ModelDecision, :ProposedModel, :ProposedField, and
       :ExtractionResult children.
@@ -416,10 +434,23 @@ async def delete_document(
     deleting storage for any raw_file_id raises an unexpected exception,
     it propagates immediately and the Neo4j cascade delete is never run.
 
-    After the cascade delete, runs two independent garbage-collection
-    passes (up to :data:`GC_MAX_PASSES` iterations each) to remove any
-    :Entity/:ModelInstance and :LabeledEntity nodes left orphaned by the
-    deletion.
+    The cascade runs in bounded transactions (``ingest/_cascade.py``), not
+    in a single one: one transaction holding the subtree of hundreds of
+    documents overruns the server's transaction memory. It is therefore not
+    atomic — the :Document nodes are marked ``deletion_pending`` first and
+    deleted last, so if it fails half-way, calling ``delete_document()``
+    again with the same selector deletes what is left. It also removes the
+    :ComplementaryMatch and :SupplementaryField nodes of the annotations.
+
+    Before the :Document nodes go, the :Entity/:ModelInstance and
+    :LabeledEntity nodes **of the same tenant** this deletion leaves orphaned
+    are deleted too (``ingest/_gc.py``). Only what hung from the deleted
+    :ExtractionResult nodes is checked, so the cost follows the size of the
+    deletion, not of the tenant; orphans left by anything else stay until
+    :func:`collect_orphans` is run. The exception is a call that finishes an
+    interrupted delete or freeze: the candidates of the interrupted run are
+    lost, so it sweeps the whole tenant (up to :data:`GC_MAX_PASSES`
+    iterations per pass), as ``collect_orphans()`` does.
 
     Opens and closes its own Neo4j driver — does not require the caller to
     manage one. The Neo4j-specific work (existence check, raw_file_id
@@ -512,14 +543,7 @@ async def delete_document(
             converted_pages_deleted,
         )
 
-        cascade_counts = await asyncio.to_thread(_run_cascade_delete, driver, filters)
-
-        gc_emi_deleted, gc_emi_passes = await asyncio.to_thread(
-            _run_gc_pass, driver, _GC_ENTITY_MODEL_INSTANCE_QUERY, "Entity|ModelInstance"
-        )
-        gc_le_deleted, gc_le_passes = await asyncio.to_thread(
-            _run_gc_pass, driver, _GC_LABELED_ENTITY_QUERY, "LabeledEntity"
-        )
+        cascade_counts, gc_counts = await asyncio.to_thread(_run_cascade_delete, driver, filters)
 
         logger.info(
             "delete_document: complete for %s. "
@@ -528,8 +552,8 @@ async def delete_document(
             selector_repr,
             cascade_counts["documents_deleted"],
             cascade_counts["structure_nodes_deleted"],
-            gc_emi_deleted,
-            gc_le_deleted,
+            gc_counts["gc_entity_model_instance_deleted"],
+            gc_counts["gc_labeled_entity_deleted"],
         )
 
         return DeletionResult(
@@ -547,12 +571,67 @@ async def delete_document(
             proposed_models_deleted=cascade_counts["proposed_models_deleted"],
             proposed_fields_deleted=cascade_counts["proposed_fields_deleted"],
             extraction_results_deleted=cascade_counts["extraction_results_deleted"],
-            gc_entity_model_instance_deleted=gc_emi_deleted,
-            gc_entity_model_instance_passes=gc_emi_passes,
-            gc_labeled_entity_deleted=gc_le_deleted,
-            gc_labeled_entity_passes=gc_le_passes,
+            **gc_counts,
             raw_files_deleted=raw_files_deleted,
             converted_pages_deleted=converted_pages_deleted,
         )
     finally:
         driver.close()
+
+
+async def collect_orphans(*, tenant_id: str | None) -> OrphanCollectionResult:
+    """Delete every orphaned :Entity, :ModelInstance and :LabeledEntity node
+    of one tenant.
+
+    ``delete_document()`` and ``freeze_document()`` only collect the orphans
+    they cause. This maintenance call collects the rest: the nodes left
+    behind by the write paths that delete :ExtractionResult nodes without
+    collecting (re-ingestion with ``update_mode=True``, re-extraction of a
+    node), and by an interrupted delete or freeze that was never run again.
+
+    An :Entity / :ModelInstance is an orphan when no :ExtractionResult
+    reaches it within 7 hops; a :LabeledEntity, when nothing points at it.
+    Every such node of the tenant is checked, so the cost grows with the
+    tenant, not with what there is to collect: run it from time to time, not
+    after every operation.
+
+    Do not run it while the same tenant is being ingested: a node written
+    just before the :ExtractionResult that will point at it is, for that
+    instant, an orphan.
+
+    *tenant_id* is mandatory (keyword-only, no default); ``None`` and
+    ``"__public__"`` both mean the public documents. Opens and closes its own
+    Neo4j driver.
+
+    Returns
+    -------
+    OrphanCollectionResult
+        How many nodes were deleted, and in how many iterations.
+
+    Raises
+    ------
+    TypeError
+        If *tenant_id* is not passed.
+    ValueError
+        If *tenant_id* is empty.
+    """
+    tenant = tenant_key(tenant_id)
+    driver = get_driver()
+    try:
+        counts = await asyncio.to_thread(
+            sweep_tenant,
+            driver,
+            tenant_id=tenant,
+            database=get_config().neo4j_database,
+            caller="collect_orphans",
+        )
+    finally:
+        driver.close()
+    logger.info(
+        "collect_orphans: complete for tenant %r. gc_entity_model_instance_deleted=%d "
+        "gc_labeled_entity_deleted=%d",
+        tenant,
+        counts["gc_entity_model_instance_deleted"],
+        counts["gc_labeled_entity_deleted"],
+    )
+    return OrphanCollectionResult(tenant_id=tenant_id, **counts)

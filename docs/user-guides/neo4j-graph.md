@@ -283,7 +283,7 @@ LIMIT 1;
 
 **Important caveats:**
 - The relationship to a shell target is created **unconditionally** as soon as the fixed `join_via` key fields are non-empty — there is no check that the target model will ever actually be extracted. If it never is, the shell simply stays a shell (3 properties) forever.
-- Orphaned shells are **not** garbage-collected automatically after ingestion. They are only cleaned up as a side effect of `delete_document()`, which runs a multi-pass query removing any `ModelInstance`/`Entity` no longer reachable from any `ExtractionResult` within 7 hops.
+- Orphaned shells are **not** garbage-collected automatically after ingestion. A shell goes when `delete_document()` or `freeze_document()` removes the last instance that referenced it, or when `collect_orphans()` sweeps the tenant: both delete any `ModelInstance`/`Entity` no longer reachable from any `ExtractionResult` within 7 hops (see [Document Deletion — Garbage Collection](document-deletion.md#garbage-collection)).
 - A list field driving `instance_relationships` (fan-out) creates **one shell per list item**, each with its own UID derived from the fixed anchor key(s) plus that one item's value.
 
 **Query: find shell nodes for any model class (generic property-count heuristic)**

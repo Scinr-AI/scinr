@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from neo4j import AsyncDriver
 from pydantic import BaseModel
 
+from scinr.newton.annotation.neo4j_ops import delete_stale_model_decision
 from scinr.newton.config import get_config
 from scinr.newton.entity_extraction.graph_mapper import (
     _provenance_set_clause,
@@ -1625,45 +1626,7 @@ async def delete_tabular_subgraph(
                 table_id=table_composite_id,
             )
             # 5. ModelDecision subgraph on Table (leaf-first)
-            await tx.run(
-                """
-                MATCH (:StructureNode {id: $id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_PROPOSED_MODEL]->(:ProposedModel)-[:HAS_PROPOSED_FIELD]->(pf)
-                DETACH DELETE pf
-                """,
-                id=table_composite_id,
-            )
-            await tx.run(
-                """
-                MATCH (:StructureNode {id: $id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_PROPOSED_MODEL]->(pm)
-                DETACH DELETE pm
-                """,
-                id=table_composite_id,
-            )
-            await tx.run(
-                """
-                MATCH (:StructureNode {id: $id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_SUPPLEMENTARY_FIELD]->(sf)
-                DETACH DELETE sf
-                """,
-                id=table_composite_id,
-            )
-            await tx.run(
-                """
-                MATCH (:StructureNode {id: $id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_COMPLEMENTARY_MATCH]->(cm)
-                DETACH DELETE cm
-                """,
-                id=table_composite_id,
-            )
-            await tx.run(
-                """
-                MATCH (:StructureNode {id: $id})-[:HAS_MODEL_DECISION]->(md)
-                DETACH DELETE md
-                """,
-                id=table_composite_id,
-            )
+            await delete_stale_model_decision(tx, table_composite_id)
             # 6. Table node
             await tx.run(
                 "MATCH (n:StructureNode {id: $id}) DETACH DELETE n",

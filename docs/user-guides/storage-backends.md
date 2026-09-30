@@ -910,6 +910,10 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | GridFS bucket | `mongodb_gridfs_bucket` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` |
 | Create indexes automatically | `mongodb_ensure_indexes` | `MONGODB_ENSURE_INDEXES` | `True` |
 | Custom storage | `custom_storage` | *(none)* | `None` |
+| Snapshot backend ([Document Freezing](document-freezing.md)) | `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` |
+| Snapshot metadata collection | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` |
+| Snapshot GridFS bucket | `mongodb_frozen_gridfs_bucket` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` |
+| Custom snapshot repository | `custom_freeze_storage` | *(none)* | `None` |
 
 ---
 

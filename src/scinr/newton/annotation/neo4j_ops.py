@@ -5,6 +5,7 @@ import json
 import logging
 import re as _re
 import typing
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from neo4j import AsyncDriver
 
 from scinr.newton.annotation.models import AnnotationDecision
 from scinr.newton.config import get_config
+from scinr.newton.entity_extraction.graph_mapper import delete_stale_extraction_result
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.tenancy import tenant_key
 
@@ -888,6 +890,63 @@ def reset_catalog_memoization() -> None:
 # Writing decisions
 # ---------------------------------------------------------------------------
 
+# Leaf-first deletion of the ModelDecision subtree hanging from StructureNodes
+# (ProposedField → ProposedModel → SupplementaryField → ComplementaryMatch →
+# ModelDecision). :CatalogModel singletons are never deleted.
+_STALE_MODEL_DECISION_DELETE_QUERIES = (
+    """
+    UNWIND $node_ids AS node_id
+    MATCH (:StructureNode {id: node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
+          -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)-[:HAS_PROPOSED_FIELD]->(pf)
+    DETACH DELETE pf
+    """,
+    """
+    UNWIND $node_ids AS node_id
+    MATCH (:StructureNode {id: node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
+          -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)
+    DETACH DELETE pm
+    """,
+    """
+    UNWIND $node_ids AS node_id
+    MATCH (:StructureNode {id: node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
+          -[:HAS_SUPPLEMENTARY_FIELD]->(sf)
+    DETACH DELETE sf
+    """,
+    """
+    UNWIND $node_ids AS node_id
+    MATCH (:StructureNode {id: node_id})
+          -[:HAS_MODEL_DECISION]->(:ModelDecision)
+          -[:HAS_COMPLEMENTARY_MATCH]->(cm:ComplementaryMatch)
+    DETACH DELETE cm
+    """,
+    """
+    UNWIND $node_ids AS node_id
+    MATCH (:StructureNode {id: node_id})-[:HAS_MODEL_DECISION]->(md:ModelDecision)
+    DETACH DELETE md
+    """,
+)
+
+
+async def delete_stale_model_decision(runner, node_ids: str | Sequence[str]) -> None:
+    """Delete the ModelDecision subtree(s) hanging from the given StructureNode(s).
+
+    The idempotency step of every ModelDecision writer (write_annotation(),
+    write_manual_annotation(), the tabular subgraph delete) and of
+    restore_document(): the stale decision is removed before a new one is
+    created. A ModelDecision shared by several StructureNodes (the tabular
+    one, shared by every row) goes as soon as one of them is passed.
+
+    Parameters
+    ----------
+    runner:
+        An ``AsyncSession`` or ``AsyncTransaction`` (anything with an async ``run``).
+    node_ids:
+        One ``StructureNode.id`` (tenant-prefixed) or several.
+    """
+    ids = [node_ids] if isinstance(node_ids, str) else list(node_ids)
+    for query in _STALE_MODEL_DECISION_DELETE_QUERIES:
+        await runner.run(query, node_ids=ids)
+
 
 async def write_annotation(
     driver: AsyncDriver,
@@ -937,55 +996,8 @@ async def write_annotation(
                 f"write_annotation: StructureNode not found for full_node_id={full_node_id!r}"
             )
 
-        # ── Idempotency: delete stale ProposedField nodes ─────────────────
-        await session.run(
-            """
-            MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                  -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)-[:HAS_PROPOSED_FIELD]->(pf)
-            DETACH DELETE pf
-            """,
-            node_id=full_node_id,
-        )
-
-        # ── Idempotency: delete stale ProposedModel nodes ─────────────────
-        await session.run(
-            """
-            MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                  -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)
-            DETACH DELETE pm
-            """,
-            node_id=full_node_id,
-        )
-
-        # ── Idempotency: delete stale SupplementaryField nodes ────────────
-        await session.run(
-            """
-            MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                  -[:HAS_SUPPLEMENTARY_FIELD]->(sf)
-            DETACH DELETE sf
-            """,
-            node_id=full_node_id,
-        )
-
-        # ── Idempotency: delete stale ComplementaryMatch nodes first ──────
-        await session.run(
-            """
-            MATCH (:StructureNode {id: $node_id})
-                  -[:HAS_MODEL_DECISION]->(:ModelDecision)
-                  -[:HAS_COMPLEMENTARY_MATCH]->(cm:ComplementaryMatch)
-            DETACH DELETE cm
-            """,
-            node_id=full_node_id,
-        )
-
-        # ── Idempotency: delete stale ModelDecision node ──────────────────
-        await session.run(
-            """
-            MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(md:ModelDecision)
-            DETACH DELETE md
-            """,
-            node_id=full_node_id,
-        )
+        # ── Idempotency: delete the stale ModelDecision subtree ───────────
+        await delete_stale_model_decision(session, full_node_id)
 
         # ── Create ModelDecision node + HAS_MODEL_DECISION relationship ───
         await session.run(
@@ -1228,59 +1240,11 @@ async def write_manual_annotation(
             )
 
             # Delete stale ExtractionResult and its exclusive ModelInstance children
-            await session.run(
-                """
-                MATCH (n:StructureNode {id: $node_id})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-                OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
-                DETACH DELETE child
-                WITH er
-                DETACH DELETE er
-                """,
-                node_id=full_node_id,
-            )
+            await delete_stale_extraction_result(session, full_node_id)
 
             # Delete stale ModelDecision subgraph — leaf nodes first to avoid
-            # dangling relationships (mirrors the idempotency pattern in write_annotation)
-            await session.run(
-                """
-                MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)-[:HAS_PROPOSED_FIELD]->(pf)
-                DETACH DELETE pf
-                """,
-                node_id=full_node_id,
-            )
-            await session.run(
-                """
-                MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_PROPOSED_MODEL]->(pm:ProposedModel)
-                DETACH DELETE pm
-                """,
-                node_id=full_node_id,
-            )
-            await session.run(
-                """
-                MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_SUPPLEMENTARY_FIELD]->(sf)
-                DETACH DELETE sf
-                """,
-                node_id=full_node_id,
-            )
-            await session.run(
-                """
-                MATCH (:StructureNode {id: $node_id})
-                      -[:HAS_MODEL_DECISION]->(:ModelDecision)
-                      -[:HAS_COMPLEMENTARY_MATCH]->(cm:ComplementaryMatch)
-                DETACH DELETE cm
-                """,
-                node_id=full_node_id,
-            )
-            await session.run(
-                """
-                MATCH (:StructureNode {id: $node_id})-[:HAS_MODEL_DECISION]->(md:ModelDecision)
-                DETACH DELETE md
-                """,
-                node_id=full_node_id,
-            )
+            # dangling relationships (same helper as write_annotation)
+            await delete_stale_model_decision(session, full_node_id)
 
             # Create new minimal ModelDecision with source='manual'
             await session.run(

@@ -58,6 +58,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Sequence
 from datetime import UTC
 from typing import Any
 
@@ -203,6 +204,37 @@ def _provenance_set_clause(alias: str) -> str:
     )
 
 
+_STALE_EXTRACTION_RESULT_DELETE_QUERY = """
+UNWIND $node_ids AS nid
+MATCH (n:StructureNode {id: nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
+OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
+DETACH DELETE child
+WITH DISTINCT er
+DETACH DELETE er
+"""
+
+
+async def delete_stale_extraction_result(runner, node_ids: str | Sequence[str]) -> None:
+    """Delete the ExtractionResult(s) hanging from the given StructureNode(s),
+    together with every :ModelInstance reachable from them within 10 hops.
+
+    The idempotency step of write_extraction_subgraph(),
+    write_manual_annotation() and restore_document(). Note that the
+    ModelInstance purge does not check whether another live ExtractionResult
+    still reaches the instance (long-standing pipeline behaviour); the GC
+    passes of ``ingest/_gc.py`` clean up whatever else is left orphaned.
+
+    Parameters
+    ----------
+    runner:
+        An ``AsyncSession`` or ``AsyncTransaction`` (anything with an async ``run``).
+    node_ids:
+        One ``StructureNode.id`` (tenant-prefixed) or several.
+    """
+    ids = [node_ids] if isinstance(node_ids, str) else list(node_ids)
+    await runner.run(_STALE_EXTRACTION_RESULT_DELETE_QUERY, node_ids=ids)
+
+
 # ---------------------------------------------------------------------------
 # Core writer
 # ---------------------------------------------------------------------------
@@ -272,16 +304,7 @@ async def write_extraction_subgraph(
         job_id = rec["job_id"]
 
         # ── Idempotency: delete stale ExtractionResult subgraph ───────────
-        await session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-            OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
-            DETACH DELETE child
-            WITH er
-            DETACH DELETE er
-            """,
-            nid=node_full_id,
-        )
+        await delete_stale_extraction_result(session, node_full_id)
 
         # ── Create ExtractionResult node ──────────────────────────────────
         await session.run(

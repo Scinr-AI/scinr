@@ -90,6 +90,7 @@ def _ensure_mongodb_ready(cfg) -> None:
         cfg.mongodb_database,
         cfg.mongodb_raw_files_collection,
         cfg.mongodb_pages_collection,
+        cfg.mongodb_frozen_collection,
         cfg.mongodb_ensure_indexes,
     )
     if key in _mongodb_ready:

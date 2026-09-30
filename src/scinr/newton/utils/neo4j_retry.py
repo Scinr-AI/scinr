@@ -59,14 +59,23 @@ def _is_transient_error(exc: Exception) -> bool:
     """Return True if *exc* represents a transient Neo4j error worth retrying.
 
     Covers:
-    - ``Neo.TransientError`` (DeadlockDetected, LockClientStopped, etc.)
+    - ``Neo.TransientError`` (DeadlockDetected, LockClientStopped,
+      MemoryPoolOutOfMemoryError, etc.)
     - ``DeadlockDetected`` (re-wrapped by some driver versions)
     - ``ServiceUnavailable`` (defunct connection, connection reset, socket errors)
       which manifests as "Failed to read/write from/to defunct connection"
+    - ``SessionExpired`` (the server stopped being reachable, or stopped being
+      the leader, while the session was open — a cluster role change)
+    - whatever else the driver itself declares retryable (``is_retryable()``):
+      ``NotALeader`` / ``ForbiddenOnReadOnlyDatabase`` (a write routed to a
+      member that just lost the leader role) and ``AuthorizationExpired``.
+      Their codes are ``Neo.ClientError.*``, so the message check misses them.
     """
     import neo4j.exceptions as _neo4j_exc
 
-    if isinstance(exc, _neo4j_exc.ServiceUnavailable):
+    if isinstance(exc, (_neo4j_exc.ServiceUnavailable, _neo4j_exc.SessionExpired)):
+        return True
+    if isinstance(exc, (_neo4j_exc.Neo4jError, _neo4j_exc.DriverError)) and exc.is_retryable():
         return True
     msg = str(exc)
     return (
