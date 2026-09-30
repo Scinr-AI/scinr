@@ -2,6 +2,9 @@ site_name: scinr documentation
 site_description: AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine
 site_url: https://scinr-ai.github.io/scinr/
 
+hooks:
+  - scripts/build_llms_txt.py
+
 exclude_docs: |
   superpowers/*
 
