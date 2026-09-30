@@ -40,8 +40,8 @@ jobs:
 
       - name: Build documentation & llms.txt
         run: |
+          uv run python -m unittest discover -s tests/scripts
           uv run mkdocs build --strict
-          uv run python scripts/build_llms_txt.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
