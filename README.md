@@ -398,4 +398,4 @@ Please open a GitHub issue with:
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](LICENSE) for details.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
