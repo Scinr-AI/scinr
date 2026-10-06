@@ -311,6 +311,35 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX idx_catalog_model_name IF NOT EXISTS "
         "FOR (n:CatalogModel) ON (n.name)",
     ),
+    # Theme nodes are merged by path (annotation/neo4j_ops.py).
+    (
+        "idx_theme_path",
+        "CREATE INDEX idx_theme_path IF NOT EXISTS "
+        "FOR (t:Theme) ON (t.path)",
+    ),
+    # Tenant indexes of the decision nodes: graphApi's tenant guard filters every
+    # node pattern by tenant_id, so a query starting at one of these labels can
+    # seek its tenant instead of scanning the label across every tenant.
+    (
+        "idx_proposed_model_tenant_id",
+        "CREATE INDEX idx_proposed_model_tenant_id IF NOT EXISTS "
+        "FOR (n:ProposedModel) ON (n.tenant_id)",
+    ),
+    (
+        "idx_proposed_field_tenant_id",
+        "CREATE INDEX idx_proposed_field_tenant_id IF NOT EXISTS "
+        "FOR (n:ProposedField) ON (n.tenant_id)",
+    ),
+    (
+        "idx_complementary_match_tenant_id",
+        "CREATE INDEX idx_complementary_match_tenant_id IF NOT EXISTS "
+        "FOR (n:ComplementaryMatch) ON (n.tenant_id)",
+    ),
+    (
+        "idx_supplementary_field_tenant_id",
+        "CREATE INDEX idx_supplementary_field_tenant_id IF NOT EXISTS "
+        "FOR (n:SupplementaryField) ON (n.tenant_id)",
+    ),
     # -- Composite tenant indexes ------------------------------------------
     # Neo4j uses one index per node, so "tenant T and property P" with two
     # single indexes seeks on one and filters every node for the other.

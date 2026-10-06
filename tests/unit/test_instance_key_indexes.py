@@ -64,3 +64,11 @@ def test_composite_tenant_indexes_are_declared():
         assert expected in names
     # The single tenant indexes stay: tenant_id=None queries cannot use a composite.
     assert "idx_model_instance_tenant_id" in names
+
+
+def test_every_tenant_label_has_a_tenant_index():
+    """graphApi's tenant guard filters each node pattern by tenant_id."""
+    names = {name for name, _ in _REGULAR_INDEXES}
+    for label in ("proposed_model", "proposed_field", "complementary_match", "supplementary_field"):
+        assert f"idx_{label}_tenant_id" in names
+    assert "idx_theme_path" in names
