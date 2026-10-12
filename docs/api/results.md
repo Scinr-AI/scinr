@@ -13,3 +13,5 @@
 ::: scinr.newton.results.FreezeResult
 
 ::: scinr.newton.results.RestoreResult
+
+::: scinr.newton.results.RelinkResult

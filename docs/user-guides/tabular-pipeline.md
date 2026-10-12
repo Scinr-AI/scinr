@@ -440,6 +440,66 @@ The combine/dedup logic described above applies **only** to `str` and `list[str]
 - Combination order follows the order of entries for that field in `ColumnMapping.mappings` — i.e., the order the LLM emitted the mappings, not the column's position in the source file.
 - This behavior is **always active**; there is no `configure()` flag to disable it. Given the same row values and the same column mapping, the combined result is always the same.
 
+**Join-key fields are the exception you should avoid.** Combining is harmless for a descriptive field, but not for a field with identity or join semantics — an `instance_key` field, a field carrying `instance_relationships` (or used in its `join_via`), or a field another model joins on. Packing `ID Code` + `ID` into one value (`"312947; CANTABNEW-0081"`) changes the key, so a reference built from one of the columns never finds it by key. The pipeline therefore:
+
+- marks those fields as `JOIN KEY: map exactly one column` in the column-mapping prompt, so the LLM maps each identifier column to its own field;
+- logs **one warning per sheet** when the mapping still sends several columns to such a field: `tabular: sheet 'Portfolio' maps 2 columns ['ID Code', 'ID'] to MarketingAuthorisationRecord.portfolio_record_id, a join-key field …`.
+
+Prefer one field per identifier in the model (`authorisation_code`, `portfolio_id`, …). Same-row links (§7.5) do not depend on the key, so they survive the merge; key-based links (other rows, other documents) do not.
+
+### 7.5 Same-Row Instances: Composition vs Cross-Document References
+
+A row with a primary model and complementary models produces **several `:ModelInstance` nodes under one `:ExtractionResult`**. When one of them declares `instance_relationships` to the class of another instance **of the same row**, the relationship is *composition*: it is linked to that sibling directly, without looking anything up by key.
+
+```
+(:ExtractionResult)
+  ├── [:HAS_MARKETING_AUTHORISATION_RECORD] ──► (ma:ModelInstance)   ← key-less
+  └── [:HAS_REGULATORY_PRODUCT_SPECIFICATION] ──► (spec:ModelInstance)
+                                                       └── [:SPECIFICATION_FOR {resolution: "sibling"}] ──► (ma)
+```
+
+The rule is generic — any models, any number of complementary models per row, any declared relationship — and lives in `entity_extraction.instance_links.match_sibling`. For each target the relationship addresses (one per item for a fan-out list):
+
+1. **Candidates** are the instances of `target_model` written under the same `:ExtractionResult` (nested ones included), except the source itself.
+2. Each candidate is compared with the join values on every `join_via` field, after normalisation (lower-case, accents stripped, whitespace collapsed). A value is also split on `;`, so `"312947"` is *contained* in `"312947; CANTABNEW-0081"`.
+3. The first non-empty tier wins: **exact** (every field equal) → **compatible** (no field contradicts, at least one equal or contained) → **unknown** (the candidate has no value for any join field).
+4. **One** candidate in that tier → linked. **Several** → *ambiguous*: none is picked, a warning is logged and the shell is used (step 6).
+5. No candidate in any tier, but **exactly one** candidate of the class, the relationship addresses a single target (not a fan-out), and that candidate is **key-less** → linked (*sole sibling*): a key-less instance can never be reached by key, so the sibling is the only thing the reference can mean. A *keyed* sibling whose key contradicts the reference is a different record — the reference is cross-document and keeps its shell.
+6. Otherwise — no instance of that class in the row, or none matching — a key-addressed **shell** is MERGE'd exactly as before (`make_instance_uid(target_model, join keys, tenant)`) and the relationship points at it (`resolution: "key"`). When the target is extracted later — another row, another document — with `instance_key` fields equal to those join values, its MERGE lands on the same uid and **fills the shell**.
+
+Relationships are resolved **after** every instance of the row is written, so it does not matter whether the source model comes before or after its target in the composite. Each `:ExtractionResult` write logs its outcome counts, e.g. `instance_relationships: {'compatible': 1}`.
+
+| Situation | Result |
+| :--- | :--- |
+| Sibling of the target class matches | Edge to the sibling, no shell (`resolution: "sibling"`) |
+| Several siblings match equally | Warning, edge to the key-addressed shell |
+| No sibling of the target class (cross-row / cross-document) | Edge to the key-addressed shell, filled later by MERGE |
+| Shell filled later | Same uid as the real keyed instance — the edge now reaches it |
+
+**Self-references across rows** (e.g. `Part.parent_id → Part.part_id`) never pick the source itself: they resolve by key, so the target row's keyed instance fills the shell.
+
+**Repairing graphs written before this behaviour.** Older ingestions linked same-row instances by key only, which left dead shells whenever the target was key-less or its join value was built from several columns. `relink_same_row_instances()` repairs one tenant: it moves every relationship that points at a shell to the same-`ExtractionResult` sibling the rule above picks, deletes the shells left without any relationship, and reports counts. It is idempotent (a second run moves nothing), tenant-scoped, and writes in bounded batches. Run it with `dry_run=True` first:
+
+```python
+from scinr.newton import relink_same_row_instances
+
+report = await relink_same_row_instances(tenant_id="a705513c-…", dry_run=True)
+print(report.relinked, report.ambiguous, report.unmatched, report.shells_deleted)
+report = await relink_same_row_instances(tenant_id="a705513c-…")
+```
+
+Ambiguous and unmatched relationships are left untouched (unmatched ones are genuine cross-document references waiting for their target). Do not run it while the same tenant is being ingested.
+
+### 7.6 Supplementary Fields
+
+Supplementary fields (extra columns `decide_model` proposes beyond the models, e.g. `marketed`, `mah_group`, `region`) belong to the row's composite schema, so they are written as properties of the row's `:ExtractionResult`. When they describe the primary record, set `tabular_supplementary_on_primary=True` (env `TABULAR_SUPPLEMENTARY_ON_PRIMARY=true`) to **also** write them on the row's primary `:ModelInstance`:
+
+- they stay on the `:ExtractionResult` too, so existing readers are unaffected;
+- a field the primary model declares itself is never overwritten;
+- if the primary model is keyed (`instance_key`) and two rows share its key, the last row written wins for these properties, as for any other field of a merged instance.
+
+It is opt-in because it changes what a primary instance carries: properties that are not in its model's schema. The cleaner long-term option, when a column is consistently useful, is to add it as a real field of the model.
+
 ---
 
 ## 8. Normalization Integration
@@ -623,9 +683,9 @@ The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subg
 Fields with `field_relationships` or `instance_relationships` in their `json_schema_extra` create additional graph edges:
 
 - **`field_relationships`:** Connects two `:LabeledEntity` nodes within the same model instance (sibling fields with `entity_label`).
-- **`instance_relationships`:** Connects `:ModelInstance` nodes across rows or documents via `join_via` key matching.
+- **`instance_relationships`:** Connects `:ModelInstance` nodes. Within one row the target is the matching **same-row sibling** (composition, no key lookup — see [§7.5](#75-same-row-instances-composition-vs-cross-document-references)); across rows or documents it is resolved via `join_via` key matching.
 
-> **Note:** without an `instance_key` declared on the target model, the `:ModelInstance` nodes created by `instance_relationships` are permanent "shell" nodes that never merge with the real, fully-extracted instance — they stay separate and unresolved. See [Cross-Section ModelInstance Linking via instance_key](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for the full mechanism.
+> **Note:** without an `instance_key` declared on the target model, the `:ModelInstance` nodes created by `instance_relationships` for a *cross-row or cross-document* reference are permanent "shell" nodes that never merge with the real, fully-extracted instance — they stay separate and unresolved. Same-row references are not affected (they link to the sibling). The catalog setup logs a warning at startup for every `join_via` target field that is not `instance_key`. See [Cross-Section ModelInstance Linking via instance_key](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for the full mechanism.
 
 These work identically to the unstructured pipeline — the tabular pipeline uses the same entity extraction subgraph writer.
 
@@ -664,7 +724,13 @@ configure(
 | `normalization_batch_size` | `int` | `5` | Maximum number of unique normalization entries per LLM call. Higher values batch more entries but increase prompt size. |
 | `normalization_llm` | `BaseChatModel` | `None` | Dedicated LLM for normalization calls. Falls back to the main `llm` when `None`. Use a cheaper/faster model here. |
 
-### 10.2 Concurrency
+### 10.2 Supplementary Fields
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `tabular_supplementary_on_primary` | `bool` | `False` | Also write each row's supplementary fields on its primary `:ModelInstance` (they always stay on the `:ExtractionResult`). Env: `TABULAR_SUPPLEMENTARY_ON_PRIMARY`. See [§7.6](#76-supplementary-fields). |
+
+### 10.3 Concurrency
 
 Tabular normalization LLM calls share the global LLM semaphore configured via `llm_concurrency` in `configure()`. This prevents the normalization engine from exceeding the provider's connection pool limits. The `NormalizationEngine.concurrency` parameter is kept for API compatibility but no longer creates a local semaphore.
 
@@ -793,6 +859,10 @@ asyncio.run(main())
 | XLSX sheet skipped | Worksheet is entirely empty | Empty worksheets are silently skipped (expected behavior) |
 | Model decision is `None` | No model in catalog matches the sheet data | Add appropriate extraction models to your theme catalog |
 | All columns mapped to `__extra__` | Model decision failed + repair loop exhausted | Check LLM connectivity and model catalog availability |
+| Warning `maps N columns … a join-key field` | Several identifier columns mapped to one `instance_key` / join field; their values are joined with `"; "` | Give each identifier its own model field (see [§7.4](#74-combining-values-when-multiple-columns-map-to-the-same-field)) |
+| `instance_relationships` edges end in empty shell `:ModelInstance` nodes inside one row | Graph written before same-row sibling resolution | Run `relink_same_row_instances(tenant_id=...)` (see [§7.5](#75-same-row-instances-composition-vs-cross-document-references)) |
+| Warning `… match … equally; not picking one` | Several instances of the target class in the row match the reference | Add a distinguishing field to `join_via`, or reference the target by a value that is unique within the row |
+| Startup warning `join_via remote field X.y is not instance_key` | Target of an `instance_relationships` declaration has no `instance_key` on its join field | Mark the field `instance_key: True` if cross-row/cross-document references must resolve; same-row links work without it |
 
 ### 12.2 Debugging Column Mapping
 

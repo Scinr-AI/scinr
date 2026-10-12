@@ -183,6 +183,41 @@ class OrphanCollectionResult:
 
 
 @dataclass
+class RelinkResult:
+    """Result of a relink_same_row_instances() call — repair of the
+    instance_relationships of one tenant that point at dead shells although a
+    same-extraction (same-row) sibling matches.
+
+    Attributes:
+        tenant_id: The tenant repaired (API value: None = public).
+        dry_run: True when nothing was written (the counts say what would happen).
+        declarations: instance_relationships declarations examined (read from
+            the catalog edges in the graph).
+        shell_relationships: Relationships found pointing at a shell
+            (= relinked + ambiguous + unmatched).
+        relinked: Relationships moved (dry run: to move) to their sibling.
+        ambiguous: Shell relationships left alone because several siblings
+            matched equally well.
+        unmatched: Shell relationships left alone because no sibling matched —
+            genuine cross-document references, kept for a later fill.
+        shells_deleted: Shells of the target classes left with no relationship
+            at all, deleted (dry run: that would be deleted).
+        by_relationship: The relinked/ambiguous/unmatched/shell_relationships
+            counts per declaration, keyed ``"Src-[REL]->Tgt"``.
+    """
+
+    tenant_id: str | None
+    dry_run: bool = False
+    declarations: int = 0
+    shell_relationships: int = 0
+    relinked: int = 0
+    ambiguous: int = 0
+    unmatched: int = 0
+    shells_deleted: int = 0
+    by_relationship: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+@dataclass
 class FreezeResult:
     """Result of a freeze_document() call — snapshot export + graph reduction.
 

@@ -178,7 +178,10 @@ Note: `severity` has no `entity_label`, so it becomes a scalar property on the `
 
 ## `instance_relationships` — Cross-Model Record Edges
 
-Connects `:ModelInstance` nodes across different sections or documents. Creates **shell nodes** for targets that have not yet been extracted, which automatically merge with the real nodes when the target model is later extracted.
+Connects `:ModelInstance` nodes. The target is resolved in two steps:
+
+1. **Same-extraction sibling (composition).** If the target model was extracted in the **same** `:ExtractionResult` as the source — the same table row, or the same section extraction with complementary models — the relationship is linked to that instance directly, with no key lookup. See [Same-Extraction Siblings](#same-extraction-siblings-composition) below.
+2. **Key-addressed shell (cross-document reference).** Otherwise a **shell node** is created for the target, addressed by its key, which automatically merges with the real node when the target model is later extracted.
 
 ### Syntax — Simple 1:1
 
@@ -237,14 +240,35 @@ Step 2 (VariationModel extracted from its own section):
 
 > For the exact UID-hashing algorithm (SHA-256 over Unicode-normalized `instance_key` field values), the precise `MERGE ... ON CREATE ... ON MATCH` Cypher pattern, and a real example of this deduplication observed in a live graph (`CTDSectionSpec`), see [Cross-Section `:ModelInstance` Linking via `instance_key`](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) in the Neo4j Graph Model guide.
 
+### Same-Extraction Siblings (Composition)
+
+Instances extracted together under one `:ExtractionResult` are parts of one record, not references between documents. Before any shell is created, the writer looks for the target among them (`instance_links.match_sibling`):
+
+- **Candidates:** the instances of `target_model` in the same `:ExtractionResult` (nested ones included), never the source itself.
+- **Comparison:** each `join_via` value, normalised, against the candidate's field — *equal*, *contained* (values are also split on `;`, the separator the tabular pipeline uses when it packs several columns into one field), *missing*, or *different*.
+- **Pick:** the single candidate of the best tier — exact match, then compatible (nothing contradicts), then no value at all. Several equally good candidates are **ambiguous**: none is picked, a warning is logged, the shell is used.
+- **Sole sibling:** with no match at all, a single **key-less** candidate is still linked when the relationship addresses one target (not a fan-out) — it can never be reached by key, so it is the only thing the reference can mean. A single *keyed* candidate with a contradicting key is a different record: the shell is used.
+
+The relationship records how it was resolved, on creation: `r.resolution = "sibling"` or `"key"`. Relationships are resolved once every instance of the extraction has been written, so declaration order in the composite does not matter.
+
+```
+(:ExtractionResult)
+  ├── [:HAS_MARKETING_AUTHORISATION_RECORD] ──► (ma:ModelInstance)
+  └── [:HAS_REGULATORY_PRODUCT_SPECIFICATION] ──► (spec:ModelInstance)
+                                                     └── [:SPECIFICATION_FOR {resolution:"sibling"}] ──► (ma)
+```
+
+Graphs written before this behaviour can be repaired per tenant with `relink_same_row_instances()` — see [Tabular Pipeline §7.5](tabular-pipeline.md#75-same-row-instances-composition-vs-cross-document-references).
+
 ### Rules
 
 - `target_model` is the **class name** as a string (PascalCase, no module path)
 - `join_via` maps local field names → target model's `instance_key` field names
-- All fields referenced in `join_via` on the target model **must** have `instance_key: True`
-- Creates shell nodes for targets not yet extracted
+- All fields referenced in `join_via` on the target model **must** have `instance_key: True` for cross-document references to resolve; the catalog setup logs a warning at startup for every one that is not (same-extraction siblings are linked regardless)
+- A matching same-extraction sibling is linked first; shells are only created when there is none
 - Shell nodes merge with real nodes when the target model is later extracted
 - Field names in `join_via` must **exactly** match the Python field names
+- Keep join-key fields to **one source value**: a value packed from several columns (`"312947; CANTABNEW-0081"`) no longer equals the key a reference from another document carries
 
 ### Target Model Requirements
 

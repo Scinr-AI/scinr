@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Same-row instance linking.** `instance_relationships` between instances
+  written under the same `:ExtractionResult` (the same table row, or the same
+  section with complementary models) are now resolved against that sibling
+  first, with no key lookup: composition, not a cross-document reference. The
+  rule is generic (any models, any number per row, any declaration) and lives
+  in `entity_extraction/instance_links.py`: `join_via` values are compared after
+  normalisation and split on `;`; the single best candidate is linked (exact,
+  compatible, no value); several equally good ones are ambiguous (warning, shell);
+  a single key-less sibling is linked when the relationship addresses one
+  target. A key-addressed shell is only created when no sibling matches, and
+  is filled later by MERGE as before. Relationships record `resolution:
+  "sibling" | "key"` on creation and are resolved after the whole extraction is
+  written.
+- `relink_same_row_instances(tenant_id=..., dry_run=False)` → `RelinkResult`:
+  tenant-scoped, idempotent repair of graphs written before — moves
+  relationships from dead shells to the matching same-`ExtractionResult`
+  sibling, deletes the shells left isolated, reports relinked / ambiguous /
+  unmatched counts per declaration. Moves are batched (one write transaction
+  per 1000).
+- `tabular_supplementary_on_primary` (`TABULAR_SUPPLEMENTARY_ON_PRIMARY`),
+  default `False`: also write a row's supplementary fields on its primary
+  `:ModelInstance` (they stay on the `:ExtractionResult`).
+- Warnings: at catalog setup, for every `instance_relationships` declaration
+  whose `join_via` target field is not `instance_key` (or does not exist, or
+  whose target model is unknown); once per sheet, when the column mapping
+  sends several columns to a join-key field (their values would be joined
+  with `"; "`). The column-mapping prompt marks join-key fields "map exactly
+  one column".
+
 ## [0.4.0] - 2026-09-30
 
 Multi-tenancy and document freezing, both implemented and pushed.

@@ -23,6 +23,7 @@ from scinr.newton.exceptions import (
 )
 from scinr.newton.ingest.deletion import collect_orphans, delete_document
 from scinr.newton.ingest.freeze import export_document_snapshot, freeze_document
+from scinr.newton.ingest.relink import relink_same_row_instances
 from scinr.newton.ingest.restore import restore_document
 from scinr.newton.navigation import (
     GraphNavigator,
@@ -36,6 +37,7 @@ from scinr.newton.results import (
     FreezeResult,
     OrphanCollectionResult,
     PipelineResult,
+    RelinkResult,
     RestoreResult,
     StageResult,
 )
@@ -76,6 +78,7 @@ __all__ = [
     "PipelineResult",
     "DeletionResult",
     "OrphanCollectionResult",
+    "RelinkResult",
     "FreezeResult",
     "RestoreResult",
     # Unified pipeline
@@ -90,6 +93,7 @@ __all__ = [
     # Document deletion
     "delete_document",
     "collect_orphans",
+    "relink_same_row_instances",
     # Document freezing
     "freeze_document",
     "restore_document",

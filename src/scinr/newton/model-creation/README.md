@@ -110,6 +110,11 @@ extraction records themselves and supports **forward references**: the target mo
 yet exist when the relationship is written. The engine creates a "shell" `ModelInstance`
 node on first encounter and populates it when the target model is later extracted.
 
+When the target was extracted **together with** the source (the same table row, or the
+same section with complementary models — one `:ExtractionResult`), the relationship is
+**composition**: it links to that sibling instance directly, without any key lookup or shell.
+See [§8 — Same-row vs cross-document](#same-row-vs-cross-document-relationships).
+
 See [§8](#8-instance_relationships-syntax) for the full syntax.
 
 ### instance_key
@@ -124,7 +129,10 @@ its **composite key** for `ModelInstance` deduplication. The engine combines all
    variation code `"Q.I.a.1(a)"`) share one node in the graph.
 
 Every model that is referenced as a `target_model` in an `instance_relationships`
-declaration **must** mark its key fields with `instance_key: True`.
+declaration **must** mark its key fields with `instance_key: True`. This is checked when
+the catalog is set up: every `join_via` target field that is not `instance_key` is logged
+as a warning (`instance_relationships: Src.field: join_via remote field Tgt.x is not
+instance_key …`).
 
 Marking a field with `instance_key` also **indexes it per tenant**: the catalog setup
 creates a `(tenant_id, <field>)` index on `:ModelInstance` (`idx_mi_key_<field>`), shared by
@@ -522,6 +530,34 @@ Use `instance_relationships` when:
 
 Use `field_relationships` (§7) instead when both entities are extracted from the same
 model instance (same structural section).
+
+### Same-row vs cross-document relationships
+
+The same declaration covers two different situations; the engine tells them apart at
+write time:
+
+| | Same-row / same-extraction | Cross-row / cross-document |
+|---|---|---|
+| Where is the target? | Extracted in the **same** `:ExtractionResult` (same table row; same section with complementary models) | In another row, section or document — maybe not extracted yet |
+| Nature | Composition: parts of one record | Reference to another record |
+| Resolution | Linked to the matching **sibling** instance, no key lookup | A **shell** addressed by `make_instance_uid(target, join keys, tenant)`; filled when the target is extracted with the same `instance_key` values |
+| Needs `instance_key` on the target? | No | **Yes** |
+| Relationship property | `resolution: "sibling"` | `resolution: "key"` |
+
+How a sibling is chosen when the row has several instances of the target class: the
+`join_via` values are compared after normalisation (and split on `;`); the single best
+match is linked (exact, then compatible, then one with no value). Several equally good
+matches are *ambiguous*: none is picked, a warning is logged, the shell is used. With no
+match, a **single key-less** sibling is still linked when the relationship addresses one
+target (not a fan-out list) — nothing else could ever reach it. A single **keyed** sibling
+with a different key is a different record, so the reference stays cross-document.
+
+Design consequences:
+- Give each identifier its **own field**. In the tabular pipeline several columns mapped to
+  one `str` field are joined with `"; "`; on a join-key field that changes the key, so
+  cross-document references stop matching (the pipeline warns once per sheet).
+- A model used only as a same-row complement does not strictly need `instance_key` on
+  its join field — but declare it anyway if any other document may reference it.
 
 ### Format
 

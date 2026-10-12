@@ -241,8 +241,20 @@ class MainModelExample(ExtractionModel):
     #   - Los demás campos en join_via son claves fijas (escalares del mismo modelo)
     #     que anclan el destino al contexto correcto.
     #
+    # MISMA FILA vs. OTRO DOCUMENTO:
+    #   - Si el modelo destino se extrae en la MISMA extracción (misma fila de una
+    #     tabla, o misma sección como modelo complementario), la relación es
+    #     composición: se enlaza directamente con esa instancia hermana cuyo valor
+    #     de join_via coincide (normalizado; también dividido por ';'), sin buscar
+    #     por clave y sin crear shell.
+    #   - Si está en otra fila, sección o documento, se crea un shell direccionado
+    #     por la clave que se rellena cuando el destino se extrae.
+    #
     # ⚠ REQUISITO: el modelo destino DEBE tener instance_key: True en los campos
-    # que usa como clave. Sin ello, el nodo shell no resolverá correctamente.
+    # que usa como clave. Sin ello, el nodo shell de una referencia entre
+    # documentos no resolverá nunca (se avisa al arrancar).
+    # ⚠ Un identificador = un campo: no alimentes un campo clave con varias
+    # columnas (el pipeline tabular las une con "; " y la clave deja de coincidir).
     referenced_item_ids: list[str] = Field(
         default_factory=list,
         description=(

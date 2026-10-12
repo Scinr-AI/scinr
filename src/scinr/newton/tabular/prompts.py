@@ -190,9 +190,12 @@ def _build_model_fields_block(model_class_name: str, scalar_only: bool = False) 
         Such fields are annotated with '(nested — not mappable)' and excluded.
     """
     try:
-        from scinr.newton.entity_extraction.model_resolver import resolve_model_class
+        from scinr.newton.entity_extraction.instance_links import join_key_fields
+        from scinr.newton.entity_extraction.model_resolver import _get_registry, resolve_model_class
 
         cls = resolve_model_class(model_class_name)
+        # Identity/join fields: several columns joined into one would change the key.
+        key_fields = join_key_fields(cls, _get_registry().values())
         lines = []
         for fname, finfo in cls.model_fields.items():
             ann = finfo.annotation
@@ -201,7 +204,12 @@ def _build_model_fields_block(model_class_name: str, scalar_only: bool = False) 
             type_str = str(ann).replace("typing.", "") if ann else "Any"
             desc = finfo.description or ""
             required = "required" if finfo.is_required() else "optional"
-            lines.append(f"  {fname} [{type_str}]: {desc} ({required})")
+            key_note = (
+                " [JOIN KEY: map exactly one column to this field — never several]"
+                if fname in key_fields
+                else ""
+            )
+            lines.append(f"  {fname} [{type_str}]: {desc} ({required}){key_note}")
         return "\n".join(lines) if lines else f"(no mappable fields found for {model_class_name})"
     except Exception as exc:
         return f"(could not load model fields for {model_class_name}: {exc})"

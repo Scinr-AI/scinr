@@ -159,6 +159,8 @@ class ScinrConfig:
     normalization_enabled: bool = True
     normalization_batch_size: int = 5
     normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
+    # Tabular
+    tabular_supplementary_on_primary: bool = False
 
     def __repr__(self) -> str:
         # The generated dataclass repr would print the secrets verbatim — and it
@@ -269,6 +271,8 @@ def configure(
     normalization_enabled: bool | None = None,
     normalization_batch_size: int | None = None,
     normalization_llm: Any | None = None,
+    # Tabular
+    tabular_supplementary_on_primary: bool | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -370,6 +374,10 @@ def configure(
         normalization_enabled: Enable post-extraction normalization for tabular data.
         normalization_batch_size: Max normalization entries per LLM batch (default: `5`).
         normalization_llm: Dedicated LLM model instance for tabular normalization.
+        tabular_supplementary_on_primary: Also write a row's supplementary
+            fields (columns the decision added beyond the models) as properties
+            of the row's primary ModelInstance, not only of its ExtractionResult
+            (default: `False`). Env: `TABULAR_SUPPLEMENTARY_ON_PRIMARY`.
 
     Returns:
         ScinrConfig singleton containing active library settings.
@@ -633,6 +641,13 @@ def configure(
     )
     resolved_normalization_llm = normalization_llm  # Can be None — engine uses main llm as fallback
 
+    # ── Tabular ───────────────────────────────────────────────────────────────
+    resolved_tabular_supplementary_on_primary = (
+        tabular_supplementary_on_primary
+        if tabular_supplementary_on_primary is not None
+        else os.getenv("TABULAR_SUPPLEMENTARY_ON_PRIMARY", "false").lower() == "true"
+    )
+
     # ── Resolve extra_models_paths ────────────────────────────────────────────
     resolved_extra_models_paths: list[Path] = []
     if extra_models_paths:
@@ -706,6 +721,7 @@ def configure(
         normalization_enabled=resolved_normalization_enabled,
         normalization_batch_size=resolved_normalization_batch_size,
         normalization_llm=resolved_normalization_llm,
+        tabular_supplementary_on_primary=resolved_tabular_supplementary_on_primary,
     )
 
     # ── Post-init: apply converter overrides ──────────────────────────────────

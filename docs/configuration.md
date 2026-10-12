@@ -196,6 +196,12 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 | `normalization_batch_size` | `int \| None` | Batch size for normalization LLM calls. |
 | `normalization_llm` | `Any \| None` | Dedicated LLM client for normalization. Falls back to `llm` if not provided. |
 
+### Tabular Parameters
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `tabular_supplementary_on_primary` | `bool \| None` | Also write each row's supplementary fields on its primary `:ModelInstance` (they stay on the `:ExtractionResult`). Default `False`. Env: `TABULAR_SUPPLEMENTARY_ON_PRIMARY`. |
+
 ---
 
 ## Configuration Examples

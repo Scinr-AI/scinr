@@ -18,7 +18,8 @@ Before writing any code, internalise these rules. Violating them causes silent f
 | 4 | All model classes **must** inherit from `ExtractionModel` | `ConfigDict(extra="forbid")` is required to prevent silent LLM hallucinations |
 | 5 | Every field **must** have `description=` with ≥ 15 words | The LLM uses the description as its primary extraction signal |
 | 6 | `entity_label` **must not** be added to free-text narrative fields | Creates meaningless graph singletons and degrades deduplication quality |
-| 7 | Every model referenced as `target_model` in `instance_relationships` **must** mark its key fields `instance_key: True` | Without this the shell `ModelInstance` node never merges with the real one |
+| 7 | Every model referenced as `target_model` in `instance_relationships` **must** mark its key fields `instance_key: True` | Without this the shell `ModelInstance` node of a cross-document reference never merges with the real one (same-row siblings are linked regardless). Checked at catalog setup: a warning per offending `join_via` field |
+| 8 | Each identifier used in `instance_key` / `join_via` gets its **own** field — never one field fed by several columns | The tabular pipeline joins multiple columns into `"a; b"`, which changes the key; the pipeline warns once per sheet |
 
 ---
 
@@ -452,6 +453,15 @@ for the full mechanics of the combination/dedup logic, and §6.4 below for the
 | Is the relationship between two **named entities** (`:LabeledEntity` nodes)? | Yes | `field_relationships` |
 | Is the relationship between two **model records** (`:ModelInstance` nodes)? | Yes | `instance_relationships` |
 | Do you need a **forward reference** (target may not exist yet)? | Yes | `instance_relationships` |
+| Is the target model extracted **in the same row / same section** (as a complementary model)? | Yes | `instance_relationships` — it is linked to that sibling instance directly (composition, no key lookup) |
+
+`instance_relationships` resolves in two steps. **Same-extraction sibling first:** when an
+instance of `target_model` was written under the same `:ExtractionResult` (same table row,
+same section), the relationship links to the sibling whose `join_via` values match after
+normalisation (values are also split on `;`); a single key-less sibling is linked even
+without a match when the relationship addresses one target. Several equally good siblings
+are ambiguous → warning + shell. **Key-addressed shell otherwise:** the cross-document
+mechanism below, which is what requires `instance_key` on the target.
 
 ### 5.2 `field_relationships` syntax
 
@@ -483,7 +493,7 @@ Produces: `(:LabeledEntity:VariationCode {value:"Q.I.a.1"}) -[:HAS_CHILD_VARIATI
 
 ### 5.3 `instance_relationships` syntax
 
-Connects `:ModelInstance` nodes across different sections or documents. Creates shell nodes for targets that have not yet been extracted.
+Connects `:ModelInstance` nodes — to a matching same-extraction sibling when there is one (see §5.1), otherwise across different sections or documents through shell nodes for targets that have not yet been extracted.
 
 ```python
 json_schema_extra={

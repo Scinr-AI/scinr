@@ -32,10 +32,23 @@ a Neo4j subgraph using three relationship mechanisms:
   ModelInstance is filtered uniformly; ExtractionResult keeps them as scalars.
 
     Fields with json_schema_extra={"instance_relationships": [...]} trigger,
-    for each item in a list[str] field, MERGE of a target ModelInstance shell
-    (identified by its composite key) and MERGE of the typed relationship
-    (src_mi)-[:REL_TYPE]->(tgt_mi). Enables forward references across
-    StructureNode boundaries.
+    for each item of the field (a list[str] fans out), the typed relationship
+    (src_mi)-[:REL_TYPE]->(tgt_mi). The target is resolved in two steps:
+
+      1. Same-extraction sibling (composition). Every ModelInstance written
+         under the same ExtractionResult (the same table row, the same node
+         extraction) is a candidate; the relationship is linked to the one
+         that matches (see ``instance_links.match_sibling``), with no key
+         lookup. Relationships are resolved after the whole composite is
+         written, so field order does not matter.
+      2. Key-addressed shell (cross-document reference). With no matching
+         sibling, a target ModelInstance shell identified by its composite key
+         is MERGE'd, and a later extraction of the target (keyed by the same
+         instance_key values) fills it. Enables forward references across
+         StructureNode boundaries.
+
+    The relationship records which step resolved it in ``r.resolution``
+    (``"sibling"`` or ``"key"``) when it is created.
 
 Graph produced per ExtractionResult:
   (:StructureNode)-[:HAS_EXTRACTION]->(:ExtractionResult)
@@ -58,7 +71,9 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any
 
@@ -66,6 +81,7 @@ from neo4j import AsyncDriver
 from pydantic import BaseModel
 
 from scinr.newton.config import get_config
+from scinr.newton.entity_extraction.instance_links import SiblingCandidate, match_sibling
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry
 from scinr.newton.utils.tenancy import PUBLIC_TENANT
 from scinr.newton.utils.uid import make_instance_uid as _make_instance_uid
@@ -204,6 +220,36 @@ def _provenance_set_clause(alias: str) -> str:
     )
 
 
+@dataclass
+class _ExtractionScope:
+    """What one write of a model subgraph (one ExtractionResult) has produced.
+
+    Created by the outermost ``_write_model_fields`` call and threaded through
+    the recursion: every ModelInstance written is registered as a sibling
+    candidate, and the instance_relationships of every instance are deferred
+    until the whole subgraph is written, so a relationship can resolve to a
+    sibling written after its source.
+    """
+
+    siblings: list[SiblingCandidate] = field(default_factory=list)
+    pending: list[tuple[BaseModel, str, str]] = field(default_factory=list)
+    """(instance, src uid, src label) whose instance_relationships are still to apply."""
+    root_children: dict[str, str] = field(default_factory=dict)
+    """field name → uid of the ModelInstance hanging directly from the root."""
+    stats: Counter = field(default_factory=Counter)
+    """Resolution outcomes of the instance_relationships (see instance_links)."""
+
+    def register(self, uid: str, instance: BaseModel, keyed: bool) -> None:
+        self.siblings.append(
+            SiblingCandidate(
+                uid=uid,
+                model_class=type(instance).__name__,
+                values={name: getattr(instance, name, None) for name in type(instance).model_fields},
+                keyed=keyed,
+            )
+        )
+
+
 _STALE_EXTRACTION_RESULT_DELETE_QUERY = """
 UNWIND $node_ids AS nid
 MATCH (n:StructureNode {id: nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
@@ -248,6 +294,9 @@ async def write_extraction_subgraph(
     complementary_model_classes: list[str],
     document_name: str,
     extraction_uid: str,
+    *,
+    supplementary_fields: Sequence[str] = (),
+    primary_field_name: str | None = None,
 ) -> None:
     """
     Write the complete extraction subgraph for one StructureNode to Neo4j.
@@ -258,6 +307,10 @@ async def write_extraction_subgraph(
 
     Idempotent: uses MERGE for all entity nodes. ExtractionResult is re-created
     fresh (existing one for this node is deleted first).
+
+    instance_relationships between instances of this composite resolve to
+    each other (same-extraction siblings) before any key-addressed shell is
+    created — see the module docstring.
 
     Parameters
     ----------
@@ -275,6 +328,14 @@ async def write_extraction_subgraph(
         Document.name for provenance.
     extraction_uid:
         Deterministic UID for the ExtractionResult node.
+    supplementary_fields:
+        Names of the composite's supplementary fields. With
+        *primary_field_name*, their scalar values are also written on the
+        primary ModelInstance (they stay on the ExtractionResult too, where
+        existing readers find them). Empty (the default): ExtractionResult only.
+    primary_field_name:
+        Composite field holding the primary model instance; required for
+        *supplementary_fields* to have any effect.
     """
     from datetime import datetime
 
@@ -386,6 +447,7 @@ async def write_extraction_subgraph(
         entity_nodes: dict[str, str] = {}  # field_path → labeled_entity_uid
 
         # ── Write fields from the composite instance ──────────────────────
+        scope = _ExtractionScope()
         await _write_model_fields(
             session=session,
             instance=composite_instance,
@@ -397,7 +459,18 @@ async def write_extraction_subgraph(
             tenant_id=tenant_id,
             created_by_user_id=created_by_user_id,
             job_id=job_id,
+            scope=scope,
         )
+
+        # ── Supplementary fields → primary ModelInstance (opt-in) ─────────
+        if supplementary_fields and primary_field_name:
+            await _copy_supplementary_to_primary(
+                session,
+                composite_instance,
+                primary_field_name,
+                supplementary_fields,
+                scope.root_children.get(primary_field_name),
+            )
 
         # ── Level 2: resolve field_relationships ──────────────────────────
         await _apply_field_relationships(
@@ -408,10 +481,43 @@ async def write_extraction_subgraph(
         )
 
     log.info(
-        "write_extraction_subgraph: wrote ExtractionResult %s for node %r (%d entity nodes)",
+        "write_extraction_subgraph: wrote ExtractionResult %s for node %r (%d entity nodes, "
+        "instance_relationships: %s)",
         extraction_uid,
         node_full_id,
         len(entity_nodes),
+        dict(scope.stats) or "none",
+    )
+
+
+async def _copy_supplementary_to_primary(
+    session,
+    composite_instance: BaseModel,
+    primary_field_name: str,
+    supplementary_fields: Sequence[str],
+    primary_uid: str | None,
+) -> None:
+    """SET the supplementary values of the composite on the primary
+    ModelInstance. A field the primary model itself declares is never
+    overwritten (the model's own value wins); nested models are skipped."""
+    primary = getattr(composite_instance, primary_field_name, None)
+    if primary_uid is None or not isinstance(primary, BaseModel):
+        return
+    props: dict[str, Any] = {}
+    for name in supplementary_fields:
+        value = getattr(composite_instance, name, None)
+        if value is None or name in type(primary).model_fields or isinstance(value, BaseModel):
+            continue
+        if isinstance(value, list):
+            props[name] = [_stringify_if_dict(v) for v in value if v is not None]
+        else:
+            props[name] = _stringify_if_dict(value)
+    if not props:
+        return
+    await session.run(
+        "MATCH (mi:ModelInstance {uid: $uid}) SET mi += $props",
+        uid=primary_uid,
+        props=props,
     )
 
 
@@ -438,6 +544,7 @@ async def _write_model_fields(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
     list_index: int | None = None,
+    scope: _ExtractionScope | None = None,
 ) -> None:
     """
     Recursively write all fields of *instance* under the parent node identified by *parent_uid*.
@@ -469,9 +576,17 @@ async def _write_model_fields(
         Current recursion depth (safety cap at 10).
     list_index:
         If this instance is an element of a list, its 0-based index.
+    scope:
+        Shared state of the whole subgraph write (see :class:`_ExtractionScope`);
+        created here when ``None``. The outermost call (``depth == 0``)
+        resolves the deferred instance_relationships once every field of the
+        subgraph has been written.
     """
     # Interpolated into the Cypher: a closed set, never caller-controlled text.
     _check_parent_label(parent_label)
+    owns_scope = depth == 0
+    if scope is None:
+        scope = _ExtractionScope()
 
     if depth > 10:
         log.warning("_write_model_fields: max depth reached, stopping recursion")
@@ -540,6 +655,9 @@ async def _write_model_fields(
                     created_by_user_id=created_by_user_id,
                     job_id=job_id,
                 )
+            scope.register(child_uid, value, keyed=bool(key_fields))
+            if depth == 0:
+                scope.root_children[field_name] = child_uid
             await _write_model_fields(
                 session=session,
                 instance=value,
@@ -551,6 +669,7 @@ async def _write_model_fields(
                 tenant_id=tenant_id,
                 created_by_user_id=created_by_user_id,
                 job_id=job_id,
+                scope=scope,
             )
             continue
 
@@ -608,6 +727,7 @@ async def _write_model_fields(
                             created_by_user_id=created_by_user_id,
                             job_id=job_id,
                         )
+                    scope.register(child_uid, item, keyed=bool(key_fields))
                     await _write_model_fields(
                         session=session,
                         instance=item,
@@ -620,6 +740,7 @@ async def _write_model_fields(
                         created_by_user_id=created_by_user_id,
                         job_id=job_id,
                         list_index=i,
+                        scope=scope,
                     )
                 else:
                     if isinstance(item, str) and entity_label:
@@ -691,16 +812,8 @@ async def _write_model_fields(
             )
             scalar_props[field_name] = _stringify_if_dict(value)
 
-    # ── Level 3: instance_relationships ──────────────────────────────────
-    await _apply_instance_relationships(
-        session=session,
-        instance=instance,
-        src_mi_uid=parent_uid,
-        src_label=parent_label,
-        tenant_id=tenant_id,
-        created_by_user_id=created_by_user_id,
-        job_id=job_id,
-    )
+    # ── Level 3: instance_relationships (deferred until every sibling is written)
+    scope.pending.append((instance, parent_uid, parent_label))
 
     # Batch-SET all scalar properties on the parent node
     if scalar_props:
@@ -710,6 +823,21 @@ async def _write_model_fields(
             parent_uid=parent_uid,
             **scalar_props,
         )
+
+    if owns_scope:
+        for pending_instance, src_uid, src_label in scope.pending:
+            await _apply_instance_relationships(
+                session=session,
+                instance=pending_instance,
+                src_mi_uid=src_uid,
+                src_label=src_label,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                job_id=job_id,
+                siblings=scope.siblings,
+                stats=scope.stats,
+            )
+        scope.pending.clear()
 
 
 async def _merge_labeled_entity(
@@ -835,15 +963,24 @@ async def _apply_instance_relationships(
     tenant_id: str = PUBLIC_TENANT,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
+    siblings: Sequence[SiblingCandidate] = (),
+    stats: Counter | None = None,
 ) -> None:
     """
     Level 3 — Instance Key Relationships.
 
     For each field in *instance* that declares ``instance_relationships``,
-    MERGE the target ModelInstance node (identified by its composite key)
-    and MERGE the typed relationship (src_mi)-[:REL_TYPE]->(tgt_mi).
+    and each target it addresses (a list field fans out, one per item):
 
-    This enables cross-StructureNode references: when VariationCodeModel lists
+    1. Same-extraction sibling: if one of *siblings* matches the target
+       (``instance_links.match_sibling``), MERGE (src)-[:REL_TYPE]->(sibling).
+       No key lookup, no shell.
+    2. Otherwise — no sibling of the target class, none matching, or several
+       equally good ones (logged as a warning) — MERGE the target
+       ModelInstance shell identified by its composite key and MERGE the typed
+       relationship to it, exactly as before.
+
+    Step 2 enables cross-StructureNode references: when VariationCodeModel lists
     condition_ids=['1','2'], two ConditionModel shell nodes are created/merged
     here with deterministic UIDs.  When ConditionModel is later extracted in a
     child section, its _write_model_fields call will MERGE the same node and
@@ -860,6 +997,13 @@ async def _apply_instance_relationships(
         instance — it becomes the source of the typed relationship.
     src_label:
         Label of that node (``"ModelInstance"`` or ``"ExtractionResult"``).
+    siblings:
+        Every ModelInstance written under the same ExtractionResult. Empty:
+        step 1 is skipped (key-addressed shells only).
+    stats:
+        Optional counter, incremented with each resolution outcome
+        (``exact``/``compatible``/``unknown``/``sole`` sibling links,
+        ``ambiguous``, ``none``).
     """
     _check_parent_label(src_label)
     if not hasattr(instance, "model_fields"):
@@ -926,14 +1070,48 @@ async def _apply_instance_relationships(
 
             # ── Fan-out: un ModelInstance target por cada item de la lista ──
             items = value if isinstance(value, list) else [value]
+            items = [item for item in items if item is not None]
             for item in items:
-                if item is None:
-                    continue
-
                 tgt_key_fields: dict[str, str] = {
                     **fixed_key_fields,
                     fanout_remote_field: _normalize(str(item)),
                 }
+
+                # ── 1. Same-extraction sibling (composition) ──
+                match = match_sibling(
+                    target_model,
+                    tgt_key_fields,
+                    siblings,
+                    exclude_uid=src_mi_uid,
+                    single_target=len(items) == 1,
+                )
+                if stats is not None:
+                    stats[match.outcome] += 1
+                if match.linked:
+                    await _merge_instance_relationship(
+                        session, src_label, src_mi_uid, match.uid, rel_type, "sibling"
+                    )
+                    log.debug(
+                        "_apply_instance_relationships: %s -[%s]-> sibling %s %s (%s match)",
+                        src_mi_uid[:8],
+                        rel_type,
+                        target_model,
+                        match.uid,
+                        match.outcome,
+                    )
+                    continue
+                if match.outcome == "ambiguous":
+                    log.warning(
+                        "_apply_instance_relationships: %d %s instances in the same "
+                        "extraction match %s=%r equally; not picking one, falling back "
+                        "to the key-addressed shell",
+                        match.candidates,
+                        target_model,
+                        field_name,
+                        tgt_key_fields,
+                    )
+
+                # ── 2. Key-addressed shell (cross-document reference) ──
                 tgt_uid = _make_instance_uid(target_model, tgt_key_fields, tenant_id)
 
                 # MERGE del nodo target (shell con solo las keys si es nuevo)
@@ -959,16 +1137,8 @@ async def _apply_instance_relationships(
                 )
 
                 # MERGE de la relación (src)-[:REL_TYPE]->(tgt)
-                rel_params = {"src_uid": src_mi_uid, "tgt_uid": tgt_uid}
-                await with_neo4j_retry(
-                    lambda p=rel_params: session.run(
-                        f"""
-                    MATCH (src:{src_label} {{uid: $src_uid}})
-                    MATCH (tgt:ModelInstance {{uid: $tgt_uid}})
-                    MERGE (src)-[:`{rel_type}`]->(tgt)
-                    """,
-                        **p,
-                    )
+                await _merge_instance_relationship(
+                    session, src_label, src_mi_uid, tgt_uid, rel_type, "key"
                 )
                 log.debug(
                     "_apply_instance_relationships: %s -[%s]-> %s(%r)",
@@ -977,6 +1147,27 @@ async def _apply_instance_relationships(
                     target_model,
                     tgt_key_fields,
                 )
+
+
+async def _merge_instance_relationship(
+    session, src_label: str, src_uid: str, tgt_uid: str, rel_type: str, resolution: str
+) -> None:
+    """MERGE (src)-[:REL_TYPE]->(tgt:ModelInstance); ``r.resolution`` records,
+    on create, whether a same-extraction sibling (``"sibling"``) or the
+    key-addressed shell (``"key"``) resolved it."""
+    _check_parent_label(src_label)
+    params = {"src_uid": src_uid, "tgt_uid": tgt_uid, "resolution": resolution}
+    await with_neo4j_retry(
+        lambda: session.run(
+            f"""
+        MATCH (src:{src_label} {{uid: $src_uid}})
+        MATCH (tgt:ModelInstance {{uid: $tgt_uid}})
+        MERGE (src)-[r:`{rel_type}`]->(tgt)
+        ON CREATE SET r.resolution = $resolution
+        """,
+            **params,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -211,6 +211,9 @@ async def write_tabular_subgraph(
                 len(comp_cls_list),
                 len(decision.supplementary_fields),
             )
+            warn_multi_column_join_fields(
+                mapping, primary_cls, comp_cls_map, sheet_name=sheet["sheet_name"]
+            )
         except KeyError:
             logger.warning(
                 "tabular: model '%s' not found in registry, falling back to raw storage",
@@ -284,6 +287,55 @@ async def write_tabular_subgraph(
         total_rows,
     )
     return table_composite_id
+
+
+def warn_multi_column_join_fields(
+    mapping: ColumnMapping,
+    primary_cls: type,
+    comp_cls_map: dict[str, type],
+    *,
+    sheet_name: str = "",
+) -> dict[tuple[str, str], list[str]]:
+    """Warn (once per sheet) about join-key fields filled from several columns.
+
+    ``_route_row_values`` joins the values of every column mapped to the same
+    ``str`` field with ``"; "``. For an ordinary field that is harmless; for a
+    field with identity/join semantics (``instance_key``, the fields of an
+    ``instance_relationships`` declaration, or a field other models join on —
+    see :func:`~scinr.newton.entity_extraction.instance_links.join_key_fields`)
+    it silently changes the key, so a cross-document reference built from one
+    column never matches. Map such columns to separate fields instead.
+
+    Same-row links are not affected (they resolve to the sibling instance
+    without a key lookup); this only protects key-based resolution.
+
+    Returns the offending ``{(target_model, field_name): [columns]}``.
+    """
+    from scinr.newton.entity_extraction.instance_links import multi_column_join_fields
+
+    classes: dict[str, type] = {"primary": primary_cls, **comp_cls_map}
+    models: list[type] = list(classes.values())
+    try:
+        from scinr.newton.entity_extraction.model_resolver import _get_registry
+
+        models.extend(_get_registry().values())
+    except Exception:  # registry unavailable: the models in play are enough
+        pass
+    offending = multi_column_join_fields(mapping.mappings, classes, models)
+    for (target, field_name), columns in offending.items():
+        owner = primary_cls.__name__ if target == "primary" else target
+        logger.warning(
+            "tabular: sheet %r maps %d columns %r to %s.%s, a join-key field "
+            "(instance_key / instance_relationships). Their values will be joined "
+            "with '; ' into one key, which breaks key-based linking; map them to "
+            "separate fields.",
+            sheet_name,
+            len(columns),
+            columns,
+            owner,
+            field_name,
+        )
+    return offending
 
 
 # ── Batch row writer ──────────────────────────────────────────────────────────
@@ -780,6 +832,11 @@ async def _write_row_batch(
 
     # ── Phase 3: Write to Neo4j (parallel) ────────────────────────────────────
     sem = asyncio.Semaphore(_PARALLEL_ROW_WRITES)
+    supplementary_on_primary: list[str] = (
+        [sf.field_name for sf in decision.supplementary_fields]
+        if get_config().tabular_supplementary_on_primary
+        else []
+    )
 
     async def _write_single_row(
         i: int,
@@ -801,6 +858,8 @@ async def _write_row_batch(
                         complementary_model_classes=comp_class_names,
                         document_name=document_name,
                         extraction_uid=extraction_uid,
+                        supplementary_fields=supplementary_on_primary,
+                        primary_field_name=primary_field_name,
                     )
                 except Exception as exc:
                     logger.warning(
