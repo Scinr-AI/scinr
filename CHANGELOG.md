@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Tabular: key fields no longer receive several columns joined with `"; "`.**
+  When the column mapping sends several columns to an `instance_key` field or
+  to a field of an `instance_relationships` declaration, only the first
+  column's value is used (the full row stays in the Row's `InfoUnit`), and a
+  warning is logged once per sheet. A packed value (`"312947; CANTABNEW-0081"`)
+  produced a key no reference carried, so every link to the record was lost.
+  `list[str]` key fields (fan-out) keep every value. The column-mapping prompt
+  marks key fields "map exactly ONE column".
+
+### Added
+- Catalog setup warns about every `instance_relationships` declaration whose
+  `join_via` target field is not `instance_key` (the shell it points at can
+  never merge with the real instance), does not exist, or whose target model is
+  unknown.
+
 ## [0.4.0] - 2026-09-30
 
 Multi-tenancy and document freezing, both implemented and pushed.

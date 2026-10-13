@@ -447,6 +447,12 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
     # ── 2. Recursively discover every referenced Pydantic model via BFS ───────
     all_models = _collect_all_model_classes(seed_classes)
 
+    # ── 3. Static checks of the instance_relationships declarations (warnings
+    # only: e.g. a join_via target field that is not instance_key) ──────────
+    from scinr.newton.entity_extraction.key_fields import warn_instance_relationships
+
+    warn_instance_relationships(all_models)
+
     field_count = 0
     agg_count = 0
     cfg = get_config()
@@ -649,7 +655,8 @@ async def ensure_catalog_models(driver: AsyncDriver) -> None:
                     if not target_model or not rel_type:
                         continue
                     if target_model not in all_models:
-                        log.warning(
+                        # Already warned by warn_instance_relationships() above.
+                        log.debug(
                             "ensure_catalog_models: instance_relationship on "
                             "%s.%s references unknown target_model=%r — skipping",
                             model_name, field_name, target_model,

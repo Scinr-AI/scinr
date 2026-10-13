@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import types as _builtin_types
@@ -20,6 +21,7 @@ from scinr.newton.entity_extraction.graph_mapper import (
     _provenance_set_clause,
     _require_stored_tenant,
 )
+from scinr.newton.entity_extraction.key_fields import key_fields
 from scinr.newton.entity_extraction.schema_composer import _to_snake_case
 from scinr.newton.exceptions import ConfigurationError
 from scinr.newton.ingest.nodes import make_structure_node_id
@@ -210,6 +212,9 @@ async def write_tabular_subgraph(
                 decision.matched_model_class,
                 len(comp_cls_list),
                 len(decision.supplementary_fields),
+            )
+            warn_multi_column_key_fields(
+                mapping, primary_cls, comp_cls_map, sheet_name=sheet["sheet_name"]
             )
         except KeyError:
             logger.warning(
@@ -968,10 +973,71 @@ def _classify_merge_type(annotation: object) -> str:
     return "other"
 
 
+@functools.lru_cache(maxsize=256)
+def _single_value_key_fields(cls: type) -> frozenset[str]:
+    """Key fields of *cls* that hold ONE value (``str``-like, not ``list[str]``):
+    several mapped columns must never be joined into them (see
+    :func:`~scinr.newton.entity_extraction.key_fields.key_fields`). A
+    ``list[str]`` key field is a fan-out — each item is its own reference — so
+    it keeps the usual merge."""
+    return frozenset(
+        name
+        for name in key_fields(cls)
+        if _classify_merge_type(cls.model_fields[name].annotation) != "list_str"
+    )
+
+
+def warn_multi_column_key_fields(
+    mapping: ColumnMapping,
+    primary_cls: type,
+    comp_cls_map: dict[str, type],
+    *,
+    sheet_name: str = "",
+) -> dict[tuple[str, str], list[str]]:
+    """Warn, once per sheet, about key fields the mapping fills from several columns.
+
+    For those fields :func:`_route_row_values` keeps the value of the first
+    column (in mapping order) instead of joining them all with ``"; "`` — a
+    packed value is a key no reference carries. The other columns' values are
+    not lost: the whole row stays in the Row's ``InfoUnit``. The fix is in the
+    model: one field per identifier, so each column maps to its own field.
+
+    Returns ``{(target_model, field_name): [columns]}`` for the offending fields.
+    """
+    classes: dict[str, type] = {"primary": primary_cls, **comp_cls_map}
+    columns: dict[tuple[str, str], list[str]] = {}
+    for m in mapping.mappings:
+        if m.confidence == "low" or m.model_field_name == "__extra__":
+            continue
+        cols = columns.setdefault((m.target_model, m.model_field_name), [])
+        if m.column_name not in cols:
+            cols.append(m.column_name)
+    offending: dict[tuple[str, str], list[str]] = {}
+    for (target, field_name), cols in columns.items():
+        cls = classes.get(target)
+        if len(cols) < 2 or cls is None or field_name not in _single_value_key_fields(cls):
+            continue
+        offending[(target, field_name)] = cols
+        logger.warning(
+            "tabular: sheet %r maps %d columns %r to the key field %s.%s. Only %r is "
+            "used as its value (a key cannot hold several values joined with '; '); "
+            "the other columns stay in the row's InfoUnit. Give each identifier its "
+            "own model field.",
+            sheet_name,
+            len(cols),
+            cols,
+            cls.__name__,
+            field_name,
+            cols[0],
+        )
+    return offending
+
+
 def _route_row_values(
     row_dict: dict[str, str],
     mapping: ColumnMapping,
     primary_cls: type,
+    comp_cls_map: dict[str, type] | None = None,
 ) -> tuple[dict[str, str | list[str]], dict[str, str], dict[str, dict[str, str]]]:
     """Route row dict values to primary, supplementary, and complementary kwargs.
 
@@ -992,9 +1058,15 @@ def _route_row_values(
     - any other type           → last raw value wins, unmerged (str), with a
       warning suggesting str/list[str] or a model_validator for type coercion.
 
-    supplementary_kwargs and comp_kwargs entries have no accessible Pydantic
-    class at this point, so they are always treated as str: merged via
-    _merge_values() and joined with "; ".
+    supplementary_kwargs and comp_kwargs entries are always treated as str:
+    merged via _merge_values() and joined with "; ".
+
+    Key fields are the exception (``instance_key`` fields and the local fields
+    of ``instance_relationships``, primary or — when *comp_cls_map* is given —
+    complementary): a single-valued key field keeps the value of the FIRST
+    column only. Joining "312947" and "CANTABNEW-0081" into "312947;
+    CANTABNEW-0081" would build a key that no reference carries. See
+    warn_multi_column_key_fields(), which reports it once per sheet.
 
     Same routing logic as _instantiate_composite_from_row but returns raw dicts
     instead of instantiating models. Reusable for both pre-scan and instantiation.
@@ -1040,7 +1112,11 @@ def _route_row_values(
     supplementary_kwargs: dict[str, str] = {}
     comp_kwargs: dict[str, dict[str, str]] = {}
 
+    primary_keys = _single_value_key_fields(primary_cls)
     for field_name, raw_values in primary_raw.items():
+        if field_name in primary_keys:
+            primary_kwargs[field_name] = raw_values[0]
+            continue
         field_info = primary_cls.model_fields.get(field_name)
         annotation = field_info.annotation if field_info is not None else None
         category = _classify_merge_type(annotation)
@@ -1084,7 +1160,12 @@ def _route_row_values(
 
     for target, field_map in comp_raw.items():
         comp_kwargs[target] = {}
+        comp_cls = (comp_cls_map or {}).get(target)
+        comp_keys = _single_value_key_fields(comp_cls) if comp_cls is not None else frozenset()
         for field_name, raw_values in field_map.items():
+            if field_name in comp_keys:
+                comp_kwargs[target][field_name] = raw_values[0]
+                continue
             comp_kwargs[target][field_name] = _merge_and_join(
                 raw_values, field_name, f"complementary {target!r}"
             )
@@ -1117,7 +1198,7 @@ def _instantiate_composite_from_row(
     comp_cls_map = comp_cls_map or {}
 
     primary_kwargs, supplementary_kwargs, comp_kwargs = _route_row_values(
-        row_dict, mapping, primary_cls
+        row_dict, mapping, primary_cls, comp_cls_map
     )
 
     # ── Instantiate primary model ──────────────────────────────────────────────
@@ -1204,7 +1285,9 @@ def compute_row_normalization_keys(
     fn = get_specs_fn or get_normalization_specs
 
     row_dict = _build_row_dict(headers, row_values)
-    primary_kwargs, _supp_kwargs, comp_kwargs = _route_row_values(row_dict, mapping, primary_cls)
+    primary_kwargs, _supp_kwargs, comp_kwargs = _route_row_values(
+        row_dict, mapping, primary_cls, comp_cls_map
+    )
 
     keys: list[RowNormalizationKey] = []
 

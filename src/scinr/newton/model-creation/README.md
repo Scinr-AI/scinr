@@ -124,7 +124,32 @@ its **composite key** for `ModelInstance` deduplication. The engine combines all
    variation code `"Q.I.a.1(a)"`) share one node in the graph.
 
 Every model that is referenced as a `target_model` in an `instance_relationships`
-declaration **must** mark its key fields with `instance_key: True`.
+declaration **must** mark its key fields with `instance_key: True`. This holds even when
+both models come from the **same table row**: the link is always resolved by key, which is
+what makes it independent of load order and identical in the tabular and document
+pipelines. The catalog setup warns at startup about every `join_via` target field that is
+not `instance_key`.
+
+**Choosing the key — checklist:**
+
+1. **The value references carry.** The key is the identifier other records (another model
+   of the same row, another sheet, another document) use to point at this one. Check the
+   data: the referencing field must hold the *same* identifier (after `normalize_key`:
+   case, accents and whitespace are ignored; punctuation and prefixes are not).
+2. **One identifier per field.** If a source has several identifiers for the record
+   (`ID`, `ID Code`, …), give each its own field and mark as `instance_key` only the one
+   references use. Never let two identifiers end up in one key field — in the tabular
+   pipeline only the first mapped column is kept for a key field (and a warning is logged).
+3. **Unique per record.** Instances with the same key values are MERGEd into one node (last
+   write wins on properties). If one identifier covers several records (e.g. one portfolio
+   id for several countries), the key is composite: mark every part `instance_key`, and
+   make every reference carry all parts in its `join_via`.
+4. **Present in the data.** An instance whose key fields are all empty falls back to a
+   random uid (it is written, but nothing can reference it), and a reference with an empty
+   join value writes no relationship. With a composite key, an instance missing *some*
+   parts is keyed on the parts it has — it can merge with other records that share them.
+   When a dataset lacks the identifier, there is nothing to link on: pick a key the
+   datasets you ingest actually contain.
 
 Marking a field with `instance_key` also **indexes it per tenant**: the catalog setup
 creates a `(tenant_id, <field>)` index on `:ModelInstance` (`idx_mi_key_<field>`), shared by

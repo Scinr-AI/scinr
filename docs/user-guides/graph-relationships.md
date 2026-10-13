@@ -241,7 +241,8 @@ Step 2 (VariationModel extracted from its own section):
 
 - `target_model` is the **class name** as a string (PascalCase, no module path)
 - `join_via` maps local field names → target model's `instance_key` field names
-- All fields referenced in `join_via` on the target model **must** have `instance_key: True`
+- All fields referenced in `join_via` on the target model **must** have `instance_key: True` — also when source and target come from the same table row (warned at catalog setup)
+- A key field holds **one** identifier: the value the references carry, never several identifiers joined together
 - Creates shell nodes for targets not yet extracted
 - Shell nodes merge with real nodes when the target model is later extracted
 - Field names in `join_via` must **exactly** match the Python field names

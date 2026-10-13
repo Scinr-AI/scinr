@@ -440,6 +440,15 @@ The combine/dedup logic described above applies **only** to `str` and `list[str]
 - Combination order follows the order of entries for that field in `ColumnMapping.mappings` — i.e., the order the LLM emitted the mappings, not the column's position in the source file.
 - This behavior is **always active**; there is no `configure()` flag to disable it. Given the same row values and the same column mapping, the combined result is always the same.
 
+**Key fields are never combined.** A field that identifies a record — an `instance_key` field, or a field of an `instance_relationships` declaration (the field itself and its `join_via` keys) — holds **one** value. If several columns are mapped to it, the pipeline keeps the value of the **first** column (in mapping order) and logs one warning per sheet:
+
+```
+tabular: sheet 'Portfolio' maps 2 columns ['ID', 'ID Code'] to the key field
+MarketingAuthorisationRecord.portfolio_record_id. Only 'ID' is used as its value ...
+```
+
+Joining them (`"CANTABNEW-0081; 312947"`) would produce a key that no reference ever carries, so every link to that record would be lost. The other columns' values are not lost: the full row stays in the Row's `InfoUnit`. The real fix is in the model: **one field per identifier**, so each column maps to its own field. The column-mapping prompt marks key fields `[KEY: map exactly ONE column to this field]` for the same reason. A `list[str]` key field (fan-out) is not affected: each item is a separate reference.
+
 ---
 
 ## 8. Normalization Integration
@@ -625,7 +634,7 @@ Fields with `field_relationships` or `instance_relationships` in their `json_sch
 - **`field_relationships`:** Connects two `:LabeledEntity` nodes within the same model instance (sibling fields with `entity_label`).
 - **`instance_relationships`:** Connects `:ModelInstance` nodes across rows or documents via `join_via` key matching.
 
-> **Note:** without an `instance_key` declared on the target model, the `:ModelInstance` nodes created by `instance_relationships` are permanent "shell" nodes that never merge with the real, fully-extracted instance — they stay separate and unresolved. See [Cross-Section ModelInstance Linking via instance_key](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for the full mechanism.
+> **Note:** without an `instance_key` declared on the target model, the `:ModelInstance` nodes created by `instance_relationships` are permanent "shell" nodes that never merge with the real, fully-extracted instance — they stay separate and unresolved. This applies to references **within the same row** too: two models extracted from one row are only linked if the target is keyed. The catalog setup logs a warning at startup for every `join_via` target field that is not `instance_key`. See [Cross-Section ModelInstance Linking via instance_key](neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) for the full mechanism.
 
 These work identically to the unstructured pipeline — the tabular pipeline uses the same entity extraction subgraph writer.
 
@@ -793,6 +802,8 @@ asyncio.run(main())
 | XLSX sheet skipped | Worksheet is entirely empty | Empty worksheets are silently skipped (expected behavior) |
 | Model decision is `None` | No model in catalog matches the sheet data | Add appropriate extraction models to your theme catalog |
 | All columns mapped to `__extra__` | Model decision failed + repair loop exhausted | Check LLM connectivity and model catalog availability |
+| `instance_relationships` edges end in empty `:ModelInstance` shells, even between models of the same row | The target's join field is not `instance_key` (startup warning `… is not instance_key`), so the real instance gets a random uid | Mark the target field `"instance_key": True` and re-ingest |
+| Warning `maps N columns … to the key field` | Several identifier columns mapped to one key field; only the first is used | Add one model field per identifier so each column has its own field |
 
 ### 12.2 Debugging Column Mapping
 

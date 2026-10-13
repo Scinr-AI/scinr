@@ -18,7 +18,8 @@ Before writing any code, internalise these rules. Violating them causes silent f
 | 4 | All model classes **must** inherit from `ExtractionModel` | `ConfigDict(extra="forbid")` is required to prevent silent LLM hallucinations |
 | 5 | Every field **must** have `description=` with ≥ 15 words | The LLM uses the description as its primary extraction signal |
 | 6 | `entity_label` **must not** be added to free-text narrative fields | Creates meaningless graph singletons and degrades deduplication quality |
-| 7 | Every model referenced as `target_model` in `instance_relationships` **must** mark its key fields `instance_key: True` | Without this the shell `ModelInstance` node never merges with the real one |
+| 7 | Every model referenced as `target_model` in `instance_relationships` **must** mark its key fields `instance_key: True` — also when both models come from the same table row | Without this the real instance gets a random uid and the shell `ModelInstance` node never merges with it. Warned at catalog setup |
+| 8 | One identifier per field: never design a key field to hold several identifiers | A key holding `"A; B"` matches no reference. The tabular pipeline keeps only the first column mapped to a key field |
 
 ---
 
