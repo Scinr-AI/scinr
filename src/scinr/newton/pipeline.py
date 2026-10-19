@@ -37,6 +37,18 @@ Control concurrency before calling (node-level and Neo4j)::
 
     configure(llm=my_llm, ..., llm_concurrency=8, neo4j_concurrency=20)
     result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
+
+Follow progress while the pipeline runs::
+
+    from scinr.newton.progress import ProgressTracker
+
+    async def main():
+        tracker = ProgressTracker()
+        task = asyncio.create_task(run_pipeline(input_raw="files/", callbacks=[tracker]))
+        while not task.done():
+            print(f"{tracker.snapshot().percent:.1f}%")
+            await asyncio.sleep(2)
+        return await task
 """
 
 from __future__ import annotations
@@ -44,9 +56,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from scinr.newton.progress import (
+    _NULL_EMITTER,
+    AsyncProgressCallback,
+    ProgressCallback,
+    ProgressTracker,
+    _ProgressDispatcher,
+    _ProgressEmitter,
+    _validate_callbacks,
+)
 from scinr.newton.results import DocumentResult, PipelineResult, StageResult
 
 if TYPE_CHECKING:
@@ -75,6 +97,9 @@ _DEFAULT_STAGES = [
 ]
 
 _DEFAULT_TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+# Stages handled per document by _process_document_unit() (everything but tabular)
+_UNIT_STAGES = frozenset(_DEFAULT_STAGES)
 
 
 async def run_pipeline(
@@ -112,6 +137,8 @@ async def run_pipeline(
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
+    # ── Progress reporting ────────────────────────────────────────────────────
+    callbacks: Sequence[ProgressCallback | AsyncProgressCallback | ProgressTracker] | None = None,
 ) -> PipelineResult:
     """Orchestrate the scinr-ingest pipeline end-to-end.
 
@@ -247,6 +274,17 @@ async def run_pipeline(
             quality against representative documents. Default: `False` (safe,
             unchanged legacy behavior). Raises `ValueError` if `True` while
             `"extraction"` is not in `stages`.
+        callbacks: Optional progress callbacks — `ProgressTracker`,
+            `ProgressCallback` (sync, run in a dedicated worker thread) and/or
+            `AsyncProgressCallback` (awaited on this event loop) instances. The
+            pipeline emits a `ProgressEvent` at every stage boundary of every
+            document, plus pipeline-level start/end events. Events are delivered
+            in order without ever blocking the pipeline; errors raised by a
+            callback are logged and ignored. The terminal event
+            (`pipeline_completed` / `pipeline_failed`) is always the last one and
+            is delivered before this function returns or raises (waiting at most
+            30 s for slow callbacks). Default `None`: no events, no extra task or
+            thread. See the "Progress Tracking" user guide.
 
     Returns:
         PipelineResult containing stage metrics, execution flags, and duration.
@@ -258,7 +296,98 @@ async def run_pipeline(
         IngestionError: If Neo4j graph write fails.
         ValueError: If any parameter combination is invalid (see validation section).
         FileNotFoundError: If a required directory does not exist.
+        TypeError: If `callbacks` contains anything other than `ProgressCallback`,
+            `AsyncProgressCallback` or `ProgressTracker` instances (raised before any
+            event is emitted).
     """
+    validated = _validate_callbacks(callbacks)
+
+    def _impl(emitter: _ProgressEmitter):
+        return _run_pipeline_impl(
+            emitter=emitter,
+            input_raw=input_raw,
+            converter_output_dir=converter_output_dir,
+            extraction_input_dir=extraction_input_dir,
+            extraction_output_dir=extraction_output_dir,
+            ingestion_input_dir=ingestion_input_dir,
+            stages=stages,
+            document_names=document_names,
+            document_names_dir=document_names_dir,
+            manual=manual,
+            model_class=model_class,
+            only_unannotated=only_unannotated,
+            only_unextracted=only_unextracted,
+            context_instructions=context_instructions,
+            update_mode=update_mode,
+            replaces=replaces,
+            parallel_docs=parallel_docs,
+            on_partial_failure=on_partial_failure,
+            fast_extraction=fast_extraction,
+            tabular_extensions=tabular_extensions,
+            tabular_delimiter=tabular_delimiter,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        )
+
+    if not validated:
+        return await _impl(_NULL_EMITTER)
+
+    dispatcher = _ProgressDispatcher(validated, job_id=job_id, tenant_id=tenant_id)
+    t0 = time.monotonic()
+    dispatcher.emit(
+        "pipeline_started",
+        stages=tuple(stages) if stages is not None else tuple(_DEFAULT_STAGES),
+    )
+    try:
+        result = await _impl(dispatcher)
+    except BaseException as exc:
+        # CancelledError included: the job still gets its terminal event.
+        dispatcher.emit(
+            "pipeline_failed",
+            error=str(exc) or type(exc).__name__,
+            duration_s=time.monotonic() - t0,
+        )
+        raise
+    else:
+        dispatcher.emit(
+            "pipeline_completed",
+            success=result.success,
+            duration_s=result.total_duration_seconds,
+        )
+        return result
+    finally:
+        await dispatcher.aclose()
+
+
+async def _run_pipeline_impl(
+    *,
+    emitter: _ProgressEmitter,
+    input_raw: str | None,
+    converter_output_dir: str | None,
+    extraction_input_dir: str | None,
+    extraction_output_dir: str | None,
+    ingestion_input_dir: str | None,
+    stages: list[str] | None,
+    document_names: list[str] | None,
+    document_names_dir: str | None,
+    manual: bool,
+    model_class: str | None,
+    only_unannotated: bool,
+    only_unextracted: bool,
+    context_instructions: str | None,
+    update_mode: bool,
+    replaces: str | None,
+    parallel_docs: int,
+    on_partial_failure: Literal["abort", "continue", "warn"],
+    fast_extraction: bool,
+    tabular_extensions: set[str] | None,
+    tabular_delimiter: str | None,
+    tenant_id: str | None,
+    created_by_user_id: str | None,
+    job_id: str | None,
+) -> PipelineResult:
+    """Body of :func:`run_pipeline`; *emitter* receives the progress events."""
     # ── Imports (deferred to avoid circular imports at module level) ──────────
     from scinr.newton.ingest.config import get_driver
     from scinr.newton.stages import (
@@ -448,6 +577,7 @@ async def run_pipeline(
 
     # ── Tabular short-circuit ─────────────────────────────────────────────────
     if effective_stages == ["tabular"]:
+        emitter.emit("stage_started", stage="tabular")
         sr = await run_tabular_pipeline(
             input_raw=input_raw,
             update_mode=update_mode,
@@ -458,6 +588,7 @@ async def run_pipeline(
             created_by_user_id=created_by_user_id,
             job_id=job_id,
         )
+        _emit_tabular_completed(emitter, sr)
         stage_results.append(sr)
         pipeline_result_kwargs["tabular"] = sr
         return _build_result(sr.success)
@@ -483,6 +614,7 @@ async def run_pipeline(
             logger.info(
                 "Tabular files detected in '%s' — running tabular pipeline first.", input_raw
             )
+            emitter.emit("stage_started", stage="tabular")
             sr = await run_tabular_pipeline(
                 input_raw=input_raw,
                 update_mode=update_mode,
@@ -493,6 +625,7 @@ async def run_pipeline(
                 created_by_user_id=created_by_user_id,
                 job_id=job_id,
             )
+            _emit_tabular_completed(emitter, sr)
             stage_results.append(sr)
             pipeline_result_kwargs["tabular"] = sr
             if _should_abort(sr):
@@ -539,6 +672,11 @@ async def run_pipeline(
     else:
         units = []
 
+    emitter.emit(
+        "documents_discovered",
+        total_documents=len(units),
+        stages=tuple(s for s in effective_stages if s != "tabular"),
+    )
     if not units:
         logger.info("No documents discovered for this run; nothing to process.")
 
@@ -605,8 +743,10 @@ async def run_pipeline(
                         only_unextracted=only_unextracted,
                         on_partial_failure=on_partial_failure,
                         fast_extraction=fast_extraction,
+                        emitter=emitter,
+                        document_index=i,
                     )
-                    for u in units
+                    for i, u in enumerate(units)
                 ],
                 return_exceptions=True,
             )
@@ -719,6 +859,53 @@ async def run_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _emit_tabular_completed(emitter: _ProgressEmitter, sr: StageResult) -> None:
+    emitter.emit(
+        "stage_completed",
+        stage="tabular",
+        duration_s=sr.duration_seconds,
+        metrics={
+            "total_processed": sr.total_processed,
+            "total_failed": sr.total_failed,
+            "documents": len(sr.documents),
+        },
+    )
+
+
+def _planned_stages(unit: DocumentUnit, effective_stages: list[str]) -> tuple[str, ...]:
+    """Stages *unit* will run, in *effective_stages* order — mirrors the stage
+    conditions of ``_process_document_unit()`` (preprocess only applies to a
+    ``raw_file``; every other stage runs whenever it is requested).
+
+    Given how ``run_pipeline()`` discovers units this means: ``raw_file`` runs
+    every requested stage, ``extraction_json`` everything but preprocess,
+    ``ingestion_json`` neither preprocess nor extraction (removed from the run's
+    stages by ``ingestion_input_dir``) and ``pre_ingested`` only annotation /
+    entity_extraction.
+    """
+    return tuple(
+        s
+        for s in effective_stages
+        if s in _UNIT_STAGES and (s != "preprocess" or unit.kind == "raw_file")
+    )
+
+
+def _document_status(result: UnitResult) -> tuple[str, str | None]:
+    """``document_finished`` status and error derived from a unit's result."""
+    if result.fatal_error is not None:
+        return "failed", result.fatal_error
+    if result.stopped_at is not None:
+        dr = result.stage_results.get(result.stopped_at)
+        return "failed", ("; ".join(dr.errors) if dr is not None and dr.errors else None)
+    if list(result.stage_results) == ["preprocess"]:
+        dr = result.stage_results["preprocess"]
+        if dr.nodes_processed == 0 and dr.nodes_failed == 0 and not dr.errors:
+            return "skipped", None
+    if any(dr.nodes_failed > 0 for dr in result.stage_results.values()):
+        return "partial", None
+    return "success", None
+
+
 def _combine_stage_documents(current_name: str, documents: list[DocumentResult]) -> DocumentResult:
     """Flatten a ``StageResult.documents`` list into a single ``DocumentResult``
     for one document-unit's ``stage_results`` entry.
@@ -762,6 +949,8 @@ async def _process_document_unit(
     only_unextracted: bool,
     fast_extraction: bool,
     on_partial_failure: Literal["abort", "continue", "warn"] = "abort",
+    emitter: _ProgressEmitter = _NULL_EMITTER,
+    document_index: int = 0,
 ) -> UnitResult:
     """Process a single ``DocumentUnit`` end-to-end through whichever of
     *effective_stages* apply to it.
@@ -853,6 +1042,11 @@ async def _process_document_unit(
             moment this unit decides to keep advancing despite the partial
             failure (document name, failing stage, failed-node count, and
             concrete error detail); ``"continue"`` stays silent.
+        emitter: Receives this unit's progress events (``document_started``, one
+            ``stage_started`` → ``stage_completed`` | ``stage_failed`` pair per
+            stage reached, ``document_finished``). Defaults to a no-op emitter.
+        document_index: Position of *unit* among the discovered units, carried by
+            every progress event of this unit.
 
     Returns:
         ``stage_results`` contains only the stages actually reached.
@@ -876,13 +1070,79 @@ async def _process_document_unit(
     current_path = unit.doc_path
     doc_tenant = unit_tenant(unit, tenant_id)
 
+    # ── Progress events (no-op unless run_pipeline() got callbacks) ────────
+    source_path = str(unit.source_path) if unit.source_path is not None else None
+    current_stage: str | None = None
+    unit_t0 = stage_t0 = time.monotonic()
+
+    def _emit(kind: str, **fields) -> None:
+        emitter.emit(
+            kind,
+            document_index=document_index,
+            doc_path=unit.doc_path,
+            document_name=current_name,
+            source_path=source_path,
+            tenant_id=doc_tenant,
+            **fields,
+        )
+
+    def _start_stage(stage: str) -> None:
+        nonlocal current_stage, stage_t0
+        current_stage = stage
+        stage_t0 = time.monotonic()
+        _emit("stage_started", stage=stage)
+
+    def _complete_stage(dr: DocumentResult) -> None:
+        nonlocal current_stage
+        _emit(
+            "stage_completed",
+            stage=current_stage,
+            duration_s=time.monotonic() - stage_t0,
+            metrics={"nodes_processed": dr.nodes_processed, "nodes_failed": dr.nodes_failed},
+        )
+        current_stage = None
+
+    def _finish(result: UnitResult) -> UnitResult:
+        if result.stopped_at is not None:
+            dr = result.stage_results.get(result.stopped_at)
+            _emit(
+                "stage_failed",
+                stage=result.stopped_at,
+                duration_s=time.monotonic() - stage_t0,
+                metrics={
+                    "nodes_processed": dr.nodes_processed if dr is not None else 0,
+                    "nodes_failed": dr.nodes_failed if dr is not None else 1,
+                },
+                error="; ".join(dr.errors) if dr is not None and dr.errors else None,
+            )
+        elif result.fatal_error is not None and current_stage is not None:
+            _emit(
+                "stage_failed",
+                stage=current_stage,
+                duration_s=time.monotonic() - stage_t0,
+                metrics={"nodes_processed": 0, "nodes_failed": 1},
+                error=result.fatal_error,
+            )
+        status, error = _document_status(result)
+        _emit(
+            "document_finished",
+            status=status,
+            stopped_at=result.stopped_at,
+            error=error,
+            duration_s=time.monotonic() - unit_t0,
+        )
+        return result
+
     async with document_semaphore:
+        unit_t0 = time.monotonic()
+        _emit("document_started", planned_stages=_planned_stages(unit, effective_stages))
         try:
             intermediate_doc: IntermediateDocument | None = None
             doc_obj: Document | None = None
 
             # ── Stage: preprocess ──────────────────────────────────────
             if "preprocess" in effective_stages and unit.kind == "raw_file":
+                _start_stage("preprocess")
                 relative_prefix = unit.relative_dir if unit.relative_dir != Path(".") else None
                 # converter_output_dir=None -> convert_one() keeps the converted
                 # document in memory only (no JSON serialised to disk).
@@ -901,19 +1161,22 @@ async def _process_document_unit(
                     stage_results["preprocess"] = DocumentResult(
                         unit.document_name_hint, 0, 1, [failures[0][1]]
                     )
-                    return UnitResult(current_name, stage_results, "preprocess", None)
+                    return _finish(UnitResult(current_name, stage_results, "preprocess", None))
                 if not written:
                     # Unsupported format, silently skipped by convert_one()
                     # (mirrors its own behaviour) — not a failure, simply
                     # nothing to convert for this unit.
                     stage_results["preprocess"] = DocumentResult(unit.document_name_hint, 0, 0, [])
-                    return UnitResult(current_name, stage_results, None, None)
+                    _complete_stage(stage_results["preprocess"])
+                    return _finish(UnitResult(current_name, stage_results, None, None))
                 intermediate_doc = written[0][2]
                 del written  # only intermediate_doc is needed from here on
                 stage_results["preprocess"] = DocumentResult(unit.document_name_hint, 1, 0, [])
+                _complete_stage(stage_results["preprocess"])
 
             # ── Stage: extraction ──────────────────────────────────────
             if "extraction" in effective_stages:
+                _start_stage("extraction")
                 extraction_out = Path(extraction_output_dir) if extraction_output_dir else None
                 if unit.kind == "raw_file":
                     doc_obj = await extract_one_intermediate(
@@ -940,16 +1203,18 @@ async def _process_document_unit(
                     stage_results["extraction"] = DocumentResult(
                         current_name, 0, 1, ["No pages to process"]
                     )
-                    return UnitResult(current_name, stage_results, "extraction", None)
+                    return _finish(UnitResult(current_name, stage_results, "extraction", None))
                 current_name = doc_obj.document_name
                 current_path = doc_obj.doc_path or doc_obj.document_name
                 stage_results["extraction"] = DocumentResult(current_name, 1, 0, [])
+                _complete_stage(stage_results["extraction"])
             # The intermediate document is only needed by Stage 1: release it so
             # it does not stay alive through ingestion/annotation/entity extraction.
             intermediate_doc = None
 
             # ── Stage: ingestion ───────────────────────────────────────
             if "ingestion" in effective_stages:
+                _start_stage("ingestion")
                 try:
                     if unit.kind == "ingestion_json":
                         current_name = await ingest_one_from_path(
@@ -973,8 +1238,9 @@ async def _process_document_unit(
                         )
                 except Exception as exc:
                     stage_results["ingestion"] = DocumentResult(current_name, 0, 1, [str(exc)])
-                    return UnitResult(current_name, stage_results, "ingestion", None)
+                    return _finish(UnitResult(current_name, stage_results, "ingestion", None))
                 stage_results["ingestion"] = DocumentResult(current_name, 1, 0, [])
+                _complete_stage(stage_results["ingestion"])
             # The extracted document is only needed by Stage 2: release it before
             # the (potentially long) annotation/entity_extraction stages.
             doc_obj = None
@@ -985,6 +1251,7 @@ async def _process_document_unit(
 
             # ── Stage: annotation ──────────────────────────────────────
             if "annotation" in effective_stages:
+                _start_stage("annotation")
                 sr = await run_annotation(
                     current_name,
                     manual=manual,
@@ -999,7 +1266,9 @@ async def _process_document_unit(
                 stage_results["annotation"] = combined
                 if combined.nodes_failed > 0:
                     if on_partial_failure == "abort":
-                        return UnitResult(current_name, stage_results, "annotation", None)
+                        return _finish(
+                            UnitResult(current_name, stage_results, "annotation", None)
+                        )
                     if on_partial_failure == "warn":
                         logger.warning(
                             "Document '%s': stage 'annotation' had %d failed node(s) "
@@ -1009,9 +1278,11 @@ async def _process_document_unit(
                             combined.nodes_failed,
                             "; ".join(combined.errors) if combined.errors else "no error details",
                         )
+                _complete_stage(combined)
 
             # ── Stage: entity_extraction ───────────────────────────────
             if "entity_extraction" in effective_stages:
+                _start_stage("entity_extraction")
                 sr = await run_entity_extraction(
                     current_name,
                     parallel_docs=1,
@@ -1023,7 +1294,9 @@ async def _process_document_unit(
                 stage_results["entity_extraction"] = combined
                 if combined.nodes_failed > 0:
                     if on_partial_failure == "abort":
-                        return UnitResult(current_name, stage_results, "entity_extraction", None)
+                        return _finish(
+                            UnitResult(current_name, stage_results, "entity_extraction", None)
+                        )
                     if on_partial_failure == "warn":
                         logger.warning(
                             "Document '%s': stage 'entity_extraction' had %d failed node(s) "
@@ -1033,8 +1306,9 @@ async def _process_document_unit(
                             combined.nodes_failed,
                             "; ".join(combined.errors) if combined.errors else "no error details",
                         )
+                _complete_stage(combined)
 
-            return UnitResult(current_name, stage_results, None, None)
+            return _finish(UnitResult(current_name, stage_results, None, None))
         except Exception as exc:  # noqa: BLE001 — defense-in-depth, see docstring
             logger.exception("Unhandled error processing document unit '%s'", current_name)
-            return UnitResult(current_name, stage_results, None, str(exc))
+            return _finish(UnitResult(current_name, stage_results, None, str(exc)))

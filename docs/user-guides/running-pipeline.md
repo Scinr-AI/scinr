@@ -116,6 +116,9 @@ async def run_pipeline(
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
+
+    # ── Progress reporting ────────────────────────────────────────────────────
+    callbacks: Sequence[ProgressCallback | AsyncProgressCallback | ProgressTracker] | None = None,
 ) -> PipelineResult
 ```
 
@@ -583,6 +586,26 @@ result = await run_pipeline(
 
 Both parameters are also forwarded to the tabular pipeline when it runs as an auto-detected sidecar alongside the main pipeline.
 
+### `callbacks` — Progress Reporting
+
+**Type:** `Sequence[ProgressCallback | AsyncProgressCallback | ProgressTracker] | None`  **Default:** `None`
+
+Callbacks that receive a `ProgressEvent` every time a document enters or leaves a stage, plus one event when the run starts and one when it ends. Events are delivered in order without ever blocking the pipeline; the last event (`pipeline_completed` or `pipeline_failed`) reaches the callbacks before `run_pipeline()` returns or raises. An exception raised by a callback is logged and ignored. Anything that is not an instance of the three classes raises `TypeError` before the run starts.
+
+```python
+import asyncio
+from scinr.newton import ProgressTracker, run_pipeline
+
+tracker = ProgressTracker()
+task = asyncio.create_task(run_pipeline(input_raw="./raw_docs", callbacks=[tracker]))
+while not task.done():
+    print(f"{tracker.snapshot().percent:.1f}%")
+    await asyncio.sleep(2)
+result = await task
+```
+
+With `None` (the default) no event is built and no extra task or thread is started. See [Progress Tracking](progress-tracking.md) for the event reference and how to write your own sync or async callbacks.
+
 ---
 
 ## Complete Workflows
@@ -787,13 +810,38 @@ asyncio.run(main())
 
 ### 7. Multi-Tenant Ingestion with Job Tracking
 
-Stamp every `:Document` node created by a run with the owning tenant, the user who launched it, and a per-run job id — then use the job id to roll the whole run back if something goes wrong.
+Stamp every `:Document` node created by a run with the owning tenant, the user who launched it, and a per-run job id, keep the job's status up to date while it runs, and use the job id to roll the whole run back if something goes wrong.
 
 ```python
 import asyncio
 import uuid
 from langchain_ollama import ChatOllama
-from scinr.newton import configure, run_pipeline, delete_document
+from scinr.newton import (
+    ProgressCallback,
+    ProgressEvent,
+    configure,
+    delete_document,
+    run_pipeline,
+)
+
+
+class JobStatus(ProgressCallback):
+    """Runs in a dedicated thread: blocking database calls are fine here."""
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+
+    def on_documents_discovered(self, event: ProgressEvent) -> None:
+        my_db.set_job(self.job_id, status="running", total=event.total_documents)
+
+    def on_document_finished(self, event: ProgressEvent) -> None:
+        my_db.set_job_document(self.job_id, event.doc_path, status=event.status, error=event.error)
+
+    def on_pipeline_completed(self, event: ProgressEvent) -> None:
+        my_db.set_job(self.job_id, status="success" if event.success else "completed_with_errors")
+
+    def on_pipeline_failed(self, event: ProgressEvent) -> None:
+        my_db.set_job(self.job_id, status="failed", error=event.error)
 
 async def main():
     configure(
@@ -811,6 +859,7 @@ async def main():
         tenant_id="acme-corp",
         created_by_user_id="user-42",
         job_id=job_id,
+        callbacks=[JobStatus(job_id)],
     )
 
     if not result.success:
@@ -821,7 +870,7 @@ async def main():
 asyncio.run(main())
 ```
 
-The three values land on the leaf `:Document` nodes, their ancestor folder-parent nodes, and any tabular documents. They are also written into the `extract-*.json` files if the extraction stage persists them, so a later ingestion-only run can pick them up (or override them — see [the parameter reference](#tenant_id-created_by_user_id-job_id-provenance-metadata)). See [Document Deletion](document-deletion.md) for querying and deleting by these fields.
+`my_db` stands for your application's own job store; see [Progress Tracking](progress-tracking.md#writing-your-own-callback) for complete MongoDB examples. The three values land on the leaf `:Document` nodes, their ancestor folder-parent nodes, and any tabular documents. They are also written into the `extract-*.json` files if the extraction stage persists them, so a later ingestion-only run can pick them up (or override them — see [the parameter reference](#tenant_id-created_by_user_id-job_id-provenance-metadata)). See [Document Deletion](document-deletion.md) for querying and deleting by these fields.
 
 ---
 
@@ -1156,5 +1205,6 @@ asyncio.run(resume_pipeline("Large_Document.pdf"))
 - **[Custom Models](custom-models.md)** — Defining domain-specific Pydantic extraction models.
 - **[Tabular Pipeline](tabular-pipeline.md)** — Tabular data normalization and processing.
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results.
+- **[Progress Tracking](progress-tracking.md)** — Following a run live with `ProgressTracker` or your own callbacks.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.
 - **[Results API](../api/results.md)** — Auto-generated documentation for `PipelineResult`, `StageResult`, and `DocumentResult`.

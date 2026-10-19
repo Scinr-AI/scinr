@@ -1175,3 +1175,226 @@ def test_batch_version_parity_placeholder():
     """OBSOLETE(Bloque B Paso 3 complete): batch orchestration no longer exists
     as a separate path to compare against; see skip reason above."""
     raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Progress callbacks
+# ---------------------------------------------------------------------------
+
+
+class TestProgressCallbacks:
+    """`run_pipeline(callbacks=[...])` event guarantees (see progress.py)."""
+
+    @staticmethod
+    def _recorder():
+        from scinr.newton.progress import AsyncProgressCallback
+
+        class Recorder(AsyncProgressCallback):
+            def __init__(self):
+                self.events = []
+
+            async def on_event(self, event):
+                await asyncio.sleep(0)  # yield, so delivery really is asynchronous
+                self.events.append(event)
+
+        return Recorder()
+
+    @staticmethod
+    def _ok_annotation_stages(mock_stages):
+        async def _annotation(document_name, **kwargs):
+            return _sr("annotation", documents=[DocumentResult(document_name, 2, 0)], processed=2)
+
+        async def _entities(document_name, **kwargs):
+            return _sr(
+                "entity_extraction", documents=[DocumentResult(document_name, 1, 0)], processed=1
+            )
+
+        mock_stages["run_annotation"].side_effect = _annotation
+        mock_stages["run_entity_extraction"].side_effect = _entities
+
+    async def test_event_lifecycle_and_tracker(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path
+    ):
+        from scinr.newton.progress import ProgressTracker
+
+        _write_extraction_jsons(tmp_path, ["doc-a", "doc-b", "doc-c"])
+        self._ok_annotation_stages(mock_stages)
+        tracker, recorder = ProgressTracker(), self._recorder()
+
+        result = await run_pipeline(
+            stages=["extraction", "ingestion", "annotation", "entity_extraction"],
+            extraction_input_dir=str(tmp_path),
+            job_id="job-42",
+            tenant_id="acme",
+            callbacks=[tracker, recorder],
+        )
+
+        events = recorder.events
+        kinds = [e.kind for e in events]
+        assert kinds[0] == "pipeline_started"
+        assert kinds[-1] == "pipeline_completed"  # delivered before run_pipeline() returned
+        assert kinds.count("pipeline_completed") == 1
+        assert events[-1].success is result.success is True
+        assert all(e.job_id == "job-42" for e in events)
+
+        discovered = [e for e in events if e.kind == "documents_discovered"]
+        assert len(discovered) == 1 and discovered[0].total_documents == 3
+        assert discovered[0].stages == ("extraction", "ingestion", "annotation", "entity_extraction")
+
+        started = [e.document_index for e in events if e.kind == "document_started"]
+        finished = [e.document_index for e in events if e.kind == "document_finished"]
+        assert sorted(started) == sorted(finished) == [0, 1, 2]
+        assert {e.document_name for e in events if e.kind == "document_finished"} == {
+            "doc-a",
+            "doc-b",
+            "doc-c",
+        }
+        for idx in started:
+            doc_kinds = [e.kind for e in events if e.document_index == idx]
+            assert doc_kinds[0] == "document_started" and doc_kinds[-1] == "document_finished"
+            assert doc_kinds.count("stage_completed") == 4
+
+        snap = tracker.snapshot()
+        assert snap.status == "success" and snap.percent == 100.0
+        assert snap.documents_succeeded == 3 and snap.documents_running == 0
+        assert dict(snap.completed_by_stage) == {
+            "extraction": 3,
+            "ingestion": 3,
+            "annotation": 3,
+            "entity_extraction": 3,
+        }
+
+    async def test_unsuccessful_run_reports_success_false(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path
+    ):
+        _write_extraction_jsons(tmp_path, ["doc-a"])
+        mock_stages["run_annotation"].return_value = _sr(
+            "annotation",
+            success=False,
+            documents=[DocumentResult("doc-a", 1, 1, ["bad node"])],
+            processed=1,
+            failed=1,
+        )
+        recorder = self._recorder()
+        result = await run_pipeline(
+            stages=["extraction", "ingestion", "annotation"],
+            extraction_input_dir=str(tmp_path),
+            on_partial_failure="abort",
+            callbacks=[recorder],
+        )
+        assert result.success is False
+        assert recorder.events[-1].kind == "pipeline_completed"
+        assert recorder.events[-1].success is False
+        finished = next(e for e in recorder.events if e.kind == "document_finished")
+        assert finished.status == "failed" and finished.stopped_at == "annotation"
+
+    async def test_validation_error_emits_started_and_failed(self, mock_stages):
+        recorder = self._recorder()
+        with pytest.raises(ValueError, match="Unknown stage"):
+            await run_pipeline(stages=["foo"], callbacks=[recorder])
+        assert [e.kind for e in recorder.events] == ["pipeline_started", "pipeline_failed"]
+        assert recorder.events[0].stages == ("foo",)
+        assert "Unknown stage" in recorder.events[1].error
+        assert recorder.events[1].duration_s >= 0.0
+
+    async def test_invalid_callbacks_raise_type_error_without_events(self, monkeypatch):
+        import scinr.newton.pipeline as pipeline_mod
+
+        dispatcher_cls = MagicMock()
+        monkeypatch.setattr(pipeline_mod, "_ProgressDispatcher", dispatcher_cls)
+        with pytest.raises(TypeError):
+            await run_pipeline(stages=["foo"], callbacks=[lambda e: None])
+        dispatcher_cls.assert_not_called()
+
+    async def test_tabular_short_circuit(self, mock_stages, tmp_path):
+        from scinr.newton.progress import ProgressTracker
+
+        mock_stages["run_tabular_pipeline"].return_value = _sr(
+            "tabular",
+            documents=[DocumentResult("t1", 4, 0), DocumentResult("t2", 3, 1)],
+            processed=7,
+            failed=1,
+            duration=0.5,
+        )
+        tracker, recorder = ProgressTracker(), self._recorder()
+        await run_pipeline(
+            stages=["tabular"], input_raw=str(tmp_path), callbacks=[tracker, recorder]
+        )
+
+        assert [(e.kind, e.stage) for e in recorder.events] == [
+            ("pipeline_started", None),
+            ("stage_started", "tabular"),
+            ("stage_completed", "tabular"),
+            ("pipeline_completed", None),
+        ]
+        completed = recorder.events[2]
+        assert completed.document_index is None
+        assert dict(completed.metrics) == {"total_processed": 7, "total_failed": 1, "documents": 2}
+        assert completed.duration_s == 0.5
+        assert tracker.snapshot().tabular == "completed_with_errors"
+
+    async def test_without_callbacks_no_dispatcher_is_created(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path, monkeypatch
+    ):
+        import scinr.newton.pipeline as pipeline_mod
+
+        dispatcher_cls = MagicMock()
+        monkeypatch.setattr(pipeline_mod, "_ProgressDispatcher", dispatcher_cls)
+        _write_extraction_jsons(tmp_path, ["doc-a"])
+        result = await run_pipeline(
+            stages=["extraction", "ingestion"], extraction_input_dir=str(tmp_path)
+        )
+        assert result.success is True
+        dispatcher_cls.assert_not_called()
+
+    async def test_sync_callback_receives_every_event_in_order(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path
+    ):
+        import threading
+
+        from scinr.newton.progress import ProgressCallback
+
+        class JobUpdater(ProgressCallback):
+            def __init__(self):
+                self.rows = []
+                self.threads = set()
+
+            def on_document_finished(self, event):
+                self.threads.add(threading.current_thread().name)
+                self.rows.append((event.document_index, event.status))
+
+            def on_pipeline_completed(self, event):
+                self.rows.append(("job", "success" if event.success else "errors"))
+
+        _write_extraction_jsons(tmp_path, ["doc-a", "doc-b"])
+        updater = JobUpdater()
+        await run_pipeline(
+            stages=["extraction", "ingestion"],
+            extraction_input_dir=str(tmp_path),
+            callbacks=[updater],
+        )
+        assert sorted(updater.rows[:2]) == [(0, "success"), (1, "success")]
+        assert updater.rows[-1] == ("job", "success")
+        assert all(name.startswith("scinr-progress") for name in updater.threads)
+
+    async def test_cancellation_is_reported_as_pipeline_failed(self, mock_stages, tmp_path):
+        from scinr.newton.progress import ProgressTracker
+
+        entered = asyncio.Event()
+
+        async def _hang(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        mock_stages["run_tabular_pipeline"].side_effect = _hang
+        tracker, recorder = ProgressTracker(), self._recorder()
+        task = asyncio.create_task(
+            run_pipeline(stages=["tabular"], input_raw=str(tmp_path), callbacks=[tracker, recorder])
+        )
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert recorder.events[-1].kind == "pipeline_failed"
+        assert recorder.events[-1].error == "CancelledError"
+        assert tracker.snapshot().status == "failed"

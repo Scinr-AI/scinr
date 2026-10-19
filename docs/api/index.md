@@ -5,6 +5,7 @@ Welcome to the `scinr.newton` API reference. All API documentation is auto-gener
 ## Core Modules
 
 - [Pipeline](pipeline.md): ``run_pipeline()`` orchestrator.
+- [Progress](progress.md): live progress of ``run_pipeline()`` — ``ProgressEvent`` (one per stage boundary of each document), the ``ProgressCallback`` / ``AsyncProgressCallback`` base classes, and the built-in ``ProgressTracker`` with ``snapshot()``.
 - [Configuration](config.md): ``configure()``, ``get_config()``, ``ScinrConfig``.
 - [Stages](stages.md): Individual stage runner functions (Stages 0-5).
 - [Normalization](normalization.md): ``NormalizationEngine`` and normalization utilities.

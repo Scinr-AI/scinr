@@ -26,6 +26,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
    - [Stage 4: Entity Extraction](#stage-4-entity-extraction-run_entity_extraction)
    - [Tabular Pipeline](#tabular-pipeline-run_tabular_pipeline)
 3. [Async Architecture](#3-async-architecture)
+   - [Progress Events](#progress-events)
 4. [Configuration System](#4-configuration-system)
 5. [Module Structure](#5-module-structure)
 6. [Data Flow](#6-data-flow)
@@ -535,6 +536,18 @@ Before dispatching document units, `run_pipeline()` pre-warms shared resources:
 
 This reduces per-document startup latency.
 
+### Progress Events
+
+When `run_pipeline()` receives `callbacks`, it creates a `_ProgressDispatcher` (`progress.py`) for the call; without callbacks a no-op emitter is used and nothing else is created. `run_pipeline()` itself is a thin wrapper around `_run_pipeline_impl()` that emits `pipeline_started` first and, whatever happens (a returned result, a validation error, a cancellation), exactly one `pipeline_completed` / `pipeline_failed` last.
+
+- `_run_pipeline_impl()` emits the tabular `stage_*` events and `documents_discovered`.
+- `_process_document_unit()` emits `document_started` once it holds the document semaphore, a `stage_started` → `stage_completed` | `stage_failed` pair for every stage it reaches, and `document_finished` on every return path (including the catch-all).
+- Every `emit()` happens on the event loop thread (never inside `asyncio.to_thread`). It updates any `ProgressTracker` inline, under a `threading.Lock`, and `put_nowait`s the event on an unbounded `asyncio.Queue`. It never blocks.
+- One consumer task delivers the events in FIFO order: `AsyncProgressCallback`s are awaited on the loop, `ProgressCallback`s run in a `ThreadPoolExecutor(max_workers=1)` dedicated to the call (not the default executor used by ingestion). Callback exceptions are logged and ignored.
+- Before returning, `run_pipeline()` drains the queue (30 s timeout), so the terminal event is delivered before the caller gets the result.
+
+See [Progress Tracking](user-guides/progress-tracking.md).
+
 ---
 
 ## 4. Configuration System
@@ -622,6 +635,8 @@ scinr.newton/
 ├── __init__.py                 # Package exports
 ├── config.py                   # ScinrConfig, configure(), get_config(), semaphore helpers
 ├── pipeline.py                 # run_pipeline() orchestrator + _process_document_unit()
+├── progress.py                 # ProgressEvent, ProgressCallback / AsyncProgressCallback, ProgressTracker,
+│                               #   internal event dispatcher (queue + consumer task)
 ├── pipeline_units.py           # DocumentUnit discovery (raw_file, extraction_json, ingestion_json, pre_ingested)
 ├── results.py                  # PipelineResult, StageResult, DocumentResult, DeletionResult,
 │                               #   OrphanCollectionResult, FreezeResult, RestoreResult dataclasses
@@ -1145,3 +1160,5 @@ RestoreResult                                (restore_document)
 - **Tabular**: `nodes_processed` = 1 for success, 0 for failure (per file)
 
 All result dataclasses are defined in `results.py` and provide structured, type-safe access to pipeline outcomes.
+
+`PipelineResult` is the final, authoritative outcome of a run. The live state while it runs comes from the progress events (see [Progress Events](#progress-events)): `pipeline_completed.success` equals `PipelineResult.success`, and each `document_finished` summarizes the per-stage `DocumentResult`s of that document.
