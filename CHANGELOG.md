@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A tenant index on every label with a `tenant_id`**, so a tenant-scoped
+  query that starts at any label (graphApi's tenant guard filters each node
+  pattern by `tenant_id`) seeks its tenant instead of scanning the label across
+  every tenant:
+  - the decision nodes: `:ProposedModel`, `:ProposedField`,
+    `:ComplementaryMatch`, `:SupplementaryField`;
+  - the role labels of `:StructureNode` (`:Section`, `:Subsection`, `:Table`,
+    `:FreeformBlock`, `:FieldGroup`, `:Appendix`, `:Row`), built from
+    `ROLE_TO_LABEL` so a new role gets its index. `MATCH (n:Section)` cannot use
+    the `:StructureNode(tenant_id)` index.
+
+  `setup_schema()` creates them at the next ingestion; on a graph with no new
+  ingestions, call it once by hand after upgrading.
+
 ## [0.4.0] - 2026-09-30
 
 Multi-tenancy and document freezing, both implemented and pushed.

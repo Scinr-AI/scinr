@@ -54,6 +54,16 @@ Regular indexes (query performance):
     :CatalogModel(name)
         — the MERGE of the catalog model by name (annotation, extraction,
         restore_document())
+    :Theme(path)
+    :ProposedModel(tenant_id), :ProposedField(tenant_id),
+    :ComplementaryMatch(tenant_id), :SupplementaryField(tenant_id)
+    :Section(tenant_id), :Subsection(tenant_id), :Table(tenant_id),
+    :FreeformBlock(tenant_id), :FieldGroup(tenant_id), :Appendix(tenant_id),
+    :Row(tenant_id)
+        — every label with a tenant_id has a tenant index: graphApi's tenant
+        guard filters each node pattern by tenant_id, so a query starting at any
+        of them seeks its tenant instead of scanning the label. The role labels
+        come from ROLE_TO_LABEL (ingest/nodes.py).
 
 Composite tenant indexes (tenant-scoped filters on a second property):
     :ModelInstance(tenant_id, model_class)
@@ -78,6 +88,7 @@ from neo4j import Driver
 
 from scinr.newton.config import get_config
 from scinr.newton.exceptions import ConfigurationError
+from scinr.newton.ingest.nodes import ROLE_TO_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +350,17 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "idx_supplementary_field_tenant_id",
         "CREATE INDEX idx_supplementary_field_tenant_id IF NOT EXISTS "
         "FOR (n:SupplementaryField) ON (n.tenant_id)",
+    ),
+    # Tenant indexes of the role labels of :StructureNode (ROLE_TO_LABEL): a pattern
+    # on the role label alone (MATCH (n:Section)) cannot use the :StructureNode
+    # index. Built from the map, so a new role gets its index.
+    *(
+        (
+            f"idx_{role}_tenant_id",
+            f"CREATE INDEX idx_{role}_tenant_id IF NOT EXISTS "
+            f"FOR (n:{label}) ON (n.tenant_id)",
+        )
+        for role, label in ROLE_TO_LABEL.items()
     ),
     # -- Composite tenant indexes ------------------------------------------
     # Neo4j uses one index per node, so "tenant T and property P" with two
