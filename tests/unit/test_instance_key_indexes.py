@@ -11,6 +11,7 @@ from scinr.newton.annotation.neo4j_ops import (
     _ensure_instance_key_indexes,
     instance_key_index_name,
 )
+from scinr.newton.ingest.nodes import ROLE_TO_LABEL
 from scinr.newton.ingest.schema import _REGULAR_INDEXES
 
 
@@ -64,3 +65,21 @@ def test_composite_tenant_indexes_are_declared():
         assert expected in names
     # The single tenant indexes stay: tenant_id=None queries cannot use a composite.
     assert "idx_model_instance_tenant_id" in names
+
+
+def test_every_tenant_label_has_a_tenant_index():
+    """graphApi's tenant guard filters each node pattern by tenant_id."""
+    names = {name for name, _ in _REGULAR_INDEXES}
+    for label in ("proposed_model", "proposed_field", "complementary_match", "supplementary_field"):
+        assert f"idx_{label}_tenant_id" in names
+    assert "idx_theme_path" in names
+
+
+def test_every_role_label_has_a_tenant_index():
+    """MATCH (n:Section) cannot use the :StructureNode index: each role label needs its own."""
+    statements = dict(_REGULAR_INDEXES)
+    for role, label in ROLE_TO_LABEL.items():
+        assert statements[f"idx_{role}_tenant_id"] == (
+            f"CREATE INDEX idx_{role}_tenant_id IF NOT EXISTS FOR (n:{label}) ON (n.tenant_id)"
+        )
+    assert len(statements) == len(_REGULAR_INDEXES)  # no duplicated index name

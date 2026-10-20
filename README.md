@@ -1,6 +1,6 @@
 # scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.4.0)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.4.1)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
@@ -55,6 +55,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Read-back navigation API** — `scinr.newton.navigation`: a read-only, `async`, engine-abstracted layer of ~90 typed methods over the graph (documents, structure nodes, model instances, entities, schema introspection) — no Cypher required. See the [Graph Navigation guide](https://scinr-ai.github.io/scinr/user-guides/graph-navigation/)
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `parallel_docs=N` for concurrent document handling at every stage
+- **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs
 - **Optional storage layer** — MongoDB backend for raw file + page storage; pipeline runs without it
 - **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + `neo4j_retry` (deadlock-safe writes)

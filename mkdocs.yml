@@ -72,6 +72,7 @@ nav:
   - User Guides:
       - Quick Start: user-guides/quick-start.md
       - Running the Pipeline: user-guides/running-pipeline.md
+      - Progress Tracking: user-guides/progress-tracking.md
       - Custom Themes: user-guides/custom-themes.md
       - Custom Models: user-guides/custom-models.md
       - Model Design Patterns: user-guides/model-patterns.md
@@ -87,6 +88,7 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Pipeline (run_pipeline): api/pipeline.md
+      - Progress (callbacks / ProgressTracker): api/progress.md
       - Configuration (configure): api/config.md
       - Stages: api/stages.md
       - Normalization: api/normalization.md

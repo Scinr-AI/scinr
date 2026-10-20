@@ -30,6 +30,14 @@ from scinr.newton.navigation import (
     graph_navigator,
 )
 from scinr.newton.pipeline import run_pipeline
+from scinr.newton.progress import (
+    AsyncProgressCallback,
+    DocumentProgress,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressSnapshot,
+    ProgressTracker,
+)
 from scinr.newton.results import (
     DeletionResult,
     DocumentResult,
@@ -49,7 +57,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.2.0"
+__version__ = "0.4.1"
 
 __all__ = [
     # Configuration
@@ -80,6 +88,13 @@ __all__ = [
     "RestoreResult",
     # Unified pipeline
     "run_pipeline",
+    # Progress reporting
+    "ProgressEvent",
+    "ProgressCallback",
+    "AsyncProgressCallback",
+    "ProgressTracker",
+    "ProgressSnapshot",
+    "DocumentProgress",
     # Individual stage functions
     "run_preprocess",
     "run_extraction",

@@ -944,3 +944,262 @@ class TestPreprocessStoresUnderTheUnitsOwner:
         assert (kwargs["tenant_id"], kwargs["created_by_user_id"], kwargs["job_id"]) == (
             "acme", "u1", "j1",
         )
+
+
+# ---------------------------------------------------------------------------
+# Progress events (emitter / document_index)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmitter:
+    """Collects ``(kind, fields)`` pairs instead of building ProgressEvents."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def emit(self, kind: str, **fields) -> None:
+        self.calls.append((kind, fields))
+
+    def kinds(self) -> list[tuple[str, str | None]]:
+        return [(k, f.get("stage")) for k, f in self.calls]
+
+    def first(self, kind: str, stage: str | None = None) -> dict:
+        return next(
+            f for k, f in self.calls if k == kind and (stage is None or f.get("stage") == stage)
+        )
+
+
+def _ok_sr(stage: str, name: str, processed: int = 1, failed: int = 0) -> StageResult:
+    return StageResult(
+        stage=stage,
+        success=failed == 0,
+        documents=[DocumentResult(name, processed, failed, ["node error"] if failed else [])],
+        total_processed=processed,
+        total_failed=failed,
+        duration_seconds=0.01,
+    )
+
+
+def _patch_all_stages(monkeypatch, *, name: str = "Real Name", **overrides) -> dict:
+    """Patch every stage primitive with a succeeding mock (override per test)."""
+    intermediate_doc = MagicMock(name="IntermediateDocument")
+    extracted_doc = SimpleNamespace(document_name=name, doc_path="real/path")
+    mocks = {
+        "convert_one": AsyncMock(
+            return_value=([(Path("/tmp/x.pdf"), Path("/tmp/out.json"), intermediate_doc)], [])
+        ),
+        "extract_one_intermediate": AsyncMock(return_value=extracted_doc),
+        "extract_one_file": AsyncMock(return_value=extracted_doc),
+        "ingest_one": AsyncMock(return_value=name),
+        "ingest_one_from_path": AsyncMock(return_value=name),
+        "run_annotation": AsyncMock(return_value=_ok_sr("annotation", name, 3)),
+        "run_entity_extraction": AsyncMock(return_value=_ok_sr("entity_extraction", name, 2)),
+    }
+    mocks.update(overrides)
+    targets = {
+        "convert_one": "scinr.newton.converters.main.convert_one",
+        "extract_one_intermediate": "scinr.newton.stages.extraction.extract_one_intermediate",
+        "extract_one_file": "scinr.newton.stages.extraction.extract_one_file",
+        "ingest_one": "scinr.newton.ingest.loader.ingest_one",
+        "ingest_one_from_path": "scinr.newton.ingest.loader.ingest_one_from_path",
+        "run_annotation": "scinr.newton.stages.run_annotation",
+        "run_entity_extraction": "scinr.newton.stages.run_entity_extraction",
+    }
+    for key, target in targets.items():
+        monkeypatch.setattr(target, mocks[key])
+    return mocks
+
+
+def _unit(kind: str = "raw_file") -> DocumentUnit:
+    source = None if kind == "pre_ingested" else Path(f"/tmp/{kind}.pdf")
+    return DocumentUnit(
+        kind=kind,
+        source_path=source,
+        doc_path="hint/path",
+        relative_dir=Path("."),
+        document_name_hint="hint",
+    )
+
+
+_ALL = ["preprocess", "extraction", "ingestion", "annotation", "entity_extraction"]
+
+
+class TestProgressEvents:
+    async def test_full_success_sequence_for_raw_file(self, monkeypatch):
+        _patch_all_stages(monkeypatch)
+        emitter = _FakeEmitter()
+        result = await _process_document_unit(
+            _unit(), **_base_kwargs(emitter=emitter, document_index=7)
+        )
+
+        assert result.stopped_at is None
+        expected = [("document_started", None)]
+        for stage in _ALL:
+            expected += [("stage_started", stage), ("stage_completed", stage)]
+        expected.append(("document_finished", None))
+        assert emitter.kinds() == expected
+
+        started = emitter.first("document_started")
+        assert started["planned_stages"] == tuple(_ALL)
+        assert started["document_index"] == 7
+        assert started["doc_path"] == "hint/path"
+        assert started["source_path"] == "/tmp/raw_file.pdf"
+        assert started["document_name"] == "hint"
+        assert all(f["document_index"] == 7 for _, f in emitter.calls)
+
+        assert emitter.first("stage_completed", "annotation")["metrics"] == {
+            "nodes_processed": 3,
+            "nodes_failed": 0,
+        }
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "success"
+        assert finished["stopped_at"] is None and finished["error"] is None
+        assert finished["duration_s"] >= 0.0
+
+    async def test_extraction_completed_carries_the_real_document_name(self, monkeypatch):
+        _patch_all_stages(monkeypatch, name="Real Name")
+        emitter = _FakeEmitter()
+        await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert emitter.first("stage_started", "extraction")["document_name"] == "hint"
+        assert emitter.first("stage_completed", "extraction")["document_name"] == "Real Name"
+
+    async def test_preprocess_failure(self, monkeypatch):
+        _patch_all_stages(
+            monkeypatch,
+            convert_one=AsyncMock(return_value=([], [(Path("/tmp/x.pdf"), "corrupt file")])),
+        )
+        emitter = _FakeEmitter()
+        await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert emitter.kinds() == [
+            ("document_started", None),
+            ("stage_started", "preprocess"),
+            ("stage_failed", "preprocess"),
+            ("document_finished", None),
+        ]
+        failed = emitter.first("stage_failed")
+        assert failed["error"] == "corrupt file"
+        assert failed["metrics"] == {"nodes_processed": 0, "nodes_failed": 1}
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "failed"
+        assert finished["stopped_at"] == "preprocess"
+        assert finished["error"] == "corrupt file"
+
+    async def test_extraction_returning_none(self, monkeypatch):
+        _patch_all_stages(monkeypatch, extract_one_intermediate=AsyncMock(return_value=None))
+        emitter = _FakeEmitter()
+        await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert emitter.kinds()[-3:] == [
+            ("stage_started", "extraction"),
+            ("stage_failed", "extraction"),
+            ("document_finished", None),
+        ]
+        assert ("stage_started", "ingestion") not in emitter.kinds()
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "failed" and finished["stopped_at"] == "extraction"
+        assert finished["error"] == "No pages to process"
+
+    async def test_ingestion_failure(self, monkeypatch):
+        _patch_all_stages(monkeypatch, ingest_one=AsyncMock(side_effect=RuntimeError("neo4j down")))
+        emitter = _FakeEmitter()
+        await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert emitter.kinds()[-3:] == [
+            ("stage_started", "ingestion"),
+            ("stage_failed", "ingestion"),
+            ("document_finished", None),
+        ]
+        assert emitter.first("stage_failed")["error"] == "neo4j down"
+        assert emitter.first("document_finished")["stopped_at"] == "ingestion"
+
+    async def test_annotation_partial_failure_with_abort(self, monkeypatch):
+        _patch_all_stages(
+            monkeypatch,
+            run_annotation=AsyncMock(return_value=_ok_sr("annotation", "Real Name", 2, 1)),
+        )
+        emitter = _FakeEmitter()
+        await _process_document_unit(
+            _unit(), **_base_kwargs(emitter=emitter, on_partial_failure="abort")
+        )
+        assert emitter.kinds()[-3:] == [
+            ("stage_started", "annotation"),
+            ("stage_failed", "annotation"),
+            ("document_finished", None),
+        ]
+        assert ("stage_completed", "annotation") not in emitter.kinds()
+        assert emitter.first("stage_failed")["metrics"] == {
+            "nodes_processed": 2,
+            "nodes_failed": 1,
+        }
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "failed" and finished["stopped_at"] == "annotation"
+
+    async def test_annotation_partial_failure_with_warn_keeps_going(self, monkeypatch):
+        _patch_all_stages(
+            monkeypatch,
+            run_annotation=AsyncMock(return_value=_ok_sr("annotation", "Real Name", 2, 1)),
+        )
+        emitter = _FakeEmitter()
+        await _process_document_unit(
+            _unit(), **_base_kwargs(emitter=emitter, on_partial_failure="warn")
+        )
+        assert emitter.first("stage_completed", "annotation")["metrics"]["nodes_failed"] == 1
+        assert ("stage_completed", "entity_extraction") in emitter.kinds()
+        assert not any(k == "stage_failed" for k, _ in emitter.calls)
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "partial" and finished["stopped_at"] is None
+
+    async def test_unsupported_format_is_skipped(self, monkeypatch):
+        _patch_all_stages(monkeypatch, convert_one=AsyncMock(return_value=([], [])))
+        emitter = _FakeEmitter()
+        await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert emitter.kinds() == [
+            ("document_started", None),
+            ("stage_started", "preprocess"),
+            ("stage_completed", "preprocess"),
+            ("document_finished", None),
+        ]
+        assert emitter.first("stage_completed")["metrics"] == {
+            "nodes_processed": 0,
+            "nodes_failed": 0,
+        }
+        assert emitter.first("document_finished")["status"] == "skipped"
+
+    async def test_unexpected_exception_fails_the_running_stage(self, monkeypatch):
+        _patch_all_stages(
+            monkeypatch, run_entity_extraction=AsyncMock(side_effect=RuntimeError("kaboom"))
+        )
+        emitter = _FakeEmitter()
+        result = await _process_document_unit(_unit(), **_base_kwargs(emitter=emitter))
+        assert result.fatal_error == "kaboom"
+        assert emitter.kinds()[-3:] == [
+            ("stage_started", "entity_extraction"),
+            ("stage_failed", "entity_extraction"),
+            ("document_finished", None),
+        ]
+        failed = emitter.first("stage_failed")
+        assert failed["error"] == "kaboom"
+        assert failed["metrics"] == {"nodes_processed": 0, "nodes_failed": 1}
+        finished = emitter.first("document_finished")
+        assert finished["status"] == "failed" and finished["error"] == "kaboom"
+        assert finished["stopped_at"] is None
+
+    @pytest.mark.parametrize(
+        ("kind", "stages", "planned"),
+        [
+            ("raw_file", _ALL, tuple(_ALL)),
+            ("extraction_json", _ALL[1:], tuple(_ALL[1:])),
+            ("ingestion_json", _ALL[2:], tuple(_ALL[2:])),
+            ("pre_ingested", _ALL[3:], tuple(_ALL[3:])),
+            # preprocess only ever applies to a raw_file, even when requested
+            ("extraction_json", ["preprocess", "extraction"], ("extraction",)),
+        ],
+    )
+    async def test_planned_stages_per_kind(self, monkeypatch, kind, stages, planned):
+        _patch_all_stages(monkeypatch)
+        emitter = _FakeEmitter()
+        result = await _process_document_unit(
+            _unit(kind), **_base_kwargs(emitter=emitter, effective_stages=stages)
+        )
+        assert result.stopped_at is None and result.fatal_error is None
+        assert emitter.first("document_started")["planned_stages"] == planned
+        assert [f["stage"] for k, f in emitter.calls if k == "stage_started"] == list(planned)
+        assert emitter.first("document_finished")["status"] == "success"

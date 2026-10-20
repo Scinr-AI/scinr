@@ -697,6 +697,27 @@ print(f"Neo4j sync semaphore: {config.neo4j_sync_concurrency}")
 
 If the LLM stage is slow and `llm_concurrency` is at its maximum, try increasing it. If Neo4j stages are slow and the semaphore is maxed, try increasing the relevant Neo4j concurrency.
 
+### Live Progress
+
+`PipelineResult` tells you where the time went once the run is over. To see where documents pile up **while** it runs, pass a `ProgressTracker` and watch `running_by_stage`:
+
+```python
+import asyncio
+from scinr.newton import ProgressTracker, run_pipeline
+
+tracker = ProgressTracker()
+task = asyncio.create_task(run_pipeline(input_raw="./data", parallel_docs=8, callbacks=[tracker]))
+while not task.done():
+    snap = tracker.snapshot()
+    print(f"{snap.percent:5.1f}%  in progress by stage: {dict(snap.running_by_stage)}")
+    await asyncio.sleep(5)
+result = await task
+```
+
+If most of the `parallel_docs` slots sit in `annotation` / `entity_extraction`, the LLM is the bottleneck (`llm_concurrency`); if they sit in `ingestion`, look at the Neo4j semaphores. `completed_by_stage` and the per-document `DocumentProgress` (`started_at` / `finished_at`) give the same picture per document.
+
+A slow callback does not slow the pipeline down: events are queued and delivered by a separate task. An **async** callback that blocks internally (`requests`, `pymongo`, `time.sleep` inside an `async def`) does: it freezes the event loop the pipeline runs on. Write blocking callbacks as `ProgressCallback` (sync), which runs in its own thread. See [Progress Tracking](progress-tracking.md#sync-vs-async-callbacks).
+
 ---
 
 ## Provider-Specific Tuning
@@ -890,13 +911,13 @@ async def adaptive_run(input_dir: str, max_docs: int = 100) -> None:
 
 ### Batch Processing with Progress Tracking
 
-For very large document sets, process in batches with progress reporting:
+To follow a single large run, pass a `ProgressTracker` (see [Live Progress](#live-progress) and [Progress Tracking](progress-tracking.md)) — the run reports its own progress per document and stage, so you do not need to split it. Batching remains useful to bound how much one run holds, to commit work in steps, or to restart from the last finished batch. Combined with a tracker per batch:
 
 ```python
 import asyncio
 from pathlib import Path
 from langchain_ollama import ChatOllama
-from scinr.newton import configure, run_pipeline
+from scinr.newton import ProgressTracker, configure, run_pipeline
 
 async def batch_run(input_dir: str, batch_size: int = 20) -> None:
     llm = ChatOllama(model="llama3")
@@ -923,14 +944,22 @@ async def batch_run(input_dir: str, batch_size: int = 20) -> None:
             import shutil
             shutil.copy(f, batch_dir)
 
-        result = await run_pipeline(
+        tracker = ProgressTracker()
+        task = asyncio.create_task(run_pipeline(
             input_raw=batch_dir,
             parallel_docs=5,
-        )
+            callbacks=[tracker],
+        ))
+        while not task.done():
+            print(f"  batch {i // batch_size + 1}: {tracker.snapshot().percent:.1f}%")
+            await asyncio.sleep(5)
+        result = await task
 
         processed += len(batch)
+        snap = tracker.snapshot()
         print(f"Batch {i // batch_size + 1}: "
-              f"{processed}/{total} files "
+              f"{processed}/{total} files, "
+              f"{snap.documents_failed} failed "
               f"({result.total_duration_seconds:.1f}s)")
 
         # Clean up temp directory
@@ -948,5 +977,6 @@ async def batch_run(input_dir: str, batch_size: int = 20) -> None:
 - **[Tabular Pipeline](tabular-pipeline.md)** — Tabular normalization performance and `normalization_batch_size` tuning.
 - **[Custom Models](custom-models.md)** — Defining extraction models that affect annotation and extraction stage performance.
 - **[Document Deletion](document-deletion.md)** and **[Document Freezing](document-freezing.md)** — Bounded transactions, garbage collection, and the restore's `batch_size` / `concurrency`.
+- **[Progress Tracking](progress-tracking.md)** — Live progress per document and stage with `ProgressTracker` or your own callbacks.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.
 - **[Results API](../api/results.md)** — Auto-generated documentation for `PipelineResult`, `StageResult`, and `DocumentResult`.

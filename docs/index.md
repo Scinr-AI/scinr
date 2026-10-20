@@ -14,6 +14,8 @@ It uses LLMs and Pydantic models to extract structured, domain-specific informat
 
 * **5-stage document pipeline** — Preprocess, extract structure, ingest, annotate, and extract domain entities from unstructured documents.
 
+* **Live progress reporting through callbacks** — Follow `run_pipeline()` stage by stage and document by document with the built-in `ProgressTracker`, or your own sync/async callbacks to update a job in your database.
+
 * **Tabular data pipeline** — Normalize scientific spreadsheets and extract structured entities from tabular data.
 
 * **Multi-format ingestion** — Supports `.pdf`, `.docx`, `.xlsx`, `.xls`, and `.csv`. Support for `.pptx`, `.json`, `.xml`, `.html`, and `.txt` is planned in the roadmap.

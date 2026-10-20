@@ -5,7 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] - 2026-10-19
+
+Live progress reporting for `run_pipeline()` and tenant indexes on every label
+that carries a `tenant_id`.
+
+### Added
+- **A tenant index on every label with a `tenant_id`**, so a tenant-scoped
+  query that starts at any label (graphApi's tenant guard filters each node
+  pattern by `tenant_id`) seeks its tenant instead of scanning the label across
+  every tenant:
+  - the decision nodes: `:ProposedModel`, `:ProposedField`,
+    `:ComplementaryMatch`, `:SupplementaryField`;
+  - the role labels of `:StructureNode` (`:Section`, `:Subsection`, `:Table`,
+    `:FreeformBlock`, `:FieldGroup`, `:Appendix`, `:Row`), built from
+    `ROLE_TO_LABEL` so a new role gets its index. `MATCH (n:Section)` cannot use
+    the `:StructureNode(tenant_id)` index.
+- **An index on `:Theme(path)`**: `ensure_theme_structure()` merges the theme
+  nodes by path before annotation, and no longer scans every `:Theme`.
+
+  `setup_schema()` creates these indexes at the next ingestion; on a graph with
+  no new ingestions, call it once by hand after upgrading.
+- **Progress reporting for `run_pipeline()`.** New optional `callbacks`
+  parameter. The pipeline emits a `ProgressEvent` at every stage boundary of
+  every document (`document_started`, `stage_started`, `stage_completed`,
+  `stage_failed`, `document_finished`), plus `pipeline_started`,
+  `documents_discovered` and a terminal `pipeline_completed` /
+  `pipeline_failed`.
+  - Base classes `ProgressCallback` (sync, run in a dedicated worker thread)
+    and `AsyncProgressCallback` (async, awaited on the pipeline's event loop),
+    with no-op `on_<kind>` methods to override.
+  - `ProgressTracker`: built-in in-memory tracker with a thread-safe
+    `snapshot()` (`ProgressSnapshot`, `DocumentProgress`: status, counters,
+    documents per stage, `percent`).
+  - Events are delivered in order without ever blocking the pipeline; the
+    terminal event is delivered before `run_pipeline()` returns (30 s drain
+    timeout). Callback errors are logged and ignored. Without `callbacks`
+    nothing changes.
+
+  See the "Progress Tracking" user guide and
+  `plans/pipeline-progress-callbacks-plan.md`.
 
 ## [0.4.0] - 2026-09-30
 
