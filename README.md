@@ -56,6 +56,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `parallel_docs=N` for concurrent document handling at every stage
 - **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
+- **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs
 - **Optional storage layer** — MongoDB backend for raw file + page storage; pipeline runs without it
 - **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + `neo4j_retry` (deadlock-safe writes)
