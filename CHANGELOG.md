@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-20
+
+Fixes to restoring (unfreezing) documents: two checks rejected valid snapshots.
+
+### Fixed
+- **Relationship types that start with a digit are accepted** when freezing and
+  restoring. The extraction stage writes model-defined relationship types such
+  as `5_YEAR_...`, and the identifier check rejected them, so those documents
+  could not be restored. The name is always backquoted in the Cypher, so a
+  leading digit is safe.
+- **`IS_COMPOSED_OF` between `:StructureNode`s no longer counts as a folder
+  link** in `scan_snapshot()`. Only `:Document` → `:Document` relationships are
+  folder links now; before, the structure links inside a document's subtree were
+  read as folder children, which broke the restore.
+
 ## [0.4.1] - 2026-10-19
 
 Live progress reporting for `run_pipeline()` and tenant indexes on every label

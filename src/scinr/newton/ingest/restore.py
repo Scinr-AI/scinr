@@ -229,9 +229,12 @@ def _check_endpoint(endpoint: Any, tenant: str) -> tuple[str, dict[str, Any]]:
     return primary, key
 
 
-def _check_relationship(value: dict[str, Any], tenant: str, doc_key: tuple | None) -> None:
+def _check_relationship(
+    value: dict[str, Any], tenant: str, doc_key: tuple | None
+) -> list[tuple[str, dict[str, Any]]]:
     """A relationship may touch a :Document only if it is the entry's own one;
-    between two Documents (folder / version links) one side must be it."""
+    between two Documents (folder / version links) one side must be it.
+    Returns the (primary label, key) of both endpoints."""
     rel_type = value.get("type")
     cypher_identifier(rel_type)
     endpoints = [_check_endpoint(value.get(side), tenant) for side in ("from", "to")]
@@ -245,6 +248,7 @@ def _check_relationship(value: dict[str, Any], tenant: str, doc_key: tuple | Non
         raise FreezeError(
             f"Snapshot relationship points at Document {outside!r}, outside its entry {doc_key!r}."
         )
+    return endpoints
 
 
 def scan_snapshot(
@@ -303,9 +307,14 @@ def scan_snapshot(
                 if primary == "StructureNode" and entry_key in structure_ids_for:
                     scan.structure_node_ids.setdefault(entry_key, []).append(key["id"])
             elif kind == "relationship":
-                _check_relationship(value, tenant, doc_key)
-                if value.get("type") == "IS_COMPOSED_OF":
-                    parent, child = value["from"]["key"], value["to"]["key"]
+                (from_label, parent), (to_label, child) = _check_relationship(value, tenant, doc_key)
+                # IS_COMPOSED_OF also links StructureNodes inside the subtree;
+                # only Document → Document is a folder link.
+                if (
+                    value.get("type") == "IS_COMPOSED_OF"
+                    and from_label == "Document"
+                    and to_label == "Document"
+                ):
                     children = scan.children.setdefault((parent["path"], parent["version"]), [])
                     if (child["path"], child["version"]) not in children:
                         children.append((child["path"], child["version"]))

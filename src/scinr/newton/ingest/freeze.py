@@ -99,7 +99,9 @@ UID_LABELS = (
     "LabeledEntity",
 )
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Leading digits are allowed: the name is always backquoted, and the extraction
+# stage writes model-defined rel types such as `5_YEAR_...` that way.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def node_identity(labels: Sequence[str]) -> tuple[str, tuple[str, ...]]:

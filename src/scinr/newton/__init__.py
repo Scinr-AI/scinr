@@ -1,6 +1,7 @@
 """
 scinr-ingest — Document ingestion and entity extraction pipeline for Neo4j.
 """
+
 from scinr.newton.config import (
     ThemePath,
     configure,
@@ -57,7 +58,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 __all__ = [
     # Configuration
@@ -88,6 +89,13 @@ __all__ = [
     "RestoreResult",
     # Unified pipeline
     "run_pipeline",
+    # Progress reporting
+    "ProgressEvent",
+    "ProgressCallback",
+    "AsyncProgressCallback",
+    "ProgressTracker",
+    "ProgressSnapshot",
+    "DocumentProgress",
     # Progress reporting
     "ProgressEvent",
     "ProgressCallback",
