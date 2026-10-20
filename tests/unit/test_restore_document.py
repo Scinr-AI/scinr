@@ -21,7 +21,7 @@ import pytest
 
 from scinr.newton.exceptions import FreezeError
 from scinr.newton.ingest import restore
-from scinr.newton.ingest.freeze import SNAPSHOT_SCHEMA_VERSION
+from scinr.newton.ingest.freeze import SNAPSHOT_SCHEMA_VERSION, cypher_identifier
 from scinr.newton.ingest.restore import iter_snapshot, restore_document
 from scinr.newton.results import RestoreResult
 
@@ -627,6 +627,15 @@ class TestRestoreDocument:
         assert e.adrv.max_in_flight == concurrency
         assert result.nodes_created == 46
 
+    async def test_is_composed_of_between_structure_nodes_is_not_a_folder_link(self, env):
+        entry = _entry("a.pdf", 1, "a1")
+        root, child = entry["nodes"][0], entry["nodes"][1]
+        entry["relationships"].append(_r("IS_COMPOSED_OF", _ref(root), _ref(child)))
+        e = env([_stub("a.pdf", 1)], {"blob-1": ("acme", _snapshot(entry))})
+        result = await restore_document("a.pdf", tenant_id="acme")
+        assert result.documents_restored == 1
+        assert any("IS_COMPOSED_OF" in q for q in _async_queries(e))
+
     async def test_same_label_batches_never_overlap(self, env):
         entry = _entry("a.pdf", 1, "a1")
         entry["nodes"] = [_n(["ModelDecision"], {"uid": f"md-{i}"}) for i in range(10)]
@@ -1051,3 +1060,14 @@ class TestRestoreWithoutStub:
         result = await restore_document("a.pdf", tenant_id="acme")
         assert result.documents_recreated == 1
         assert "rf-gone" in caplog.text and "no longer exists in storage" in caplog.text
+
+
+@pytest.mark.parametrize("name", ["HAS_CHILD", "5_YEAR_PERIOD_CALCULATED_FROM", "_x"])
+def test_cypher_identifier_accepts_names_the_extraction_writes(name):
+    assert cypher_identifier(name) == f"`{name}`"
+
+
+@pytest.mark.parametrize("name", ["", "HAS CHILD", "x`y", None])
+def test_cypher_identifier_rejects_unsafe_names(name):
+    with pytest.raises(FreezeError, match="Invalid label"):
+        cypher_identifier(name)
