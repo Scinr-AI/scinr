@@ -26,6 +26,7 @@ async def load_sheets(state: TabularState) -> dict:
 
     Pass A of the streaming design: only headers, row count and a small preview
     are kept per sheet — the data rows are re-read in batches at write time.
+    Reuses ``state.prefetched_scans`` when the caller already scanned the file.
 
     Also ensures catalog models and theme structure exist in Neo4j (idempotent),
     mirroring the annotation pipeline's load_nodes() behaviour.
@@ -43,9 +44,11 @@ async def load_sheets(state: TabularState) -> dict:
     await ensure_theme_structure_once(driver, theme_registry)
 
     file_path = Path(state["file_path"])
-    logger.info("load_sheets: reading %s", file_path)
+    scans = state.get("prefetched_scans")
     try:
-        scans = scan_tabular_file(file_path)
+        if scans is None:
+            logger.info("load_sheets: reading %s", file_path)
+            scans = scan_tabular_file(file_path, state.get("delimiter"))
     except Exception as exc:
         errors = list(state.get("errors", []))
         errors.append(f"load_sheets: could not read {file_path}: {exc}")
@@ -443,7 +446,7 @@ async def write_tabular(state: TabularState) -> dict:
 
     def row_batches(batch_size: int):
         # Each call is a new streaming pass over the file (one batch alive at a time).
-        return iter_sheet_batches(sheet_path, sheet_name, batch_size)
+        return iter_sheet_batches(sheet_path, sheet_name, batch_size, state.get("delimiter"))
 
     sheet_page_ids = state.get("sheet_page_ids", [])
     sheet_page_id = sheet_page_ids[idx] if idx < len(sheet_page_ids) else ""

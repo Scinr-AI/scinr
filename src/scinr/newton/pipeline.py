@@ -575,8 +575,10 @@ async def _run_pipeline_impl(
             **{k: v for k, v in pipeline_result_kwargs.items()},
         )
 
-    # ── Tabular short-circuit ─────────────────────────────────────────────────
-    if effective_stages == ["tabular"]:
+    from scinr.newton.pipeline_units import _discover_raw_inputs
+
+    async def _run_tabular_batch(files: list[tuple[Path, int]]) -> StageResult:
+        """Batch events around run_tabular_pipeline(), which emits the per-file ones."""
         emitter.emit("stage_started", stage="tabular")
         sr = await run_tabular_pipeline(
             input_raw=input_raw,
@@ -587,47 +589,76 @@ async def _run_pipeline_impl(
             tenant_id=tenant_id,
             created_by_user_id=created_by_user_id,
             job_id=job_id,
+            files=files,
+            emitter=emitter,
         )
         _emit_tabular_completed(emitter, sr)
         stage_results.append(sr)
         pipeline_result_kwargs["tabular"] = sr
+        return sr
+
+    # ── Tabular short-circuit ─────────────────────────────────────────────────
+    # Only the tabular files count: the caller asked for the tabular stage alone.
+    if effective_stages == ["tabular"]:
+        raw_inputs = _discover_raw_inputs(input_raw, _effective_tabular_extensions)
+        tabular_files = [(f, i) for i, f in enumerate(raw_inputs.tabular)]
+        emitter.emit(
+            "documents_discovered", total_documents=len(tabular_files), stages=("tabular",)
+        )
+        sr = await _run_tabular_batch(tabular_files)
         return _build_result(sr.success)
 
-    # ── Tabular files auto-detected inside input_raw (mixed folder) ─────────
-    # Only the non-tabular files in `input_raw` proceed to the new
-    # per-document-unit engine below; tabular files are fully handled here,
-    # exactly as before.
-    has_non_tabular = False
+    # ── input_raw: tabular files, convertible documents and skipped files ───
+    # One walk of `input_raw` sorts every file; they share a single
+    # document_index space — tabular files 0..T-1, convertible units
+    # T..T+N-1, files the pipeline cannot interpret T+N..T+N+S-1 — and are all
+    # announced by one documents_discovered event, before the tabular batch
+    # runs. Tabular files are fully handled by run_tabular_pipeline(); only the
+    # convertible units proceed to the per-document-unit engine below.
+    raw_inputs = None
+    unit_index_offset = 0
     if "preprocess" in effective_stages:
-        input_raw_path = Path(input_raw)
-        has_tabular = any(
-            f.suffix.lower() in _effective_tabular_extensions
-            for f in input_raw_path.rglob("*")
-            if f.is_file()
+        raw_inputs = _discover_raw_inputs(input_raw, _effective_tabular_extensions)
+        n_tabular = len(raw_inputs.tabular)
+        n_units = len(raw_inputs.units)
+        unit_index_offset = n_tabular
+        doc_stages = tuple(s for s in effective_stages if s != "tabular")
+        if n_tabular:
+            doc_stages += ("tabular",)
+        emitter.emit(
+            "documents_discovered",
+            total_documents=n_tabular + n_units + len(raw_inputs.skipped),
+            stages=doc_stages,
         )
-        has_non_tabular = any(
-            f.suffix.lower() not in _effective_tabular_extensions
-            for f in input_raw_path.rglob("*")
-            if f.is_file()
-        )
-        if has_tabular:
+        input_root = Path(input_raw)
+        for j, (skipped_file, reason) in enumerate(raw_inputs.skipped):
+            relative_dir = skipped_file.parent.relative_to(input_root)
+            doc_path = (
+                f"{relative_dir}/{skipped_file.stem}"
+                if relative_dir != Path(".")
+                else skipped_file.stem
+            )
+            skipped_fields = dict(
+                document_index=n_tabular + n_units + j,
+                doc_path=doc_path,
+                document_name=skipped_file.stem,
+                source_path=str(skipped_file),
+                tenant_id=tenant_id,
+            )
+            emitter.emit("document_started", planned_stages=(), **skipped_fields)
+            emitter.emit(
+                "document_finished",
+                status="skipped",
+                error=reason,
+                duration_s=0.0,
+                **skipped_fields,
+            )
+
+        if n_tabular:
             logger.info(
                 "Tabular files detected in '%s' — running tabular pipeline first.", input_raw
             )
-            emitter.emit("stage_started", stage="tabular")
-            sr = await run_tabular_pipeline(
-                input_raw=input_raw,
-                update_mode=update_mode,
-                parallel_docs=parallel_docs,
-                tabular_extensions=_effective_tabular_extensions,
-                tabular_delimiter=tabular_delimiter,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            _emit_tabular_completed(emitter, sr)
-            stage_results.append(sr)
-            pipeline_result_kwargs["tabular"] = sr
+            sr = await _run_tabular_batch([(f, i) for i, f in enumerate(raw_inputs.tabular)])
             if _should_abort(sr):
                 return _build_result(False)
 
@@ -645,14 +676,12 @@ async def _run_pipeline_impl(
         unit_tenant,
     )
 
-    if ingestion_input_dir is not None:
+    if raw_inputs is not None:
+        units = raw_inputs.units
+    elif ingestion_input_dir is not None:
         units = await _discover_units(ingestion_input_dir=ingestion_input_dir)
     elif extraction_input_dir is not None:
         units = await _discover_units(extraction_input_dir=extraction_input_dir)
-    elif input_raw is not None and has_non_tabular:
-        units = await _discover_units(
-            input_raw=input_raw, tabular_extensions=_effective_tabular_extensions
-        )
     elif (
         converter_output_dir is not None
         and "extraction" in effective_stages
@@ -672,11 +701,12 @@ async def _run_pipeline_impl(
     else:
         units = []
 
-    emitter.emit(
-        "documents_discovered",
-        total_documents=len(units),
-        stages=tuple(s for s in effective_stages if s != "tabular"),
-    )
+    if raw_inputs is None:
+        emitter.emit(
+            "documents_discovered",
+            total_documents=len(units),
+            stages=tuple(s for s in effective_stages if s != "tabular"),
+        )
     if not units:
         logger.info("No documents discovered for this run; nothing to process.")
 
@@ -744,7 +774,7 @@ async def _run_pipeline_impl(
                         on_partial_failure=on_partial_failure,
                         fast_extraction=fast_extraction,
                         emitter=emitter,
-                        document_index=i,
+                        document_index=unit_index_offset + i,
                     )
                     for i, u in enumerate(units)
                 ],

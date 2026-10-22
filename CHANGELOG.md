@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-10-21
+
+Progress tracking now covers every file under `input_raw`, tabular files
+included, and tabular errors are no longer reported as success. Some observable
+values change; see the notes below.
+
+### Fixed
+- **Each tabular file is a document in the progress events.** `run_tabular_pipeline()`
+  emits `document_started` → `stage_started` → `stage_completed` / `stage_failed`
+  → `document_finished` with `stage="tabular"` and a `document_index` for every
+  file. The batch `stage_started` / `stage_completed` events (without
+  `document_index`) and `ProgressSnapshot.tabular` are kept as they were.
+- **`documents_discovered` counts every file and comes first.** With
+  `input_raw`, it is emitted once, before the tabular batch, and
+  `total_documents` includes tabular files, convertible documents and files the
+  pipeline cannot interpret. A folder with only tabular files no longer reports
+  `0`. Indices are shared: tabular files `0..T-1`, then convertible documents,
+  then skipped files. On a `stages=["tabular"]` run, `documents_discovered` is
+  now emitted too, with the number of tabular files.
+- **Unsupported files are reported** as `document_finished(status="skipped",
+  error="unsupported format: .xyz")` instead of only a log warning.
+- **Tabular errors no longer count as success.** A file whose sheets failed
+  used to give `DocumentResult(nodes_processed=1, nodes_failed=0)`. Now the
+  counters are sheets: `nodes_processed` = tables written, `nodes_failed` =
+  sheets with errors. A file is `"partial"` when some tables were written and
+  `"failed"` when none was.
+- **Unreadable or empty tabular files are skipped before anything is stored.**
+  Each file is scanned first; a file that cannot be read (binary content such as
+  an AppleDouble `__MACOSX/._name.csv`, a corrupt workbook, `.xls`) or has no
+  data rows is `"skipped"`: no raw file in storage and no `:Document`. Before,
+  both were created. There is no list of names or folders: files are judged by
+  extension and content. A CSV whose first 8 KiB contain a NUL byte is now
+  rejected by the reader as binary.
+- **`tabular_delimiter` works.** It raised `TypeError` for every file (the
+  agent did not accept it) and never reached the reader. It is now passed to
+  `run_tabular_agent(delimiter=...)`, the scan and the batched write.
+
+### Changed (observable values)
+- `ProgressSnapshot.percent` and the document counters include tabular files
+  and skipped files; `percent` no longer ignores the tabular batch.
+- `documents_discovered.stages` includes `"tabular"` when there are tabular
+  files.
+- `StageResult.success` of the tabular stage is `False` when a file had sheet
+  errors (before, it was `True`). With `on_partial_failure="abort"` on a mixed
+  folder, a broken tabular file now stops the other documents.
+- `run_tabular_pipeline()` gains keyword-only `files` and `emitter`;
+  `run_tabular_agent()` gains `delimiter` and `scans`.
+
+### Upgrading
+- Consumers that keep their own list of stages should accept `"tabular"` as a
+  document stage.
+
 ## [0.4.2] - 2026-10-20
 
 Fixes to restoring (unfreezing) documents: two checks rejected valid snapshots.

@@ -406,7 +406,84 @@ class TestProgressTracker:
         )
         assert t.snapshot().percent == 0.0
 
-    def test_tabular_does_not_affect_percent(self):
+    def test_per_file_tabular_events_count_like_any_document(self):
+        t = ProgressTracker()
+        _feed(
+            t,
+            _event("pipeline_started"),
+            _event("documents_discovered", total_documents=4, stages=("preprocess", "tabular")),
+            _event("stage_started", stage="tabular"),
+            # File 0: success.
+            _event("document_started", document_index=0, planned_stages=("tabular",)),
+            _event("stage_started", document_index=0, stage="tabular"),
+        )
+        snap = t.snapshot()
+        assert snap.tabular == "running"
+        assert dict(snap.running_by_stage) == {"tabular": 1}
+        assert snap.documents[0].current_stage == "tabular"
+        _feed(
+            t,
+            _event(
+                "stage_completed",
+                document_index=0,
+                stage="tabular",
+                metrics={"nodes_processed": 2, "nodes_failed": 0},
+            ),
+            _event("document_finished", document_index=0, status="success"),
+            # File 1: failed.
+            _event("document_started", document_index=1, planned_stages=("tabular",)),
+            _event("stage_started", document_index=1, stage="tabular"),
+            _event("stage_failed", document_index=1, stage="tabular", error="x"),
+            _event(
+                "document_finished",
+                document_index=1,
+                status="failed",
+                stopped_at="tabular",
+                error="x",
+            ),
+            # File 2: skipped (unreadable), no stage outcome.
+            _event("document_started", document_index=2, planned_stages=("tabular",)),
+            _event("stage_started", document_index=2, stage="tabular"),
+            _event("document_finished", document_index=2, status="skipped", error="empty"),
+            _event(
+                "stage_completed",
+                stage="tabular",
+                metrics={"total_processed": 2, "total_failed": 1, "documents": 3},
+            ),
+        )
+        snap = t.snapshot()
+        # The batch event still drives snapshot.tabular ...
+        assert snap.tabular == "completed_with_errors"
+        # ... while each file counts as a finished document.
+        assert dict(snap.completed_by_stage) == {"tabular": 1}
+        assert dict(snap.failed_by_stage) == {"tabular": 1}
+        assert dict(snap.running_by_stage) == {}
+        assert snap.documents_succeeded == 1
+        assert snap.documents_failed == 1
+        assert snap.documents_skipped == 1
+        assert snap.documents_pending == 1
+        assert snap.documents[2].error == "empty"
+        assert snap.percent == 75.0
+
+    def test_skipped_document_without_stages_counts_as_finished(self):
+        t = ProgressTracker()
+        _feed(
+            t,
+            _event("pipeline_started"),
+            _event("documents_discovered", total_documents=2),
+            _event("document_started", document_index=1, planned_stages=()),
+            _event(
+                "document_finished",
+                document_index=1,
+                status="skipped",
+                error="unsupported format: .xyz",
+            ),
+        )
+        snap = t.snapshot()
+        assert snap.documents_skipped == 1
+        assert snap.percent == 50.0
+
+    def test_tabular_batch_events_do_not_affect_percent(self):
         t = ProgressTracker()
         _feed(
             t,

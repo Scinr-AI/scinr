@@ -22,7 +22,9 @@ class DocumentResult:
         nodes_processed: Number of nodes (or files) successfully processed within this document.
             For stages 0-2, this is 1 for success, 0 for failure.
             For stages 3-4, this is the number of StructureNodes processed.
+            For the tabular stage, this is the number of tables (sheets) written.
         nodes_failed: Number of nodes (or files) that failed processing within this document.
+            For the tabular stage, the number of sheets with errors.
         errors: List of error messages for this document. Empty on full success.
     """
 

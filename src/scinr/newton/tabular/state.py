@@ -40,6 +40,8 @@ class TabularState(TypedDict):
     resolved_version: int           # pre-computed batch version
     raw_file_id: str                # MongoDB ObjectId str, or "" when no storage backend is configured
     sheet_page_ids: list            # list[str] — one page_id per sheet (from storage/mongodb/pages.py), or [] when no storage backend
+    delimiter: str | None           # CSV field delimiter; None = sniffed from the file
+    prefetched_scans: list | None   # list[SheetScan] already read by the caller, or None (load_sheets scans the file)
 
     # Sheet data (set by load_sheets, one entry per sheet)
     sheets: list                    # list[TabularFileData]

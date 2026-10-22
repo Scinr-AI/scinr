@@ -1316,6 +1316,10 @@ class TestProgressCallbacks:
             failed=1,
             duration=0.5,
         )
+        (tmp_path / "t1.csv").write_text("a\n1\n", encoding="utf-8")
+        (tmp_path / "t2.xlsx").write_bytes(b"")
+        (tmp_path / "doc.txt").write_text("ignored", encoding="utf-8")
+        (tmp_path / "blob.xyz").write_text("ignored", encoding="utf-8")
         tracker, recorder = ProgressTracker(), self._recorder()
         await run_pipeline(
             stages=["tabular"], input_raw=str(tmp_path), callbacks=[tracker, recorder]
@@ -1323,15 +1327,146 @@ class TestProgressCallbacks:
 
         assert [(e.kind, e.stage) for e in recorder.events] == [
             ("pipeline_started", None),
+            ("documents_discovered", None),
             ("stage_started", "tabular"),
             ("stage_completed", "tabular"),
             ("pipeline_completed", None),
         ]
-        completed = recorder.events[2]
+        # Only tabular files count when the tabular stage runs alone.
+        discovered = recorder.events[1]
+        assert discovered.total_documents == 2
+        assert discovered.stages == ("tabular",)
+        kwargs = mock_stages["run_tabular_pipeline"].await_args.kwargs
+        assert kwargs["files"] == [(tmp_path / "t1.csv", 0), (tmp_path / "t2.xlsx", 1)]
+        assert kwargs["emitter"] is not None
+        completed = recorder.events[3]
         assert completed.document_index is None
         assert dict(completed.metrics) == {"total_processed": 7, "total_failed": 1, "documents": 2}
         assert completed.duration_s == 0.5
         assert tracker.snapshot().tabular == "completed_with_errors"
+
+    @staticmethod
+    def _mixed_folder(tmp_path):
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.xlsx").write_bytes(b"")
+        (tmp_path / "doc1.txt").write_text("hello", encoding="utf-8")
+        (tmp_path / "sub" / "doc2.txt").write_text("world", encoding="utf-8")
+        (tmp_path / "sub" / "blob.xyz").write_text("?", encoding="utf-8")
+
+    @pytest.fixture
+    def no_storage(self, monkeypatch):
+        import scinr.newton.storage.factory as storage_factory_mod
+
+        monkeypatch.setattr(
+            storage_factory_mod, "get_storage", MagicMock(return_value=(None, None))
+        )
+
+    async def test_mixed_folder_announces_every_file_before_the_tabular_batch(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, tmp_path
+    ):
+        from scinr.newton.progress import ProgressTracker
+
+        self._mixed_folder(tmp_path)
+        tracker, recorder = ProgressTracker(), self._recorder()
+        seen_at_batch: list = []
+
+        async def _tabular(**kwargs):
+            # The first snapshot already knows the whole run.
+            seen_at_batch.append(tracker.snapshot())
+            return _sr("tabular", documents=[DocumentResult("a", 1, 0), DocumentResult("b", 1, 0)])
+
+        mock_stages["run_tabular_pipeline"].side_effect = _tabular
+        mock_unit_stage_fns["convert_one"].return_value = ([], [])
+
+        await run_pipeline(
+            stages=["preprocess"], input_raw=str(tmp_path), callbacks=[tracker, recorder]
+        )
+
+        events = recorder.events
+        discovered = [e for e in events if e.kind == "documents_discovered"]
+        assert len(discovered) == 1
+        assert discovered[0].total_documents == 5  # 2 tabular + 2 units + 1 skipped
+        assert discovered[0].stages == ("preprocess", "tabular")
+        kinds = [(e.kind, e.stage, e.document_index) for e in events]
+        assert kinds.index(("documents_discovered", None, None)) < kinds.index(
+            ("stage_started", "tabular", None)
+        )
+        assert seen_at_batch[0].total_documents == 5
+        assert seen_at_batch[0].documents_skipped == 1
+
+        # Tabular files 0..1, units 2..3, skipped 4.
+        kwargs = mock_stages["run_tabular_pipeline"].await_args.kwargs
+        assert kwargs["files"] == [(tmp_path / "a.csv", 0), (tmp_path / "sub" / "b.xlsx", 1)]
+        unit_indices = sorted(
+            {e.document_index for e in events if e.kind == "document_started"} - {4}
+        )
+        assert unit_indices == [2, 3]
+        assert {
+            e.doc_path for e in events if e.kind == "document_started" and e.document_index in (2, 3)
+        } == {"doc1", "sub/doc2"}
+        skipped = [e for e in events if e.document_index == 4]
+        assert [(e.kind, e.status) for e in skipped] == [
+            ("document_started", None),
+            ("document_finished", "skipped"),
+        ]
+        assert skipped[0].planned_stages == ()
+        assert skipped[0].doc_path == "sub/blob"
+        assert skipped[1].error == "unsupported format: .xyz"
+        assert tracker.snapshot().documents[4].status == "skipped"
+
+    async def test_tabular_only_folder_with_default_stages_has_a_nonzero_total(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, tmp_path
+    ):
+        from scinr.newton.progress import ProgressTracker
+
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "b.csv").write_text("x\n1\n", encoding="utf-8")
+        mock_stages["run_tabular_pipeline"].return_value = _sr("tabular")
+        tracker, recorder = ProgressTracker(), self._recorder()
+
+        await run_pipeline(input_raw=str(tmp_path), callbacks=[tracker, recorder])
+
+        (discovered,) = [e for e in recorder.events if e.kind == "documents_discovered"]
+        assert discovered.total_documents == 2
+        assert discovered.stages[-1] == "tabular"
+        assert tracker.snapshot().total_documents == 2
+
+    async def test_mixed_folder_without_tabular_files_omits_tabular_stage(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, tmp_path
+    ):
+        (tmp_path / "doc1.txt").write_text("hello", encoding="utf-8")
+        mock_unit_stage_fns["convert_one"].return_value = ([], [])
+        recorder = self._recorder()
+
+        await run_pipeline(stages=["preprocess"], input_raw=str(tmp_path), callbacks=[recorder])
+
+        (discovered,) = [e for e in recorder.events if e.kind == "documents_discovered"]
+        assert discovered.total_documents == 1
+        assert discovered.stages == ("preprocess",)
+        mock_stages["run_tabular_pipeline"].assert_not_awaited()
+        assert {e.document_index for e in recorder.events if e.kind == "document_started"} == {0}
+
+    async def test_mixed_folder_abort_after_failed_tabular_batch(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, tmp_path
+    ):
+        self._mixed_folder(tmp_path)
+        mock_stages["run_tabular_pipeline"].return_value = _sr(
+            "tabular", success=False, documents=[DocumentResult("a", 0, 1)], failed=1
+        )
+        recorder = self._recorder()
+
+        result = await run_pipeline(
+            stages=["preprocess"],
+            input_raw=str(tmp_path),
+            on_partial_failure="abort",
+            callbacks=[recorder],
+        )
+
+        assert result.success is False
+        mock_unit_stage_fns["convert_one"].assert_not_awaited()
+        (discovered,) = [e for e in recorder.events if e.kind == "documents_discovered"]
+        assert discovered.total_documents == 5
 
     async def test_without_callbacks_no_dispatcher_is_created(
         self, mock_stages, mock_infra, mock_unit_stage_fns, tmp_path, monkeypatch

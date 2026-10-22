@@ -58,7 +58,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 __all__ = [
     # Configuration
