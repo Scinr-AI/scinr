@@ -118,6 +118,26 @@ Each sheet goes through three LLM calls:
 
 After mapping, `write_tabular` instantiates Pydantic models from each row, runs normalization (if enabled), and writes the complete subgraph to Neo4j.
 
+### 2.3 Validation and outcome of each file
+
+Before anything is stored, `run_tabular_pipeline()` scans each file (headers, row count and preview — the same scan `load_sheets` then reuses, so the file is not read twice). A file is **skipped** when:
+
+- it cannot be read: binary content in a `.csv` (for example an AppleDouble `__MACOSX/._name.csv` from a macOS zip), a corrupt workbook, or an `.xls` file;
+- none of its sheets has a data row (empty file, header only).
+
+A skipped file stores no raw file and creates no `:Document`. Files are judged only by extension and content; there is no list of names or folders to ignore.
+
+Every other file gets its `:Document` and goes through the graph. Its `DocumentResult` in `result.tabular.documents` counts **sheets**:
+
+| Outcome | `nodes_processed` | `nodes_failed` | Progress status |
+| :--- | :--- | :--- | :--- |
+| Every sheet written, no errors | tables written | `0` | `"success"` |
+| Some tables written, some sheets failed | tables written | sheets with errors | `"partial"` |
+| No table written (every sheet failed, or an unexpected error) | `0` | sheets with errors (at least `1`) | `"failed"` |
+| Skipped (unreadable / no data rows) | `0` | `0` | `"skipped"` |
+
+`StageResult.success` is `False` as soon as one file has `nodes_failed > 0`. With `run_pipeline(on_partial_failure="abort")` on a mixed folder, that stops the other documents. See [Progress Tracking](progress-tracking.md#tabular-files) for the events each file emits.
+
 ---
 
 ## 3. Running the Tabular Pipeline
@@ -146,8 +166,8 @@ async def main():
 
     # Inspect tabular results
     if result.tabular:
-        print(f"Tabular: {result.tabular.total_processed} files, "
-              f"{result.tabular.total_failed} failed")
+        print(f"Tabular: {result.tabular.total_processed} tables written, "
+              f"{result.tabular.total_failed} sheets failed")
 
 asyncio.run(main())
 ```
@@ -191,7 +211,7 @@ async def main():
     )
 
     print(f"Success: {result.success}")
-    print(f"Files: {result.total_processed}")
+    print(f"Tables written: {result.total_processed}")
 
 asyncio.run(main())
 ```
@@ -205,6 +225,12 @@ async def run_tabular_pipeline(
     parallel_docs: int = 1,
     tabular_extensions: set | None = None,
     tabular_delimiter: str | None = None,
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
+    *,
+    files: Sequence[tuple[Path, int]] | None = None,
+    emitter: _ProgressEmitter = _NULL_EMITTER,
 ) -> StageResult
 ```
 
@@ -215,6 +241,10 @@ async def run_tabular_pipeline(
 | `parallel_docs` | `int` | `1` | Maximum number of files to process concurrently. Default is 1 (sequential). |
 | `tabular_extensions` | `set[str] \| None` | `{".csv", ".xlsx", ".xls"}` | File extensions to treat as tabular. |
 | `tabular_delimiter` | `str \| None` | `None` | Field delimiter for CSV files. When `None`, auto-detected. |
+| `tenant_id` | `str \| None` | `None` | Tenant owning every document created (`None` = public). |
+| `created_by_user_id`, `job_id` | `str \| None` | `None` | Provenance metadata written onto every `:Document` created. |
+| `files` | `Sequence[tuple[Path, int]] \| None` | `None` | Files already discovered, each with its `document_index` for progress events. `None` discovers them under `input_raw`. Used by `run_pipeline()`. |
+| `emitter` | internal | no-op | Progress emitter; `run_pipeline()` passes its own. |
 
 ---
 
@@ -699,8 +729,8 @@ async def main():
 
     print(f"Success: {result.success}")
     if result.tabular:
-        print(f"Files processed: {result.tabular.total_processed}")
-        print(f"Files failed: {result.tabular.total_failed}")
+        print(f"Tables written: {result.tabular.total_processed}")
+        print(f"Sheets failed: {result.tabular.total_failed}")
         for doc in result.tabular.documents:
             status = "OK" if doc.nodes_failed == 0 else f"FAILED ({doc.errors})"
             print(f"  {doc.document_name}: {status}")
@@ -786,7 +816,8 @@ asyncio.run(main())
 | Column mapping wrong | Model fields don't match column semantics | Adjust field descriptions to be more specific |
 | Column mapping wrong | Theme classification incorrect | Check `THEME_DESCRIPTION` in your `catalog.py` |
 | CSV delimiter wrong | Auto-detection failed on unusual format | Set `tabular_delimiter=";"` or `tabular_delimiter="\t"` |
-| `.xls` files fail | Excel 97-2003 format not supported | Convert to `.xlsx` first |
+| `.xls` files skipped | Excel 97-2003 format not supported | Convert to `.xlsx` first |
+| A `._name.csv` file is reported as skipped | AppleDouble resource fork from a macOS zip (`__MACOSX/`): binary content | Nothing to do — it is skipped without creating a `:Document` |
 | Only one of several mapped columns' data survives on a field | Field type is not `str`/`list[str]` — multi-column combination only applies to those two types; other types keep the last value processed | Change the field to `str` or `list[str]`. Do **not** add a `model_validator` — it never runs in the tabular pipeline (`model_construct()` skips it). If a real type is genuinely needed, wrap it in a nested submodel marked `normalization_model: True` (see [§7.4](#74-combining-values-when-multiple-columns-map-to-the-same-field) and [§8.1](#81-the-normalization_model-mechanism)) |
 | Validation errors on row | Extra columns not mapped to model fields | Add missing fields to model, or use `default=None` |
 | Duplicate headers cause issues | Source file has repeated column names | Headers are auto-deduped (`col`, `col_2`, `col_3`) — check mapping |

@@ -112,8 +112,22 @@ def _iter_csv_rows(path: Path, delimiter: str | None) -> Iterator[list[str]]:
             yield [_cell_to_str(c) for c in row]
 
 
+# Bytes inspected to tell a text CSV from binary content.
+_BINARY_PROBE_BYTES = 8192
+
+
 @contextmanager
 def _open_csv(path: Path, delimiter: str | None = None) -> Iterator[list[_SheetSource]]:
+    """Single-sheet source for a CSV file.
+
+    Raises ``ValueError`` when the start of the file contains a NUL byte: that is
+    binary content (e.g. an AppleDouble ``._name.csv`` resource fork), not a
+    UTF-8 text CSV, and reading it with ``errors="replace"`` would only yield
+    garbage rows.
+    """
+    with path.open("rb") as raw:
+        if b"\x00" in raw.read(_BINARY_PROBE_BYTES):
+            raise ValueError(f"'{path.name}' is not a text CSV file (binary content)")
     yield [(path.stem, lambda: _iter_csv_rows(path, delimiter))]
 
 

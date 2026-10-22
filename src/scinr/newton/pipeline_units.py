@@ -166,27 +166,51 @@ def _validate_exclusive(**kwargs: object) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _discover_raw_file_units(
+@dataclass(frozen=True)
+class RawInputs:
+    """Every file under an ``input_raw`` folder, sorted into what the pipeline
+    will do with it (see :func:`_discover_raw_inputs`).
+
+    Attributes:
+        tabular: Files with a tabular extension, sorted — routed to
+            ``run_tabular_pipeline()``.
+        units: ``"raw_file"`` units for the files a converter can read (what
+            :func:`_discover_raw_file_units` returns).
+        skipped: ``(file, reason)`` for every file the pipeline cannot interpret
+            (no converter and not tabular), e.g. ``"unsupported format: .xyz"``.
+    """
+
+    tabular: list[Path]
+    units: list[DocumentUnit]
+    skipped: list[tuple[Path, str]]
+
+
+def _discover_raw_inputs(
     input_raw: str,
     tabular_extensions: set[str] | None,
-) -> list[DocumentUnit]:
-    """Enumerate raw source files under *input_raw*.
+) -> RawInputs:
+    """Sort every file under *input_raw* into tabular files, convertible units
+    and files the pipeline cannot interpret — in a single directory walk.
 
     Mirrors the file discovery + folder_path derivation of
     ``scinr.newton.converters.main.convert_one()`` /
     ``convert_folder()`` (see module docstring for the exact source). Does
-    **not** convert anything — only lists files, skips unsupported formats
-    (and, if requested, tabular extensions), and predicts the ``doc_path``
-    each file will get once actually converted and extracted (per
+    **not** convert or read anything: a file is tabular by extension, a unit
+    when the converter registry has a converter for it, and skipped otherwise.
+    There are no name- or path-based filters (``__MACOSX/``, ``.DS_Store``…):
+    a file is only judged by its extension here, and by its content later.
+
+    For each unit, predicts the ``doc_path`` the file will get once actually
+    converted and extracted (per
     ``scinr.newton.stages.extraction.run_extraction()``'s
     ``folder_path``/``doc_path`` combination rule).
 
     Args:
         input_raw: Root folder to walk recursively.
-        tabular_extensions: File extensions (e.g. ``{".csv", ".xlsx"}``) to exclude from the
-            result. When ``None``, no extension is excluded on this basis alone
-            (unsupported-format files are still skipped via the converter
-            registry, exactly as ``convert_one()`` does).
+        tabular_extensions: File extensions (e.g. ``{".csv", ".xlsx"}``) routed to
+            ``RawInputs.tabular``. When ``None`` (or empty), no file is tabular
+            and every file goes through the converter registry, exactly as
+            ``convert_one()`` does.
     """
     from scinr.newton.converters.base import UnsupportedFormatError
     from scinr.newton.converters.registry import get_converter
@@ -195,16 +219,20 @@ def _discover_raw_file_units(
     if not root.exists():
         raise FileNotFoundError(f"input_raw folder not found: '{input_raw}'.")
 
+    tabular: list[Path] = []
     units: list[DocumentUnit] = []
+    skipped: list[tuple[Path, str]] = []
     for entry in sorted(root.rglob("*")):
         if not entry.is_file():
             continue
         if tabular_extensions and entry.suffix.lower() in tabular_extensions:
+            tabular.append(entry)
             continue
         try:
             get_converter(entry)
         except UnsupportedFormatError:
             logger.warning("Skipping %s: unsupported format", entry.name)
+            skipped.append((entry, f"unsupported format: {entry.suffix.lower() or '(no extension)'}"))
             continue
 
         # See convert_one(): folder_path_str = str(_relative_prefix) if
@@ -226,7 +254,26 @@ def _discover_raw_file_units(
                 document_name_hint=entry.stem,
             )
         )
-    return units
+    return RawInputs(tabular=tabular, units=units, skipped=skipped)
+
+
+def _discover_raw_file_units(
+    input_raw: str,
+    tabular_extensions: set[str] | None,
+) -> list[DocumentUnit]:
+    """Enumerate the convertible raw source files under *input_raw*.
+
+    The ``units`` of :func:`_discover_raw_inputs`: tabular files (by
+    *tabular_extensions*) and unsupported formats are left out.
+
+    Args:
+        input_raw: Root folder to walk recursively.
+        tabular_extensions: File extensions (e.g. ``{".csv", ".xlsx"}``) to exclude from the
+            result. When ``None``, no extension is excluded on this basis alone
+            (unsupported-format files are still skipped via the converter
+            registry, exactly as ``convert_one()`` does).
+    """
+    return _discover_raw_inputs(input_raw, tabular_extensions).units
 
 
 def _discover_extraction_json_units(extraction_input_dir: str) -> list[DocumentUnit]:

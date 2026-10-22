@@ -30,6 +30,7 @@ from scinr.newton.pipeline_units import (
     _discover_ingestion_json_units,
     _discover_pre_ingested_units,
     _discover_raw_file_units,
+    _discover_raw_inputs,
     _discover_units,
     build_all_paths_for_versioning,
 )
@@ -93,6 +94,51 @@ def test_discover_raw_file_units_missing_root_raises(tmp_path):
     missing = tmp_path / "does-not-exist"
     with pytest.raises(FileNotFoundError):
         _discover_raw_file_units(str(missing), tabular_extensions=None)
+
+
+def test_discover_raw_inputs_sorts_tabular_units_and_skipped(tmp_path):
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "doc.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "blob.xyz").write_text("binary-ish", encoding="utf-8")
+    (tmp_path / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    macosx = tmp_path / "__MACOSX"
+    macosx.mkdir()
+    (macosx / "._data.csv").write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X")
+
+    inputs = _discover_raw_inputs(str(tmp_path), tabular_extensions={".csv", ".xlsx"})
+
+    # No name/path filters: the AppleDouble ._data.csv is tabular by extension
+    # (it is rejected later, by content, in run_tabular_pipeline()).
+    assert inputs.tabular == [tmp_path / "__MACOSX" / "._data.csv", tmp_path / "data.csv"]
+    assert [u.document_name_hint for u in inputs.units] == ["doc"]
+    assert inputs.skipped == [
+        (tmp_path / ".DS_Store", "unsupported format: (no extension)"),
+        (tmp_path / "blob.xyz", "unsupported format: .xyz"),
+    ]
+
+
+def test_discover_raw_inputs_without_tabular_extensions_has_no_tabular(tmp_path):
+    (tmp_path / "doc.txt").write_text("hello", encoding="utf-8")
+
+    inputs = _discover_raw_inputs(str(tmp_path), tabular_extensions=None)
+
+    assert inputs.tabular == []
+    assert [u.document_name_hint for u in inputs.units] == ["doc"]
+
+
+def test_discover_raw_file_units_matches_discover_raw_inputs_units(tmp_path):
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "doc.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "blob.xyz").write_text("x", encoding="utf-8")
+
+    assert _discover_raw_file_units(str(tmp_path), {".csv"}) == _discover_raw_inputs(
+        str(tmp_path), {".csv"}
+    ).units
+
+
+def test_discover_raw_inputs_missing_root_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _discover_raw_inputs(str(tmp_path / "does-not-exist"), tabular_extensions=None)
 
 
 # ---------------------------------------------------------------------------

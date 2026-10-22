@@ -144,6 +144,19 @@ class TestScanTabularFile:
             assert scan["total_rows"] == sheet["total_rows"]
             assert scan["preview"] == select_preview_rows(sheet)
 
+    def test_binary_csv_raises(self, tmp_path):
+        # AppleDouble resource fork (__MACOSX/._name.csv): header + xattr data
+        # whose value happens to contain newlines.
+        p = tmp_path / "._data.csv"
+        p.write_bytes(
+            b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        \x00\x02"
+            + b"\x00" * 40 + b"hello,world\nline2,foo\n"
+        )
+        with pytest.raises(ValueError, match="binary content"):
+            scan_tabular_file(p)
+        with pytest.raises(ValueError, match="binary content"):
+            list(iter_sheet_batches(p, "._data"))
+
     def test_unsupported_extension_raises(self, tmp_path):
         p = tmp_path / "x.txt"
         p.write_text("a,b")
@@ -235,6 +248,90 @@ class TestLoadSheetsKeepsNoRows:
         assert sheet["headers"] == ["col0", "col1", "col2"]
         assert "| v0_0 |" in sheet["preview_markdown"]
         assert "showing 5 of 3000 rows" in sheet["preview_markdown"]
+
+
+    @pytest.fixture
+    def _no_prewarm(self, monkeypatch):
+        async def _noop(*a, **k):
+            return None
+
+        monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_catalog_models_once", _noop)
+        monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_theme_structure_once", _noop)
+        monkeypatch.setattr("scinr.newton.ingest.config.get_async_driver", lambda: object())
+        monkeypatch.setattr("scinr.newton.utils.theme_registry.get_theme_registry", lambda: object())
+
+    async def test_prefetched_scans_are_reused_without_reading_the_file(
+        self, tmp_path, monkeypatch, _no_prewarm
+    ):
+        from scinr.newton.tabular import nodes
+        from scinr.newton.tabular.reader import scan_tabular_file
+
+        p = _write_csv(tmp_path / "small.csv", 3)
+        scans = scan_tabular_file(p)
+
+        def _fail(*a, **k):
+            raise AssertionError("scan_tabular_file must not be called with prefetched scans")
+
+        monkeypatch.setattr(nodes, "scan_tabular_file", _fail)
+        state = {
+            "file_path": str(p), "document_name": "small", "doc_path": "small",
+            "errors": [], "prefetched_scans": scans,
+        }
+
+        out = await nodes.load_sheets(state)
+
+        (sheet,) = out["sheets"]
+        assert sheet["total_rows"] == 3
+        assert sheet["headers"] == ["col0", "col1", "col2"]
+
+    async def test_delimiter_reaches_scan(self, tmp_path, _no_prewarm):
+        from scinr.newton.tabular.nodes import load_sheets
+
+        # Comma-free semicolon file whose sniffing would be ambiguous: force ";".
+        p = tmp_path / "semi.csv"
+        p.write_text("a;b\n1;2\n3;4\n", encoding="utf-8")
+        state = {
+            "file_path": str(p), "document_name": "semi", "doc_path": "semi",
+            "errors": [], "delimiter": ";",
+        }
+
+        out = await load_sheets(state)
+
+        assert out["sheets"][0]["headers"] == ["a", "b"]
+        assert out["sheets"][0]["total_rows"] == 2
+
+
+class TestWriteTabularDelimiter:
+    async def test_delimiter_reaches_iter_sheet_batches(self, monkeypatch):
+        from scinr.newton.tabular import neo4j_ops, nodes
+
+        seen: list = []
+
+        def fake_iter(path, sheet_name, batch_size=500, delimiter=None):
+            seen.append(delimiter)
+            return iter(())
+
+        async def fake_write(**kwargs):
+            list(kwargs["row_batches"](10))
+            return "table-1"
+
+        monkeypatch.setattr(nodes, "iter_sheet_batches", fake_iter)
+        monkeypatch.setattr(neo4j_ops, "write_tabular_subgraph", fake_write)
+        monkeypatch.setattr("scinr.newton.ingest.config.get_async_driver", lambda: object())
+        state = {
+            "current_sheet": {"file_path": "x.csv", "sheet_name": "x"},
+            "current_decision": object(),
+            "current_mapping": object(),
+            "current_sheet_index": 0,
+            "doc_path": "x", "document_name": "x", "resolved_version": 1,
+            "tenant_id": "", "delimiter": "|", "errors": [],
+            "ingested_table_node_ids": [],
+        }
+
+        out = await nodes.write_tabular(state)
+
+        assert seen == ["|"]
+        assert out["ingested_table_node_ids"] == ["table-1"]
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 `run_pipeline()` returns a `PipelineResult` when it finishes, but a large ingestion can run for hours. Pass **callbacks** to follow it while it runs: the pipeline emits a small event every time a document enters or leaves a stage, plus one event when the run starts and one when it ends. Use them to update the status of an ingestion job in your database, show a percentage in a UI, or find out where documents pile up.
 
-Progress is reported **per stage and per document** (`preprocess`, `extraction`, `ingestion`, `annotation`, `entity_extraction`, plus the tabular batch). There are no events per page, chunk or node.
+Progress is reported **per stage and per document** (`preprocess`, `extraction`, `ingestion`, `annotation`, `entity_extraction`, `tabular`). Every file found under `input_raw` is a document: tabular files (CSV/XLSX/XLS), convertible documents, and files the pipeline cannot interpret, which are reported as `"skipped"`. There are no events per page, chunk or node.
 
 ```python
 from scinr.newton import (
@@ -92,9 +92,12 @@ The lifecycle of a run:
 
 ```
 pipeline_started
-├─ stage_started / stage_completed  (stage="tabular", if there are tabular files)
-├─ documents_discovered             (not on a stages=["tabular"] run, nor if the run fails before discovery)
-├─ for each document, in the order it starts:
+├─ documents_discovered             (not if the run fails before discovery)
+├─ for each skipped file (input_raw): document_started → document_finished(status="skipped")
+├─ stage_started                    (stage="tabular", the batch, if there are tabular files)
+│    for each tabular file: document_started → stage_started → stage_completed | stage_failed → document_finished
+├─ stage_completed                  (stage="tabular", the batch)
+├─ for each other document, in the order it starts:
 │    document_started
 │    ├─ stage_started → stage_completed | stage_failed   (for each stage it reaches)
 │    document_finished
@@ -110,10 +113,10 @@ Every event is a frozen `ProgressEvent` dataclass. Fields that do not apply to t
 | `kind` | When | Specific fields |
 |---|---|---|
 | `pipeline_started` | `run_pipeline()` was called (before validating its parameters). | `stages`: the stages requested. |
-| `documents_discovered` | The documents to process are known. | `total_documents`, `stages`: the document stages that will run (after `ingestion_input_dir` / `extraction_input_dir` removed the skipped ones). |
+| `documents_discovered` | The documents to process are known. Emitted once per run, before any document starts. | `total_documents`: with `input_raw`, every file found — tabular files, convertible documents and files that will be skipped (on a `stages=["tabular"]` run, only the tabular files). `stages`: the document stages that will run (after `ingestion_input_dir` / `extraction_input_dir` removed the skipped ones); includes `"tabular"` when there are tabular files. |
 | `document_started` | A document got a processing slot (`parallel_docs`). | `planned_stages`: the stages this document will run. |
-| `stage_started` | A document (or the tabular batch) enters `stage`. | `stage` |
-| `stage_completed` | A document (or the tabular batch) finished `stage` and moves on. | `stage`, `duration_s`, `metrics` |
+| `stage_started` | A document (or the tabular batch, without `document_index`) enters `stage`. | `stage` |
+| `stage_completed` | A document (or the tabular batch, without `document_index`) finished `stage` and moves on. | `stage`, `duration_s`, `metrics` |
 | `stage_failed` | A document stopped at `stage` because of a failure. | `stage`, `duration_s`, `metrics`, `error` |
 | `document_finished` | A document is done, whatever the outcome. | `status`, `stopped_at`, `error`, `duration_s` |
 | `pipeline_completed` | `run_pipeline()` is about to return its `PipelineResult`. | `success` (= `PipelineResult.success`), `duration_s` |
@@ -121,7 +124,7 @@ Every event is a frozen `ProgressEvent` dataclass. Fields that do not apply to t
 
 Identity fields:
 
-- `document_index` is the document's position in the discovered list. It is unique within one call and is the key to correlate the events of one document. It is `None` on pipeline events and on `stage="tabular"`.
+- `document_index` is the document's position in the discovered list. It is unique within one call and is the key to correlate the events of one document. With `input_raw`, tabular files come first (`0..T-1`), then the convertible documents, then the skipped files. It is `None` on pipeline events and on the **batch** `stage_started` / `stage_completed` of `stage="tabular"`; the per-file tabular events carry it.
 - `doc_path` is the document's path, stable for the whole life of the document — use it (with `tenant_id`) as the document's key in your own database.
 - `document_name` is the name predicted from the file until extraction (or ingestion) produces the real one; from that `stage_completed` on, it is the real `document_name`.
 - `tenant_id` is the document's tenant on document events (for an `extract-*.json` ingested without `tenant_id`, the tenant baked into the file), otherwise the `tenant_id` passed to `run_pipeline()`.
@@ -130,8 +133,8 @@ Identity fields:
 
 | Event | Keys |
 |---|---|
-| `stage_completed` / `stage_failed` of a document | `nodes_processed`, `nodes_failed` — the `DocumentResult` of that stage (`0` / `1` when an unexpected error stopped the stage) |
-| `stage_completed` with `stage="tabular"` | `total_processed`, `total_failed`, `documents` — from the tabular `StageResult` |
+| `stage_completed` / `stage_failed` of a document | `nodes_processed`, `nodes_failed` — the `DocumentResult` of that stage (`0` / `1` when an unexpected error stopped the stage). For a tabular file: tables written / sheets with errors. |
+| Batch `stage_completed` with `stage="tabular"` (no `document_index`) | `total_processed`, `total_failed`, `documents` — from the tabular `StageResult` |
 
 `document_finished.status`, checked in this order:
 
@@ -139,8 +142,9 @@ Identity fields:
 |---|---|
 | An unexpected error stopped the document (`UnitResult.fatal_error`) | `"failed"` (`error` = that error) |
 | The document stopped at a stage (`stopped_at` is set) | `"failed"` (`error` = the errors of that stage, joined with `"; "`) |
-| Preprocess found nothing to convert (unsupported format, skipped like `convert_one()` does) | `"skipped"` |
-| Some stage had `nodes_failed > 0` but the document kept going (`on_partial_failure="continue"` / `"warn"`) | `"partial"` |
+| A file the pipeline cannot interpret: an extension with no converter that is not tabular (`"unsupported format: .xyz"`), or a tabular file that cannot be read or has no data rows — e.g. an AppleDouble `__MACOSX/._name.csv` (see [Tabular files](#tabular-files)) | `"skipped"` (`error` = the reason) |
+| Preprocess found nothing to convert | `"skipped"` |
+| Some stage had `nodes_failed > 0` but the document kept going (`on_partial_failure="continue"` / `"warn"`), or a tabular file wrote some tables but some sheets failed | `"partial"` |
 | Otherwise | `"success"` |
 
 When `stage_failed` is emitted:
@@ -148,7 +152,8 @@ When `stage_failed` is emitted:
 - Preprocess, extraction and ingestion failures always stop the document: `stage_failed` for that stage, then `document_finished(status="failed", stopped_at=<stage>)`.
 - An annotation or entity-extraction stage with `nodes_failed > 0` emits `stage_failed` **only** with `on_partial_failure="abort"`. With `"continue"` / `"warn"` it emits `stage_completed` with `metrics["nodes_failed"] > 0`, and the document goes on.
 - An unexpected exception during a stage emits `stage_failed` for that stage with the exception message.
-- There is no `stage_failed` for the tabular batch: if `run_tabular_pipeline` raises, the run fails and you get `pipeline_failed`.
+- A tabular file that wrote no table (every sheet failed, or an unexpected error) emits `stage_failed` with `stage="tabular"`, then `document_finished(status="failed", stopped_at="tabular")`.
+- There is no `stage_failed` for the tabular **batch**: if `run_tabular_pipeline` raises, the run fails and you get `pipeline_failed`.
 
 Every `error` is passed through the same credential redaction as `PipelineResult` errors (connection-string passwords and configured secrets are replaced by `***`).
 
@@ -171,6 +176,26 @@ document_finished     status="success"
 
 To serialize an event, use `event.to_dict()`: it returns a plain `dict` with `timestamp` as an ISO 8601 string, `metrics` as a `dict` and the stage tuples as lists, ready for `json.dumps`. (`dataclasses.asdict()` cannot copy the read-only `metrics` mapping.)
 
+### Tabular files
+
+Tabular files (CSV/XLSX/XLS) run in a batch before the other documents, but each file is a document of its own, with `planned_stages=("tabular",)`:
+
+```
+stage_started         stage="tabular"                          # the batch, no document_index
+document_started      document_index=0  planned_stages=("tabular",)
+stage_started         document_index=0  stage="tabular"
+stage_completed       document_index=0  stage="tabular"  metrics={"nodes_processed": 3, "nodes_failed": 0}
+document_finished     document_index=0  status="success"
+document_started      document_index=1  planned_stages=("tabular",)
+stage_started         document_index=1  stage="tabular"
+document_finished     document_index=1  status="skipped"  error="unreadable tabular file: ..."
+stage_completed       stage="tabular"  metrics={"total_processed": 3, "total_failed": 0, "documents": 2}
+```
+
+- Each file is scanned first. A file that cannot be read (binary content, a corrupt workbook, `.xls`) or whose sheets have no data rows is `"skipped"`, with no stage outcome: nothing is stored and no `:Document` is created. Files are judged only by extension and content — there is no list of names or folders, so an AppleDouble `__MACOSX/._name.csv` is discovered as tabular and then skipped for its binary content.
+- `"success"`: every sheet was written. `"partial"`: some tables were written but some sheets failed (`stage_completed` with `nodes_failed > 0`). `"failed"`: no table was written (`stage_failed`).
+- A file with a converter but garbage content (e.g. `__MACOSX/._report.pdf`) cannot be told apart without opening it: it goes to preprocess and ends as `"failed"` there.
+
 ---
 
 ## The built-in `ProgressTracker`
@@ -186,7 +211,7 @@ To serialize an event, use `event.to_dict()`: it returns a plain `dict` with `ti
 | `documents_pending` / `_running` / `_succeeded` / `_partial` / `_failed` / `_skipped` | Document counters (`documents_pending` is `0` while `total_documents` is unknown) |
 | `running_by_stage` | How many documents are in each stage right now |
 | `completed_by_stage` / `failed_by_stage` | How many documents completed / failed each stage |
-| `tabular` | `None`, `"running"`, `"completed"` or `"completed_with_errors"` |
+| `tabular` | State of the tabular batch: `None`, `"running"`, `"completed"` or `"completed_with_errors"`. Each tabular file is also a document in the counters. |
 | `percent` | Overall document progress, 0–100, one decimal |
 | `documents` | A `DocumentProgress` for every started document, keyed by `document_index` |
 | `error` | The error of `pipeline_failed`, otherwise `None` |
@@ -197,7 +222,7 @@ How `percent` is computed:
 
 - A finished document counts `1` (whatever its status), a running one `completed_stages / planned_stages`, a pending one `0`. The sum is divided by `total_documents`.
 - Before `documents_discovered`, or with zero documents, `percent` is `0.0` while the run is going and `100.0` once it has ended.
-- The tabular batch does not count: follow it with the `tabular` field.
+- Every discovered document counts, tabular files and skipped files included (a skipped file counts as finished). The `tabular` field still follows the tabular batch as a whole.
 
 Properties:
 
@@ -292,7 +317,7 @@ class JobStatusUpdater(AsyncProgressCallback):
         )
 
     async def on_stage_started(self, event: ProgressEvent) -> None:
-        if event.document_index is None:          # the tabular batch
+        if event.document_index is None:          # the tabular batch (each file has its own events)
             return
         await self.docs.update_one(
             {"job_id": self.job_id, "doc_path": event.doc_path},

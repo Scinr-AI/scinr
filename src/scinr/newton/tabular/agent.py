@@ -9,6 +9,7 @@ from neo4j import Driver
 
 from scinr.newton.config import get_config
 from scinr.newton.tabular.graph import tabular_graph
+from scinr.newton.tabular.reader import SheetScan
 from scinr.newton.tabular.state import TabularState
 from scinr.newton.utils.tenancy import tenant_key
 
@@ -26,6 +27,8 @@ async def run_tabular_agent(
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
+    delimiter: str | None = None,
+    scans: list[SheetScan] | None = None,
 ) -> dict:
     """Run the full tabular pipeline for one CSV or XLSX file.
 
@@ -50,6 +53,12 @@ async def run_tabular_agent(
     created_by_user_id, job_id : Optional caller-supplied provenance metadata
         written verbatim onto the leaf :Document node and every ancestor
         folder-parent node (always SET; null when omitted).
+    delimiter : CSV field delimiter; ``None`` sniffs it from the file. Ignored for
+        XLSX/XLS.
+    scans : Result of ``scan_tabular_file(file_path, delimiter)`` when the caller
+        already scanned the file (``run_tabular_pipeline`` does, to reject empty or
+        unreadable files before creating the Document); ``load_sheets`` then reuses
+        it instead of reading the file again. ``None`` scans it in ``load_sheets``.
     """
     from scinr.newton.ingest.nodes import (
         handle_versioning,
@@ -115,6 +124,8 @@ async def run_tabular_agent(
         "update_mode": update_mode,
         "resolved_version": resolved_version,
         "raw_file_id": raw_file_id,
+        "delimiter": delimiter,
+        "prefetched_scans": scans,
         "sheets": [],
         "current_sheet_index": 0,
         "current_sheet": None,
@@ -150,11 +161,27 @@ def run_tabular_agent_sync(
     resolved_version: int,
     update_mode: bool = False,
     raw_file_id: str = "",
+    tenant_id: str | None = None,
+    created_by_user_id: str | None = None,
+    job_id: str | None = None,
+    delimiter: str | None = None,
+    scans: list[SheetScan] | None = None,
 ) -> dict:
     """Synchronous wrapper around run_tabular_agent."""
     return asyncio.run(
         run_tabular_agent(
-            file_path, document_name, doc_path, driver, resolved_version, update_mode, raw_file_id
+            file_path,
+            document_name,
+            doc_path,
+            driver,
+            resolved_version,
+            update_mode,
+            raw_file_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
+            delimiter=delimiter,
+            scans=scans,
         )
     )
 

@@ -88,9 +88,11 @@ class ProgressEvent:
         job_id: The ``job_id`` passed to ``run_pipeline()``.
         tenant_id: The document's tenant for document events, otherwise the
             ``tenant_id`` passed to ``run_pipeline()`` (``None`` = public).
-        document_index: Position of the document in the list of discovered documents;
-            unique within one ``run_pipeline()`` call. ``None`` for pipeline events
-            and for ``stage="tabular"``.
+        document_index: Position of the document in the list of discovered documents
+            (tabular files, convertible documents and skipped files alike); unique
+            within one ``run_pipeline()`` call. ``None`` for pipeline events and for
+            the **batch** ``stage_started`` / ``stage_completed`` events of
+            ``stage="tabular"``.
         doc_path: Path of the document; stable for the whole life of the document.
         document_name: Current document name — the name predicted from the file at
             first, the real ``document_name`` once extraction/ingestion produced it.
@@ -104,9 +106,10 @@ class ProgressEvent:
         total_documents: ``documents_discovered``: number of documents to process.
         duration_s: Seconds spent in the stage / document / pipeline that just ended.
         metrics: ``stage_completed`` / ``stage_failed``: counters of the stage
-            (``nodes_processed`` / ``nodes_failed`` for document stages;
-            ``total_processed`` / ``total_failed`` / ``documents`` for
-            ``stage="tabular"``). Read-only.
+            (``nodes_processed`` / ``nodes_failed`` for document stages — for a
+            tabular file, tables written / sheets with errors;
+            ``total_processed`` / ``total_failed`` / ``documents`` for the batch
+            ``stage="tabular"`` event without ``document_index``). Read-only.
         status: ``document_finished``: ``"success"``, ``"partial"``, ``"failed"`` or
             ``"skipped"``.
         stopped_at: ``document_finished``: stage where the document stopped because
@@ -360,8 +363,10 @@ class ProgressSnapshot:
         failed_by_stage: Number of documents that failed at each stage.
         tabular: State of the tabular batch: ``"running"``, ``"completed"``,
             ``"completed_with_errors"``, or ``None`` when no tabular files are processed.
-        percent: Overall document progress, 0-100, rounded to one decimal. The
-            tabular batch does not count towards it.
+            Each tabular file is also tracked as a document of its own.
+        percent: Overall document progress, 0-100, rounded to one decimal. Every
+            discovered document counts: tabular files, convertible documents and
+            skipped files (which count as finished).
         documents: Progress of every started document, keyed by ``document_index``.
         error: Error message when the run raised, otherwise ``None``.
     """
@@ -479,7 +484,7 @@ class ProgressTracker:
                     started_at=event.timestamp,
                 )
             elif kind in ("stage_started", "stage_completed", "stage_failed"):
-                if event.stage == "tabular":
+                if event.stage == "tabular" and event.document_index is None:
                     self._apply_tabular(event)
                     return
                 doc = self._doc(event)
