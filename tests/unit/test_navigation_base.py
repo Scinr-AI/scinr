@@ -58,6 +58,8 @@ def test_renamed_methods_present_and_old_gone() -> None:
     assert hasattr(GraphNavigator, "get_outgoing_model_instances")
     assert hasattr(GraphNavigator, "get_document_model_profile")
     assert hasattr(GraphNavigator, "get_catalog_graph")
+    assert hasattr(GraphNavigator, "list_model_classes_present")
+    assert hasattr(GraphNavigator, "get_catalog_graph_in_use")
     # removed
     assert not hasattr(GraphNavigator, "get_document_children")
     assert not hasattr(GraphNavigator, "iter_document_descendants")

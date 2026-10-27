@@ -594,11 +594,12 @@ A lookup by id / uid is a seek on these constraints, as long as the pattern carr
 
 | Index | Properties | Serves |
 |---|---|---|
-| `idx_model_instance_tenant_model_class` | `ModelInstance(tenant_id, model_class)` | `get_model_instances_by_class` / `count_model_instances_by_class`, properties by class |
+| `idx_model_instance_tenant_model_class` | `ModelInstance(tenant_id, model_class)` | `get_model_instances_by_class` / `count_model_instances_by_class`, properties by class, `list_model_classes_present` / `get_catalog_graph_in_use` |
+| `idx_extraction_result_tenant_model_class` | `ExtractionResult(tenant_id, model_class)` | `list_model_classes_present` / `get_catalog_graph_in_use` (models whose data is only on `ExtractionResult`) |
 | `idx_document_tenant_latest` | `Document(tenant_id, latest)` | `get_documents`, `list_root_documents` / `count_root_documents` with `latest_only`, graph summary |
 | `idx_document_tenant_name` | `Document(tenant_id, name)` | lookups by name within a tenant (e.g. the `replaces=` resolution) |
 | `idx_structure_node_tenant_role` | `StructureNode(tenant_id, role)` | `find_structure_nodes(role=...)` |
-| `idx_labeled_entity_tenant_label` | `LabeledEntity(tenant_id, label)` | `get_labeled_entities(label=...)` |
+| `idx_labeled_entity_tenant_label` | `LabeledEntity(tenant_id, label)` | `get_labeled_entities(label=...)`, `get_catalog_graph_in_use` |
 
 The single `tenant_id` indexes are kept: a query over all tenants (`tenant_id=None`) has no tenant predicate and cannot use a composite index.
 

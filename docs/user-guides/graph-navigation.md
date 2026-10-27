@@ -141,6 +141,9 @@ await acme.execute_raw("MATCH (n) RETURN n")     # NavigationError — cannot be
 
 Catalogue methods (`list_catalog_models`, `get_catalog_graph`, `list_themes`,
 `list_relationship_types`, `list_node_labels`) are global and take no scope.
+`list_model_classes_present` and `get_catalog_graph_in_use` are the exception: they
+read the catalogue filtered by the data in the scope, so they take it (see
+[Catalogue in use by a tenant](#catalogue-in-use-by-a-tenant)).
 
 ### How the filters behave
 
@@ -467,7 +470,9 @@ comes back as a partial `Triple` (`predicate` / `object` are `None`).
 ```python
 models   = await nav.list_catalog_models(include_fields=True)
 catalog  = await nav.get_catalog_graph()                  # models + declared relationships between them
-in_use   = await nav.list_model_classes_in_use()
+in_use   = await nav.list_model_classes_in_use()          # count = model_instances + extraction_results per model_class
+present  = await nav.list_model_classes_present()         # catalogue models with data (existence check)
+used     = await nav.get_catalog_graph_in_use()           # the catalogue graph limited to them
 roles    = await nav.list_node_roles()
 themes   = await nav.list_themes()
 labels   = await nav.list_node_labels()
@@ -478,6 +483,35 @@ summary  = await nav.get_graph_summary()
 `list_relationship_types(structural_only=True)` (default) omits the thousands of
 one-off normalised `Triple` predicate types, keeping model-instance
 cross-references, entity `field_relationships`, and catalog declarations.
+
+### Catalogue in use by a tenant
+
+`get_catalog_graph()` returns the whole catalogue, the same for every tenant. Two
+methods return only the part with data in the scope:
+
+- `list_model_classes_present(model_classes=None)`: the names of the
+  `:CatalogModel` nodes with data, sorted (optionally only among `model_classes`).
+- `get_catalog_graph_in_use(include_fields=True, include_relationships=True)`: the
+  same `CatalogGraph` as `get_catalog_graph()`, keeping only those models, the
+  entity labels with at least one `:LabeledEntity` in the scope, and the declared
+  relationships whose two ends are kept.
+
+A model has data when at least one `:ModelInstance` **or** one `:ExtractionResult`
+in the scope has it as `model_class`: a primary model whose fields are all scalars
+only has `:ExtractionResult` nodes (e.g. `Triple`). `list_model_classes_in_use()`
+counts with the same criterion.
+
+Both are existence checks, one per catalogue model or label, served by the
+`(tenant_id, model_class)` and `(tenant_id, label)` indexes: their cost depends on
+the size of the catalogue, not of the tenant. They do not count; use
+`list_model_classes_in_use()` for counts.
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+names = await acme.list_model_classes_present()           # e.g. ["BatchAnalysis", "Triple", ...]
+graph = await acme.get_catalog_graph_in_use(include_fields=False)
+[m.name for m in graph.models], graph.entity_labels
+```
 
 ---
 

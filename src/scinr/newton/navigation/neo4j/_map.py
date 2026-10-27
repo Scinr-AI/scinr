@@ -276,10 +276,14 @@ def graph_node(n: dict[str, Any]) -> GraphNode:
 
 
 def model_class_stat(row: dict[str, Any], *, kind: str | None = None) -> ModelClassStat:
+    mi = row.get("model_instances")
+    er = row.get("extraction_results")
     return ModelClassStat(
         raw=dict(row),
         model_class=row.get("model_class") or row.get("name") or "",
         count=int(row.get("count", 0) or 0),
+        model_instances=int(mi) if mi is not None else None,
+        extraction_results=int(er) if er is not None else None,
         kind=kind,  # type: ignore[arg-type]
     )
 

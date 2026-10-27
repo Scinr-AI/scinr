@@ -408,10 +408,17 @@ class ThemeRef(_Base):
 
 
 class ModelClassStat(_Base):
-    """Count of ``:ModelInstance`` / decision nodes for one ``model_class``."""
+    """Count of the nodes / decisions of one ``model_class``.
+
+    For :meth:`~GraphNavigator.list_model_classes_in_use` (``kind="in_use"``),
+    ``count`` is ``model_instances + extraction_results``; the decision lists
+    (``matched`` / ``complementary``) leave both breakdown fields ``None``.
+    """
 
     model_class: str
     count: int
+    model_instances: int | None = None
+    extraction_results: int | None = None
     kind: Literal["in_use", "matched", "complementary"] | None = None
 
 
