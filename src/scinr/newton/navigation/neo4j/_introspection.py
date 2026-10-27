@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from scinr.newton.exceptions import NavigationError
 from scinr.newton.navigation.models import (
     CatalogGraph,
     CatalogModelRef,
+    CatalogPresence,
     CatalogRelation,
     DocumentRef,
     GraphSummary,
@@ -92,7 +94,7 @@ class _IntrospectionMixin(_Neo4jRuntime):
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return f"EXISTS {{ MATCH ({inner}:{label} {{{key}: {outer}}}){where} }}"
 
-    def _model_present_in_scope(self, sc: Scope, params: dict[str, Any]) -> str:
+    def _model_extracted_in_scope(self, sc: Scope, params: dict[str, Any]) -> str:
         """Predicate on ``cm``: a ``:ModelInstance`` or an ``:ExtractionResult`` in the scope.
 
         ``:ModelInstance`` stores its provenance as arrays, ``:ExtractionResult``
@@ -105,6 +107,35 @@ class _IntrospectionMixin(_Neo4jRuntime):
             + self._present_in_scope("cm.name", "ExtractionResult", "model_class", "er", "scalar", sc, params)
             + ")"
         )
+
+    def _model_annotated_in_scope(self, sc: Scope, params: dict[str, Any]) -> str:
+        """Predicate on ``cm``: a ``:ModelDecision`` in the scope matched it, as primary or complementary."""
+        clauses: list[str] = []
+        self._scope_where("md", clauses, params, sc, "scalar")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return (
+            f"(EXISTS {{ MATCH (md:ModelDecision)-[:MATCHED_MODEL]->(cm){where} }}"
+            f" OR EXISTS {{ MATCH (md:ModelDecision)-[:HAS_COMPLEMENTARY_MATCH]->(:ComplementaryMatch)"
+            f"-[:REFERS_TO_MODEL]->(cm){where} }})"
+        )
+
+    def _model_present_in_scope(
+        self, sc: Scope, params: dict[str, Any], presence: CatalogPresence
+    ) -> str:
+        """Predicate on ``cm`` for *presence* (see :meth:`list_model_classes_present`)."""
+        if presence == "model_instances":
+            return self._model_extracted_in_scope(sc, params)
+        if presence == "annotated":
+            return self._model_annotated_in_scope(sc, params)
+        if presence == "both":
+            return (
+                "("
+                + self._model_extracted_in_scope(sc, params)
+                + " OR "
+                + self._model_annotated_in_scope(sc, params)
+                + ")"
+            )
+        raise NavigationError(f"unknown presence: {presence!r}")
 
     async def list_catalog_models(
         self, *, include_fields: bool = False
@@ -129,20 +160,23 @@ class _IntrospectionMixin(_Neo4jRuntime):
         self,
         *,
         model_classes: Sequence[str] | None = None,
+        presence: CatalogPresence = "both",
         tenant_id: str | None = None,
         include_public: bool = False,
         created_by_user_id: str | Sequence[str] | None = None,
         job_id: str | Sequence[str] | None = None,
     ) -> list[str]:
         sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        params: dict[str, Any] = {}
+        # Built before the empty-list shortcut so an unknown *presence* always raises.
+        present = self._model_present_in_scope(sc, params, presence)
         if model_classes is not None and not model_classes:
             return []
-        params: dict[str, Any] = {}
         clauses: list[str] = []
         if model_classes is not None:
             clauses.append("cm.name IN $model_classes")
             params["model_classes"] = list(model_classes)
-        clauses.append(self._model_present_in_scope(sc, params))
+        clauses.append(present)
         rows = await self._read(
             f"MATCH (cm:CatalogModel) WHERE {' AND '.join(clauses)} "
             "RETURN cm.name AS name ORDER BY name",
@@ -155,6 +189,7 @@ class _IntrospectionMixin(_Neo4jRuntime):
         *,
         include_fields: bool = True,
         include_relationships: bool = True,
+        presence: CatalogPresence = "both",
         tenant_id: str | None = None,
         include_public: bool = False,
         created_by_user_id: str | Sequence[str] | None = None,
@@ -163,7 +198,9 @@ class _IntrospectionMixin(_Neo4jRuntime):
         sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
         model_params: dict[str, Any] = {}
         models = await self._catalog_model_refs(
-            include_fields, where=self._model_present_in_scope(sc, model_params), params=model_params
+            include_fields,
+            where=self._model_present_in_scope(sc, model_params, presence),
+            params=model_params,
         )
         label_params: dict[str, Any] = {}
         label_exists = self._present_in_scope(
@@ -188,7 +225,7 @@ class _IntrospectionMixin(_Neo4jRuntime):
                 if kept(r.source, r.source_kind) and kept(r.target, r.target_kind)
             ]
         return CatalogGraph(
-            raw={"models": len(models), "relationships": len(relationships)},
+            raw={"models": len(models), "relationships": len(relationships), "presence": presence},
             models=models,
             entity_labels=entity_labels,
             relationships=relationships,

@@ -400,6 +400,10 @@ class CatalogGraph(_Base):
     relationships: list[CatalogRelation] = Field(default_factory=list)
 
 
+#: Which evidence makes a catalogue model "present" in a scope.
+CatalogPresence = Literal["model_instances", "annotated", "both"]
+
+
 class ThemeRef(_Base):
     """A ``:Theme`` node, or a distinct ``theme`` value in use."""
 
@@ -585,7 +589,7 @@ __all__ = [
     "ExtractionResultRef", "ExtractionResultWithNode",
     "ModelInstanceRef", "ModelInstanceTree", "ModelInstanceRelation",
     "LabeledEntityRef", "EntityRelation", "Triple",
-    "CatalogFieldRef", "CatalogModelRef", "CatalogRelation", "CatalogGraph", "ThemeRef",
+    "CatalogFieldRef", "CatalogModelRef", "CatalogRelation", "CatalogGraph", "CatalogPresence", "ThemeRef",
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
     "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",

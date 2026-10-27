@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -60,6 +61,10 @@ def test_renamed_methods_present_and_old_gone() -> None:
     assert hasattr(GraphNavigator, "get_catalog_graph")
     assert hasattr(GraphNavigator, "list_model_classes_present")
     assert hasattr(GraphNavigator, "get_catalog_graph_in_use")
+    for name in ("list_model_classes_present", "get_catalog_graph_in_use"):
+        presence = inspect.signature(getattr(GraphNavigator, name)).parameters["presence"]
+        assert presence.kind is inspect.Parameter.KEYWORD_ONLY
+        assert presence.default == "both"
     # removed
     assert not hasattr(GraphNavigator, "get_document_children")
     assert not hasattr(GraphNavigator, "iter_document_descendants")

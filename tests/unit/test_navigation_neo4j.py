@@ -248,6 +248,11 @@ async def test_close_never_closes_a_driver_it_did_not_create() -> None:
 
 _MI_ACME = "EXISTS { MATCH (mi:ModelInstance {model_class: cm.name}) WHERE mi.tenant_id = $scope_tenant }"
 _ER_ACME = "EXISTS { MATCH (er:ExtractionResult {model_class: cm.name}) WHERE er.tenant_id = $scope_tenant }"
+_MD_MATCHED_ACME = "EXISTS { MATCH (md:ModelDecision)-[:MATCHED_MODEL]->(cm) WHERE md.tenant_id = $scope_tenant }"
+_MD_COMPLEMENTARY_ACME = (
+    "EXISTS { MATCH (md:ModelDecision)-[:HAS_COMPLEMENTARY_MATCH]->(:ComplementaryMatch)"
+    "-[:REFERS_TO_MODEL]->(cm) WHERE md.tenant_id = $scope_tenant }"
+)
 _CATALOG_ALL_FIELDS = (
     "MATCH (cm:CatalogModel) "
     "OPTIONAL MATCH (cm)-[hf:HAS_FIELD]->(f:ModelField) "
@@ -272,12 +277,13 @@ async def test_list_model_classes_present_tenant_query() -> None:
         "RETURN 1 AS ok": [{"ok": 1}],
         "RETURN cm.name AS name": [{"name": "A"}, {"name": "Triple"}],
     }))
-    out = await nav.list_model_classes_present(tenant_id="acme")
+    out = await nav.list_model_classes_present(tenant_id="acme", presence="model_instances")
     assert out == ["A", "Triple"]
     q, p = _query_with(drv, "RETURN cm.name AS name ORDER BY name")
     # The OR sits inside the WHERE: a model present only through the
     # ExtractionResult branch is not dropped.
     assert f"MATCH (cm:CatalogModel) WHERE ({_MI_ACME} OR {_ER_ACME}) RETURN" in q
+    assert "ModelDecision" not in q
     assert p["scope_tenant"] == "acme"
     assert "model_classes" not in p
 
@@ -299,7 +305,9 @@ async def test_list_model_classes_present_include_public_and_provenance() -> Non
 
 async def test_list_model_classes_present_model_classes_filter() -> None:
     nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
-    await nav.list_model_classes_present(model_classes=["A"], tenant_id="acme")
+    await nav.list_model_classes_present(
+        model_classes=["A"], tenant_id="acme", presence="model_instances"
+    )
     q, p = _query_with(drv, "RETURN cm.name AS name")
     assert "WHERE cm.name IN $model_classes AND (EXISTS" in q
     assert p["model_classes"] == ["A"]
@@ -309,6 +317,61 @@ async def test_list_model_classes_present_empty_list_runs_no_query() -> None:
     nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
     assert await nav.list_model_classes_present(model_classes=[], tenant_id="acme") == []
     assert not _has_query(drv, "CatalogModel")
+
+
+async def test_list_model_classes_present_annotated_query() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.list_model_classes_present(tenant_id="acme", presence="annotated")
+    q, p = _query_with(drv, "RETURN cm.name AS name")
+    assert (
+        f"MATCH (cm:CatalogModel) WHERE ({_MD_MATCHED_ACME} OR {_MD_COMPLEMENTARY_ACME}) RETURN"
+        in q
+    )
+    assert "ModelInstance" not in q and "ExtractionResult" not in q
+    assert p["scope_tenant"] == "acme"
+
+
+async def test_list_model_classes_present_defaults_to_both() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.list_model_classes_present(tenant_id="acme")
+    default_q, _ = _query_with(drv, "RETURN cm.name AS name")
+    assert (
+        f"WHERE (({_MI_ACME} OR {_ER_ACME}) OR ({_MD_MATCHED_ACME} OR {_MD_COMPLEMENTARY_ACME})) RETURN"
+        in default_q
+    )
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.list_model_classes_present(tenant_id="acme", presence="both")
+    assert _query_with(drv, "RETURN cm.name AS name")[0] == default_q
+
+
+async def test_list_model_classes_present_annotated_scope_predicates() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.list_model_classes_present(
+        tenant_id="acme", include_public=True, created_by_user_id="u1", job_id="j1",
+        presence="annotated",
+    )
+    q, p = _query_with(drv, "RETURN cm.name AS name")
+    assert q.count("md.tenant_id IN $scope_tenants") == 2
+    assert q.count("md.created_by_user_id IN $scope_user_ids") == 2
+    assert q.count("md.job_id IN $scope_job_ids") == 2
+    assert p["scope_tenants"] == ["acme", "__public__"]
+    assert p["scope_user_ids"] == ["u1"] and p["scope_job_ids"] == ["j1"]
+
+
+async def test_list_model_classes_present_annotated_unscoped() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.list_model_classes_present(presence="annotated")
+    q, _ = _query_with(drv, "RETURN cm.name AS name")
+    assert "EXISTS { MATCH (md:ModelDecision)-[:MATCHED_MODEL]->(cm) }" in q
+    assert "-[:REFERS_TO_MODEL]->(cm) }" in q
+    assert "WHERE" in q and " WHERE md." not in q
+
+
+@pytest.mark.parametrize("model_classes", [None, []])
+async def test_list_model_classes_present_unknown_presence(model_classes) -> None:
+    nav, _ = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    with pytest.raises(NavigationError, match="unknown presence"):
+        await nav.list_model_classes_present(model_classes=model_classes, presence="otro")
 
 
 def _in_use_responder(**overrides):
@@ -336,11 +399,11 @@ def _in_use_responder(**overrides):
 
 async def test_get_catalog_graph_in_use_filters_relationships() -> None:
     nav, drv = _mk(_in_use_responder())
-    g = await nav.get_catalog_graph_in_use(tenant_id="acme")
+    g = await nav.get_catalog_graph_in_use(tenant_id="acme", presence="model_instances")
     assert [m.name for m in g.models] == ["A", "B"]
     assert g.entity_labels == ["Manufacturer"]
     assert [(r.source, r.target) for r in g.relationships] == [("A", "B"), ("Manufacturer", "B")]
-    assert g.raw == {"models": 2, "relationships": 2}
+    assert g.raw == {"models": 2, "relationships": 2, "presence": "model_instances"}
     q, p = _query_with(drv, "MATCH (cm:CatalogModel)")
     assert f"MATCH (cm:CatalogModel) WHERE ({_MI_ACME} OR {_ER_ACME}) OPTIONAL MATCH" in q
     assert "HAS_FIELD" in q and p["scope_tenant"] == "acme"
@@ -361,6 +424,45 @@ async def test_get_catalog_graph_in_use_without_fields_or_relationships() -> Non
     q, _ = _query_with(drv, "MATCH (cm:CatalogModel)")
     assert "HAS_FIELD" not in q
     assert not _has_query(drv, "MATCH (a)-[r]->(b)")
+
+
+async def test_get_catalog_graph_in_use_annotated() -> None:
+    nav, drv = _mk(_in_use_responder())
+    g = await nav.get_catalog_graph_in_use(tenant_id="acme", presence="annotated")
+    assert g.raw["presence"] == "annotated"
+    q, _ = _query_with(drv, "MATCH (cm:CatalogModel)")
+    assert f"WHERE ({_MD_MATCHED_ACME} OR {_MD_COMPLEMENTARY_ACME}) OPTIONAL MATCH" in q
+    assert "ModelInstance" not in q
+    # Labels do not depend on presence: still LabeledEntity in the scope.
+    q, _ = _query_with(drv, "MATCH (el:EntityLabel)")
+    assert (
+        "EXISTS { MATCH (le:LabeledEntity {label: el.label}) WHERE le.tenant_id = $scope_tenant }"
+        in q
+    )
+    assert "ModelDecision" not in q
+
+
+async def test_get_catalog_graph_in_use_defaults_to_both() -> None:
+    nav, drv = _mk(_in_use_responder())
+    g = await nav.get_catalog_graph_in_use(tenant_id="acme")
+    assert g.raw["presence"] == "both"
+    q, _ = _query_with(drv, "MATCH (cm:CatalogModel)")
+    assert _MI_ACME in q and _ER_ACME in q
+    assert _MD_MATCHED_ACME in q and _MD_COMPLEMENTARY_ACME in q
+
+
+async def test_get_catalog_graph_in_use_unknown_presence() -> None:
+    nav, _ = _mk(_in_use_responder())
+    with pytest.raises(NavigationError, match="unknown presence"):
+        await nav.get_catalog_graph_in_use(presence="otro")
+
+
+async def test_scoped_navigator_passes_presence_through() -> None:
+    nav, drv = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    await nav.scoped(tenant_id="acme").list_model_classes_present(presence="annotated")
+    q, p = _query_with(drv, "RETURN cm.name AS name")
+    assert f"WHERE ({_MD_MATCHED_ACME} OR {_MD_COMPLEMENTARY_ACME}) RETURN" in q
+    assert p["scope_tenant"] == "acme"
 
 
 async def test_catalog_queries_unchanged() -> None:

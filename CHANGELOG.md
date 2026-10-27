@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-10-27
+
+A catalogue model can now be present in a scope because documents were classified
+with it, not only because data was extracted for it.
+
+### Added
+- **`presence` argument** (`"model_instances"`, `"annotated"`, `"both"`) on
+  `GraphNavigator.list_model_classes_present()` and `get_catalog_graph_in_use()`,
+  and the **`CatalogPresence`** type in `scinr.newton.navigation`. `"annotated"`
+  counts a catalogue model when a `:ModelDecision` in the scope matched it, as
+  primary model (`MATCHED_MODEL`) or complementary model, so pipelines that stop at
+  annotation report the models they use. An unknown value raises `NavigationError`.
+- `get_catalog_graph_in_use()` reports the `presence` used in `CatalogGraph.raw`.
+
+### Changed
+- **`list_model_classes_present()` and `get_catalog_graph_in_use()` default to
+  `presence="both"`**: they now also return annotated models without extracted
+  data. Pass `presence="model_instances"` for the 0.4.4 behaviour. Entity labels
+  still come only from `:LabeledEntity`.
+
 ## [0.4.4] - 2026-10-27
 
 The model catalogue can now be read for one tenant: only the models and entity
