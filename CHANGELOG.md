@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-10-27
+
+A catalogue model can now be present in a scope because documents were classified
+with it, not only because data was extracted for it.
+
+### Added
+- **`presence` argument** (`"model_instances"`, `"annotated"`, `"both"`) on
+  `GraphNavigator.list_model_classes_present()` and `get_catalog_graph_in_use()`,
+  and the **`CatalogPresence`** type in `scinr.newton.navigation`. `"annotated"`
+  counts a catalogue model when a `:ModelDecision` in the scope matched it, as
+  primary model (`MATCHED_MODEL`) or complementary model, so pipelines that stop at
+  annotation report the models they use. An unknown value raises `NavigationError`.
+- `get_catalog_graph_in_use()` reports the `presence` used in `CatalogGraph.raw`.
+
+### Changed
+- **`list_model_classes_present()` and `get_catalog_graph_in_use()` default to
+  `presence="both"`**: they now also return annotated models without extracted
+  data. Pass `presence="model_instances"` for the 0.4.4 behaviour. Entity labels
+  still come only from `:LabeledEntity`.
+
+## [0.4.4] - 2026-10-27
+
+The model catalogue can now be read for one tenant: only the models and entity
+labels with data in the scope.
+
+### Added
+- **`GraphNavigator.list_model_classes_present()`**: the catalogue model names with
+  data in the scope: at least one `:ModelInstance` or `:ExtractionResult` with that
+  `model_class` (optionally only `model_classes`). An existence check per model,
+  served by the `(tenant_id, model_class)` indexes: its cost depends on the size of
+  the catalogue, not of the tenant. It does not count; `list_model_classes_in_use()`
+  does.
+- **`GraphNavigator.get_catalog_graph_in_use()`**: the `CatalogGraph` of
+  `get_catalog_graph()` keeping only the models and entity labels with data in the
+  scope and the declared relationships between them. Takes the scope filters, so a
+  `nav.scoped(...)` view applies its tenant.
+- **Index `idx_extraction_result_tenant_model_class`** on
+  `ExtractionResult(tenant_id, model_class)`, created by `setup_schema()`. Neo4j
+  builds it in the background on an existing graph.
+- **`ModelClassStat.model_instances` / `ModelClassStat.extraction_results`**
+  (optional): the breakdown of `count` returned by `list_model_classes_in_use()`.
+  `None` in the annotation decision lists (`matched` / `complementary`).
+
+### Changed
+- **`list_model_classes_in_use()` also counts `:ExtractionResult` nodes.** A primary
+  model whose fields are all scalars has no `:ModelInstance`, so it was missing
+  (e.g. `Triple`). `count` is now `model_instances + extraction_results`, so it grows
+  for models that have both; ties are ordered by `model_class`. Values without a
+  `:CatalogModel` that only exist on `:ExtractionResult` (e.g. `GenericTabularRow`)
+  now appear too.
+
+`list_catalog_models()` and `get_catalog_graph()` do not change: they still read the
+whole catalogue and take no scope.
+
 ## [0.4.3] - 2026-10-21
 
 Progress tracking now covers every file under `input_raw`, tabular files

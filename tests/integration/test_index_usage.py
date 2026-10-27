@@ -219,6 +219,14 @@ _NAVIGATION_CASES = [
     ("get_model_instance", {"uid": "abc", "tenant_id": TENANT},
      "mi", "ModelInstance", ("uid",)),
     ("get_info_unit", {"uid": "abc", "tenant_id": TENANT}, "u", "InfoUnit", ("uid",)),
+    # Catalogue in use: one existence check per catalogue model / label, each a
+    # seek on (tenant_id, model_class | label) inside a correlated EXISTS
+    ("list_model_classes_present", {"tenant_id": TENANT, "include_public": True},
+     "mi", "ModelInstance", ("tenant_id", "model_class")),
+    ("list_model_classes_present", {"tenant_id": TENANT, "include_public": True},
+     "er", "ExtractionResult", ("tenant_id", "model_class")),
+    ("get_catalog_graph_in_use", {"tenant_id": TENANT},
+     "le", "LabeledEntity", ("tenant_id", "label")),
 ]
 
 
@@ -229,7 +237,11 @@ _NAVIGATION_CASES = [
 )
 async def test_navigation_query_can_use_index(neo4j_env, method, kwargs, alias, label, props):
     driver, database = neo4j_env
-    cypher, params = (await _captured(method, **kwargs))[0]
+    # The first captured query with the (alias:Label …) pattern: some methods run
+    # more than one (e.g. get_catalog_graph_in_use reads models, then labels).
+    cypher, params = next(
+        (q, p) for q, p in await _captured(method, **kwargs) if f"({alias}:{label}" in q
+    )
     _explain(driver, database, _with_hint(cypher, alias, label, props), params)
 
 

@@ -57,6 +57,7 @@ def test_composite_tenant_indexes_are_declared():
     names = {name for name, _ in _REGULAR_INDEXES}
     for expected in (
         "idx_model_instance_tenant_model_class",
+        "idx_extraction_result_tenant_model_class",
         "idx_document_tenant_latest",
         "idx_document_tenant_name",
         "idx_structure_node_tenant_role",

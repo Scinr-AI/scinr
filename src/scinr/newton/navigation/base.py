@@ -77,6 +77,7 @@ from scinr.newton.navigation.models import (
     AnnotationCoverage,
     CatalogGraph,
     CatalogModelRef,
+    CatalogPresence,
     DocumentModelProfile,
     DocumentRef,
     DocumentStats,
@@ -1499,7 +1500,89 @@ class GraphNavigator(ABC):
         created_by_user_id: str | Sequence[str] | None = None,
         job_id: str | Sequence[str] | None = None,
     ) -> list[ModelClassStat]:
-        """Return each distinct ``ModelInstance.model_class`` with its count."""
+        """Return each distinct ``model_class`` of ``:ModelInstance`` and
+        ``:ExtractionResult`` nodes in the scope, with ``count`` (both) and the
+        breakdown ``model_instances`` / ``extraction_results``.
+
+        A primary model whose fields are all scalars only has ``:ExtractionResult``
+        nodes, so it appears with ``model_instances=0``.
+        """
+
+    @abstractmethod
+    async def list_model_classes_present(
+        self,
+        *,
+        model_classes: Sequence[str] | None = None,
+        presence: CatalogPresence = "both",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        """Return the ``:CatalogModel`` names present in the scope.
+
+        What makes a model present depends on *presence*:
+
+        * ``"model_instances"``: extracted data — at least one ``:ModelInstance``
+          **or** one ``:ExtractionResult`` in the scope has it as ``model_class`` (a
+          primary model whose fields are all scalars only has ``:ExtractionResult``
+          nodes).
+        * ``"annotated"``: a ``:ModelDecision`` in the scope matched it, as primary
+          model (``MATCHED_MODEL``) or complementary model (``ComplementaryMatch``).
+        * ``"both"`` (default): either of the two.
+
+        An existence check per catalogue model (it stops at the first node), so its
+        cost depends on the size of the catalogue, not of the tenant. It does not
+        count: use :meth:`list_model_classes_in_use` for counts. ``tenant_id`` /
+        ``include_public`` / ``created_by_user_id`` / ``job_id`` are the scope (see
+        the module docstring).
+
+        Args:
+            model_classes: Only check these catalogue models. ``None`` checks the
+                whole catalogue; an empty list returns ``[]`` without a query.
+            presence: ``"model_instances"`` (extracted data), ``"annotated"`` (a
+                model decision) or ``"both"``.
+
+        Returns:
+            The names, sorted. A ``model_class`` with nodes but no
+            ``:CatalogModel`` (e.g. ``GenericTabularRow``) is not listed.
+
+        Raises:
+            NavigationError: *presence* is not one of the three values.
+        """
+
+    @abstractmethod
+    async def get_catalog_graph_in_use(
+        self,
+        *,
+        include_fields: bool = True,
+        include_relationships: bool = True,
+        presence: CatalogPresence = "both",
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> CatalogGraph:
+        """Return the part of the model catalogue that is present in the scope.
+
+        The same :class:`CatalogGraph` as :meth:`get_catalog_graph`, keeping only:
+
+        * the ``:CatalogModel`` nodes present in the scope according to *presence*
+          (extracted data, a model decision or either, see
+          :meth:`list_model_classes_present`);
+        * the ``:EntityLabel`` values with at least one ``:LabeledEntity`` in the scope
+          — whatever *presence* is, since a label only has data once extracted;
+        * the declared relationships whose source **and** target are kept.
+
+        Existence checks, not counts (see :meth:`list_model_classes_present`).
+
+        Args:
+            presence: ``"model_instances"`` (extracted data), ``"annotated"`` (a
+                model decision) or ``"both"``.
+
+        Raises:
+            NavigationError: *presence* is not one of the three values.
+        """
 
     @abstractmethod
     async def get_model_properties(

@@ -67,6 +67,7 @@ Regular indexes (query performance):
 
 Composite tenant indexes (tenant-scoped filters on a second property):
     :ModelInstance(tenant_id, model_class)
+    :ExtractionResult(tenant_id, model_class)
     :Document(tenant_id, latest)
     :Document(tenant_id, name)
     :StructureNode(tenant_id, role)
@@ -369,6 +370,11 @@ _REGULAR_INDEXES: list[tuple[str, str]] = [
         "idx_model_instance_tenant_model_class",
         "CREATE INDEX idx_model_instance_tenant_model_class IF NOT EXISTS "
         "FOR (mi:ModelInstance) ON (mi.tenant_id, mi.model_class)",
+    ),
+    (
+        "idx_extraction_result_tenant_model_class",
+        "CREATE INDEX idx_extraction_result_tenant_model_class IF NOT EXISTS "
+        "FOR (er:ExtractionResult) ON (er.tenant_id, er.model_class)",
     ),
     (
         "idx_document_tenant_latest",

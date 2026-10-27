@@ -141,6 +141,9 @@ await acme.execute_raw("MATCH (n) RETURN n")     # NavigationError — cannot be
 
 Catalogue methods (`list_catalog_models`, `get_catalog_graph`, `list_themes`,
 `list_relationship_types`, `list_node_labels`) are global and take no scope.
+`list_model_classes_present` and `get_catalog_graph_in_use` are the exception: they
+read the catalogue filtered by what is present in the scope, so they take it (see
+[Catalogue in use by a tenant](#catalogue-in-use-by-a-tenant)).
 
 ### How the filters behave
 
@@ -467,7 +470,9 @@ comes back as a partial `Triple` (`predicate` / `object` are `None`).
 ```python
 models   = await nav.list_catalog_models(include_fields=True)
 catalog  = await nav.get_catalog_graph()                  # models + declared relationships between them
-in_use   = await nav.list_model_classes_in_use()
+in_use   = await nav.list_model_classes_in_use()          # count = model_instances + extraction_results per model_class
+present  = await nav.list_model_classes_present()         # catalogue models present (existence check)
+used     = await nav.get_catalog_graph_in_use()           # the catalogue graph limited to them
 roles    = await nav.list_node_roles()
 themes   = await nav.list_themes()
 labels   = await nav.list_node_labels()
@@ -478,6 +483,53 @@ summary  = await nav.get_graph_summary()
 `list_relationship_types(structural_only=True)` (default) omits the thousands of
 one-off normalised `Triple` predicate types, keeping model-instance
 cross-references, entity `field_relationships`, and catalog declarations.
+
+### Catalogue in use by a tenant
+
+`get_catalog_graph()` returns the whole catalogue, the same for every tenant. Two
+methods return only the part present in the scope:
+
+- `list_model_classes_present(model_classes=None, presence="both")`: the names of
+  the `:CatalogModel` nodes present, sorted (optionally only among `model_classes`).
+- `get_catalog_graph_in_use(include_fields=True, include_relationships=True,
+  presence="both")`: the same `CatalogGraph` as `get_catalog_graph()`, keeping only
+  those models, the entity labels with at least one `:LabeledEntity` in the scope,
+  and the declared relationships whose two ends are kept.
+
+`presence` (type `CatalogPresence`) chooses what makes a model present:
+
+- `"model_instances"`: extracted data. At least one `:ModelInstance` **or** one
+  `:ExtractionResult` in the scope has it as `model_class`: a primary model whose
+  fields are all scalars only has `:ExtractionResult` nodes (e.g. `Triple`).
+  `list_model_classes_in_use()` counts with this criterion.
+- `"annotated"`: a `:ModelDecision` in the scope matched it, as primary model
+  (`MATCHED_MODEL`) or complementary model (`HAS_COMPLEMENTARY_MATCH` →
+  `:ComplementaryMatch` → `REFERS_TO_MODEL`). A pipeline that stops at annotation
+  has these models and no extracted data.
+- `"both"` (default): either of the two.
+
+Any other value raises `NavigationError`. Entity labels do not depend on `presence`:
+a label only has data once extracted, so a scope that has only been annotated
+returns models and no labels (and no model → label relationships).
+
+Since 0.4.5; in 0.4.4 only extracted data counted. Pass
+`presence="model_instances"` for the 0.4.4 result.
+
+Both are existence checks, one per catalogue model or label: their cost depends on
+the size of the catalogue, not of the tenant. The extracted-data branch is served by
+the `(tenant_id, model_class)` indexes and labels by `(tenant_id, label)`; the
+annotation branch walks the decisions pointing at each model and stops at the first
+one in the scope. They do not count; use `list_model_classes_in_use()` for counts.
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+names = await acme.list_model_classes_present()           # e.g. ["BatchAnalysis", "Triple", ...]
+graph = await acme.get_catalog_graph_in_use(include_fields=False)
+[m.name for m in graph.models], graph.entity_labels
+
+# Only the models documents were classified with, extracted or not.
+annotated = await acme.list_model_classes_present(presence="annotated")
+```
 
 ---
 
