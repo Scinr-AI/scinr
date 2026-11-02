@@ -113,15 +113,21 @@ The one absolute import allowed is `from scinr.newton.models.base import Extract
   `DO NOT use… — use OtherModel instead` lines below it.
 - **Every field** has `description=` of ≥ 15 words answering three questions: what it is, its
   format (with literal examples from the domain), and when it is `None` or empty.
-- Optional scalar: `str | None = Field(default=None, …)`. Key fields used in
+- If a model is usually extracted together with another one, say so in plain prose in its
+  docstring ("Typically extracted alongside VariationCodeModel as a complementary model.").
+  It's a convention, not a parsed keyword, but it steers the annotation agent's choice of
+  `complementary_models`.
+- Optional scalar: `str | None = Field(default=None, …)`. Write `X | None`, never `Optional[X]`. Key fields used in
   `instance_key`/`join_via`: `str = Field(default="", …)`. Lists: `default_factory=list`.
 - Enums: `class X(str, Enum)`, with a docstring `Values:` section explaining each member.
 - Keep quantities as strings with units (`"100 kg"`). Never convert them to `float`.
 - Put `entity_label` only on short, stable identifiers. Never on free text, sentences,
   measurements, booleans or statuses.
 - **List wrapper** `XxxModelList`: exactly one field, `list[XxxModel]`, with a docstring
-  starting "Use when the section defines TWO OR MORE…". Put both `XxxModelList` and
-  `XxxModel` in `SELECTABLE_MODELS`.
+  starting "Use when the section defines TWO OR MORE…". It inherits `ExtractionModel`, not the
+  main model's base. Put both `XxxModelList` and `XxxModel` in `SELECTABLE_MODELS`. Skip the
+  wrapper when a section always holds exactly one instance, or when the items are already a
+  `list[Sub]` field of a parent model.
 - Order in `models.py`: enums → shared submodels → link-target models → main models →
   list wrappers. Declare a class before any class that uses it.
 
@@ -131,6 +137,8 @@ The one absolute import allowed is `from scinr.newton.models.base import Extract
   give example entities (`"variation codes (e.g. Q.I.a.1)"`), and say what it is
   *distinct from*. A vague description pulls every section into this theme.
 - `SELECTABLE_MODELS`: most specific first. List wrappers, then main models, then supporting models.
+- A parent theme folder can have its own `catalog.py` that collects sub-theme models with
+  relative imports (`from .variation_guidelines.models import VariationCodeModel`).
 
 ## Wiring
 
