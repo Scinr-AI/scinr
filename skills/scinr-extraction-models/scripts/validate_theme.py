@@ -224,6 +224,8 @@ def check_model(cls: type, tabular: bool, top_level: bool) -> None:
         if x.get("normalization_model"):
             if not nested_models(ann):
                 err(where, "normalization_model: True must be on a nested-submodel field")
+            elif list_item(ann) is None and info.default is not None:
+                err(where, "normalization target must be nullable: `X | None = Field(default=None, ...)`")
             src = x.get("normalization_source_fields")
             if not src:
                 err(where, "normalization_model without explicit normalization_source_fields — "
@@ -251,6 +253,9 @@ def check_instance_relationships(models: dict[str, type]) -> None:
                 if not target or not join_via:
                     err(where, "instance_relationships entry needs target_model and join_via")
                     continue
+                if fname not in join_via:
+                    err(where, f"join_via must include the declaring field {fname!r} itself (as fan-out or "
+                               "single key) — otherwise the engine skips this relationship")
                 for local in join_via:
                     if local not in fields:
                         err(where, f"join_via local field {local!r} is not a field of {src_name} (exact Python name)")
@@ -264,6 +269,11 @@ def check_instance_relationships(models: dict[str, type]) -> None:
                         err(where, f"join_via target field {remote!r} is not a field of {target}")
                     elif not extra(tgt.model_fields[remote]).get("instance_key"):
                         err(where, f"{target}.{remote} must be marked instance_key: True or shells never merge")
+                tgt_keys = {n for n, i in tgt.model_fields.items() if extra(i).get("instance_key")}
+                missing = tgt_keys - set(join_via.values())
+                if missing:
+                    err(where, f"join_via covers only part of {target}'s key; also map {sorted(missing)} — "
+                               "shell uids hash the join_via fields, real uids hash every instance_key field")
 
 
 def collect(cls: type, seen: dict[str, type]) -> None:

@@ -16,6 +16,41 @@ That has these consequences:
 3. **Key fields need one value.** `instance_key` and `join_via` fields must receive exactly one
    source column. A `"; "`-joined key matches no reference, so links silently fail.
 
+## Normalized models
+
+A normalized model follows the **dual-field pattern**: a raw field holds the value exactly as
+the source wrote it, and a nested submodel holds the same information cleaned up and split into
+typed parts.
+
+**How it works in the tabular pipeline:** CSV row → column mapping → instance →
+`NormalizationEngine` → Neo4j write. The engine works in five steps:
+
+1. It finds fields marked `normalization_model: True`.
+2. It reads the `normalization_source_fields` values from the row. If they are all empty, it skips the row.
+3. It batches rows by target type (`normalization_batch_size`, default 5).
+4. It calls `llm.with_structured_output(...)` and validates the result with `TypeAdapter`.
+5. It sets the submodel on the instance.
+
+Identical source values are cached, so 200 rows with the same address cost one LLM call.
+
+**How it works in the documents pipeline:** the engine never runs. The Stage 4 LLM fills the
+submodel directly from its `description=`.
+
+**What it adds to the graph:** a child `(:ModelInstance {model_class:"NormalizedAddress"})`
+reached through `-[:HAS_NORMALIZED_ADDRESS]->`. It adds structure, not links. To link rows that
+spell the same thing differently, put `entity_label` (e.g. `country_code` → `"Country"`) and/or
+`instance_key` on the **normalized submodel's** fields.
+
+Rules:
+
+- **Target field:** nullable (`X | None = None`), typed as a Pydantic model (or `list[X]`), with
+  `normalization_model: True` and an explicit `normalization_source_fields`.
+- **Target model:** inherits `ExtractionModel`, and every field is nullable (the LLM may not
+  find every part). Add `entity_label` / `instance_key` on the parts that identify things.
+- **Source fields:** existing scalar sibling fields, usually `str`. List several when the
+  normalization needs context from more than one column.
+- Keep the raw field. It is the provenance, and it is what the column-mapper writes to.
+
 ### Getting a typed value anyway: `normalization_model`
 
 Wrap the typed value in a nested submodel and mark the field. The `NormalizationEngine` (tabular

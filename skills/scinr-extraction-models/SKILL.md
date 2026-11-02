@@ -21,6 +21,48 @@ A **theme** is a folder with `catalog.py` (`THEME_DESCRIPTION` + `SELECTABLE_MOD
 
 So docstrings and descriptions are the extraction prompts. Write them for an LLM reader.
 
+## What a model becomes in the graph
+
+Each extracted model is one `(:ModelInstance {model_class, uid, …})` node. Each field becomes one of:
+
+| Field declaration | Graph result |
+|---|---|
+| plain scalar or `list[str]` | property on the instance node |
+| `entity_label: "X"` | `(instance)-[:REFERENCES {field_name}]->(:LabeledEntity {label:"X", value})`. One node per tenant + label + normalized value, shared by every instance that mentions that value. |
+| nested submodel or `list[Submodel]` | child `:ModelInstance` linked by `-[:HAS_<FIELD_NAME>]->`. Created automatically, never an embedded map. |
+| `instance_key: True` | instance uid = hash(model_class + **all** key values), so the same logical record from any section or document collapses into one node. With no key, every extraction makes a new node. |
+
+### Which relationship to declare
+
+| Scope | Need | Use |
+|---|---|---|
+| **Within one instance** | Two identifiers in the same record relate (drug *interacts with* drug, code *has child* code) | `field_relationships`: an edge between the two `:LabeledEntity` nodes of sibling fields |
+| | The record has a part with its own structure (address, dosage, list of conditions extracted together) | Nested submodel field. The `HAS_<FIELD>` edge is automatic. |
+| **Between instances of the same model** | Same record seen in several sections or documents | `instance_key` on its identifying fields (dedup, no edge needed) |
+| | Hierarchy or sequence of records of one class (parent/child section, supersedes, previous version) | `instance_relationships` with `target_model` = **its own class**, joining a reference field such as `parent_code` to the key `code` |
+| **Between different models** | A record references a record defined elsewhere (a variation → its conditions or procedure type) | `instance_relationships` with `join_via` → target `instance_key` fields. Creates a shell when the target isn't extracted yet. |
+| | Entity-level link only | Give both fields the same `entity_label`. Instances then connect through the shared `:LabeledEntity`, with no declaration needed. |
+
+Edges between instances need `instance_key` on the target. Edges between entities need
+`entity_label` on both ends. Read [references/graph-annotations.md](references/graph-annotations.md)
+before declaring either kind.
+
+### Normalized models
+
+A **normalized model** is a nested submodel that turns a raw source string into structured,
+typed fields. Example: `raw_address: str` plus
+`normalized_address: NormalizedAddress | None` (`street`, `city`, `country_code`, …).
+
+- Mark the submodel field `normalization_model: True` and set `normalization_source_fields: ["raw_address"]`.
+- In the **tabular** pipeline, an LLM step fills it after column mapping, then real Pydantic
+  validation runs on the result. That is the only way to get typed or validated values there.
+- In **documents** (Stages 3–4), the extraction LLM fills it directly from `description=`.
+- The raw field is kept unchanged as provenance.
+- It is written as a child `:ModelInstance` (`HAS_NORMALIZED_ADDRESS`). Normalization creates
+  no links by itself. Its value is that the clean parts can carry `entity_label` / `instance_key`,
+  so rows that wrote the same thing differently (`"123 Main St"` vs `"123 main street"`) dedupe
+  and link. Put those keys on the normalized submodel, not on the raw string.
+
 ## Workflow
 
 Copy this checklist and tick it off:
@@ -124,6 +166,13 @@ To ship a theme as a pip package, use an entry point:
   `date`) lose data. See the tabular reference.
 - **`join_via` names must match exactly.** Keys and values must be exact Python field names. A
   typo creates zero edges and raises no error.
+- **`join_via` must cover the whole key.** Its target fields must be *all* of the target's
+  `instance_key` fields. A shell's uid is hashed from the `join_via` values only, while a real
+  instance's uid is hashed from all its key fields. Cover only part of the key and the two never merge.
+- **The declaring field must be in its own `join_via`.** The field that carries
+  `instance_relationships` must appear in `join_via` as the fan-out or single key. If it
+  doesn't, the relationship is skipped with only a log warning. When an anchor field in
+  `join_via` is empty or `None`, no edge is created.
 - **Pin the source fields.** `normalization_model: True` without `normalization_source_fields`
   sends *every* other scalar field to the normalization LLM.
 
