@@ -325,6 +325,19 @@ Extraction models are Pydantic classes that define the typed entities the pipeli
 
 See [`src/scinr/newton/model-creation/README.md`](src/scinr/newton/model-creation/README.md) for the full guide, including worked examples, entity label conventions, nested model patterns, `field_relationships` syntax (entity-level edges within a model instance), and `instance_relationships` syntax (cross-document model linking via `ModelInstance` nodes).
 
+### Agent skill for model creation
+
+The [`scinr-extraction-models`](skills/scinr-extraction-models/SKILL.md) skill ([Agent Skills](https://agentskills.io) format) teaches coding agents to write themes that follow these rules. It ships with a validator (`scripts/validate_theme.py`) that the agent runs until there are no errors.
+
+```bash
+# Any agent supported by the skills CLI (Claude Code, Cursor, Codex, Gemini CLI, Copilot, OpenCode, …)
+npx skills add Scinr-AI/scinr --skill scinr-extraction-models
+
+# Claude Code plugin
+/plugin marketplace add Scinr-AI/scinr
+/plugin install scinr@scinr
+```
+
 ---
 
 ## Project Structure

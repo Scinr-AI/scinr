@@ -1,0 +1,10 @@
+{
+  "name": "scinr",
+  "version": "0.1.0",
+  "description": "Agent skills for the scinr SDK: create and validate custom extraction models and themes for the scinr.newton ingestion pipeline.",
+  "author": { "name": "Scinr AI", "url": "https://www.scinr.com/" },
+  "homepage": "https://scinr-ai.github.io/scinr/",
+  "repository": "https://github.com/Scinr-AI/scinr",
+  "license": "Apache-2.0",
+  "keywords": ["scinr", "knowledge-graph", "neo4j", "pydantic", "life-sciences", "document-extraction"]
+}
