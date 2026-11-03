@@ -122,6 +122,73 @@ class ConditionModel(ExtractionModel):
 - Shells that are never filled in stay in the graph as key-only nodes. They are removed only
   by deletion, freezing, or `collect_orphans()`.
 
+### Computing keys with `model_validator`
+
+The uid is hashed from the instance's attribute values **after** Pydantic validation. The only
+normalization the pipeline applies on top is `normalize_key`: NFKD, drop accents, collapse
+whitespace, lowercase. Punctuation, prefixes and separators are kept, so `"Q.I.a.1"`,
+`"QIa1"` and `"Q.1.a.1"` (OCR) are three different nodes. Anything else that has to match is
+the model's job, and a `model_validator` is the place for it when the logic needs more than one
+field:
+
+| Use | Example |
+|---|---|
+| **Canonicalize** a key the same way on both sides of a join | `ItemModel.item_code` and `ConditionModel.item_code` both pass through one `canonical_code()` |
+| **Derive** a key or anchor from another field, instead of trusting the LLM to fill it | `parent_code` from `code` (`"3.2.S.2"` → `"3.2.S"`), `root_variation_code` from `variation_code` |
+| **Split** one value into the parts of a composite key | `"A-001/2"` → `item_code="A-001"`, `condition_id="2"` |
+
+```python
+import re
+from typing import Any
+from pydantic import Field, model_validator
+
+def canonical_code(v: str) -> str:
+    return re.sub(r"\s+", "", v).upper()          # use the SAME helper on every model that joins on it
+
+class SectionSpec(ExtractionModel):
+    """A single CTD section specification with its code and title."""
+
+    code: str = Field(default="", description="...", json_schema_extra={"entity_label": "CTDSection", "instance_key": True})
+    parent_code: str = Field(default="", description="...", json_schema_extra={
+        "instance_relationships": [{"target_model": "SectionSpec", "join_via": {"parent_code": "code"}, "rel_type": "HAS_PARENT_SECTION"}],
+    })
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        code = canonical_code(data.get("code") or "")
+        data["code"] = code
+        if code and not data.get("parent_code") and "." in code:
+            data["parent_code"] = code.rsplit(".", 1)[0]
+        else:
+            data["parent_code"] = canonical_code(data.get("parent_code") or "")
+        return data
+```
+
+Rules:
+
+- **Prefer `mode="before"`.** It edits the input dict, so it runs once. `ExtractionModel` sets
+  `validate_assignment=True`, so in `mode="after"` every `self.x = …` re-runs validation,
+  including the `after` validator itself. An unconditional assignment there raises
+  `RecursionError`. If you must use `after`, assign only when the value actually changes.
+- **Normalize the reference too.** A shell's uid is hashed from the *local* field values in
+  `join_via`, so the source model (`parent_code`, `condition_ids` items) must go through the same
+  helper as the target's key. Fixing only the target leaves the two sides different.
+- **Never derive a key from a list or a free-text field**, and never join several values into one
+  key (`"A; B"`).
+- **Blank keys collapse.** Only `None` key values are left out of the hash. `""` is hashed, so
+  every record whose only key is `""` becomes **one** node per tenant. Make the main key required
+  (`Field(...)`) or derive it, so a key is never blank.
+- **Documents pipeline only.** Validators run in Stage 4 (`with_structured_output` validates
+  fully) and on manual `Model(...)` calls. Tabular rows are built with `model_construct()`, so
+  no validator runs there. A tabular key has to come out of the columns as-is, or from a
+  `normalization_model` submodel (see the tabular reference).
+- For a plain single-field cleanup shared across models, a `field_validator(..., check_fields=False)`
+  on a shared base is simpler. Use `model_validator` when the value depends on other fields.
+
 ### Same model: hierarchy and sequence
 
 `target_model` can be the model's own class. Use this for parent/child records, supersession or

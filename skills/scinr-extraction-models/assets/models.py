@@ -1,11 +1,21 @@
 """<Theme name> extraction models."""
 from __future__ import annotations
 
+import re
 from enum import Enum
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from scinr.newton.models.base import ExtractionModel
+
+# ── KEY HELPERS ───────────────────────────────────────────────────────────────
+
+
+def canonical_code(v: Any) -> Any:
+    """Canonical form for item codes. Apply it on EVERY model that stores or references one."""
+    return re.sub(r"\s+", "", v).upper() if isinstance(v, str) else v
+
 
 # ── ENUMS ─────────────────────────────────────────────────────────────────────
 
@@ -53,6 +63,14 @@ class ConditionModel(ExtractionModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_keys(cls, data: Any) -> Any:
+        # Same helper as ItemModel, so shells created from ItemModel.condition_ids merge here.
+        if isinstance(data, dict):
+            data = {**data, "item_code": canonical_code(data.get("item_code") or "")}
+        return data
+
 
 # ── MAIN MODELS ───────────────────────────────────────────────────────────────
 
@@ -91,6 +109,14 @@ class ItemModel(ExtractionModel):
             ]
         },
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_keys(cls, data: Any) -> Any:
+        # mode="before" edits the input once; "after" + self.x = ... recurses (validate_assignment).
+        if isinstance(data, dict) and "item_code" in data:
+            data = {**data, "item_code": canonical_code(data["item_code"])}
+        return data
 
 
 # ── LIST WRAPPERS ─────────────────────────────────────────────────────────────

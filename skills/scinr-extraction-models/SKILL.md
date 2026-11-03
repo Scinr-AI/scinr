@@ -119,6 +119,12 @@ The one absolute import allowed is `from scinr.newton.models.base import Extract
   `complementary_models`.
 - Optional scalar: `str | None = Field(default=None, …)`. Write `X | None`, never `Optional[X]`. Key fields used in
   `instance_key`/`join_via`: `str = Field(default="", …)`. Lists: `default_factory=list`.
+- **Keys are only as good as their values.** The uid hashes the validated values after just
+  lowercasing, dropping accents and collapsing whitespace, so `"Q.I.a.1"` ≠ `"QIa1"`. When a key
+  needs canonicalizing, deriving from another field (`parent_code` from `code`) or splitting
+  into composite parts, add a `@model_validator(mode="before")` that runs **one shared helper on
+  both the key and every field that references it**. See "Computing keys with `model_validator`"
+  in [references/graph-annotations.md](references/graph-annotations.md). This applies to documents only, because validators never run in tabular.
 - Enums: `class X(str, Enum)`, with a docstring `Values:` section explaining each member.
 - Keep quantities as strings with units (`"100 kg"`). Never convert them to `float`.
 - Put `entity_label` only on short, stable identifiers. Never on free text, sentences,
@@ -169,6 +175,11 @@ To ship a theme as a pip package, use an entry point:
 - **One value per key field.** Never design a key field to hold `"A; B"`. A packed key matches
   no reference. In tabular use, make sure exactly one column maps to each key field. Several
   columns mapped to a `str` field are joined with `"; "`, which breaks the key.
+- **Blank keys collapse.** A `None` key value is left out of the hash, but `""` is hashed. So
+  every record whose key is `""` merges into **one** node. Make the main key required or derive it.
+- **`mode="after"` validators can recurse.** `ExtractionModel` has `validate_assignment=True`, so
+  an unconditional `self.x = …` in an `after` validator raises `RecursionError`. Use
+  `mode="before"` and edit the input dict instead.
 - **Validators don't run in tabular.** Tabular rows are built with `model_construct()`, so
   `field_validator`/`model_validator` never run there, and typed fields (`int`, `Enum`,
   `date`) lose data. See the tabular reference.
