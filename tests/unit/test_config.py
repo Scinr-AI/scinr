@@ -279,6 +279,7 @@ class TestMistralOcrConfig:
         "MISTRAL_OCR_RETRY_BACKOFF_SECONDS",
         "MISTRAL_OCR_CHUNK_CONCURRENCY",
         "MISTRAL_OCR_ERROR_STRATEGY",
+        "MISTRAL_OCR_CONCURRENCY",
     )
 
     @pytest.fixture(autouse=True)
@@ -302,6 +303,7 @@ class TestMistralOcrConfig:
         assert cfg.mistral_ocr_retry_backoff_seconds == 2.0
         assert cfg.mistral_ocr_chunk_concurrency == 1
         assert cfg.mistral_ocr_error_strategy == "fail_fast"
+        assert cfg.mistral_ocr_concurrency == 2
 
     def test_explicit_overrides_are_respected(self):
         """Each mistral_ocr_* kwarg can be overridden explicitly."""
@@ -317,6 +319,7 @@ class TestMistralOcrConfig:
             mistral_ocr_retry_backoff_seconds=1.5,
             mistral_ocr_chunk_concurrency=2,
             mistral_ocr_error_strategy="best_effort",
+            mistral_ocr_concurrency=3,
         )
         assert cfg.mistral_ocr_safe_max_pages == 500
         assert cfg.mistral_ocr_safe_max_bytes == 10 * 1024 * 1024
@@ -324,6 +327,7 @@ class TestMistralOcrConfig:
         assert cfg.mistral_ocr_retry_backoff_seconds == 1.5
         assert cfg.mistral_ocr_chunk_concurrency == 2
         assert cfg.mistral_ocr_error_strategy == "best_effort"
+        assert cfg.mistral_ocr_concurrency == 3
 
     def test_env_vars_are_respected_when_no_explicit_arg(self, monkeypatch):
         """MISTRAL_OCR_* env vars are used when no explicit kwarg is passed."""
@@ -333,6 +337,7 @@ class TestMistralOcrConfig:
         monkeypatch.setenv("MISTRAL_OCR_RETRY_BACKOFF_SECONDS", "3.5")
         monkeypatch.setenv("MISTRAL_OCR_CHUNK_CONCURRENCY", "4")
         monkeypatch.setenv("MISTRAL_OCR_ERROR_STRATEGY", "best_effort")
+        monkeypatch.setenv("MISTRAL_OCR_CONCURRENCY", "5")
 
         llm = _make_mock_llm()
         cfg = configure(
@@ -347,6 +352,7 @@ class TestMistralOcrConfig:
         assert cfg.mistral_ocr_retry_backoff_seconds == 3.5
         assert cfg.mistral_ocr_chunk_concurrency == 4
         assert cfg.mistral_ocr_error_strategy == "best_effort"
+        assert cfg.mistral_ocr_concurrency == 5
 
     def test_invalid_error_strategy_raises_configuration_error(self):
         """An invalid mistral_ocr_error_strategy value raises ConfigurationError."""
@@ -391,6 +397,17 @@ class TestMistralOcrConfig:
                 neo4j_user=_DUMMY_USER,
                 neo4j_password=_DUMMY_PASS,
                 mistral_ocr_max_retries=0,
+            )
+
+    def test_concurrency_below_one_raises_configuration_error(self):
+        llm = _make_mock_llm()
+        with pytest.raises(ConfigurationError, match="mistral_ocr_concurrency"):
+            configure(
+                llm=llm,
+                neo4j_uri=_DUMMY_URI,
+                neo4j_user=_DUMMY_USER,
+                neo4j_password=_DUMMY_PASS,
+                mistral_ocr_concurrency=0,
             )
 
 

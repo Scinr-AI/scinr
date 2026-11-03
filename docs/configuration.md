@@ -72,6 +72,7 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `MISTRAL_OCR_RETRY_BACKOFF_SECONDS` | `2.0` | Base backoff in seconds between retries. |
 | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` | Maximum concurrent OCR chunk processing. |
 | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` | Error handling: `fail_fast` (abort on first error) or `best_effort` (continue and collect what is possible). |
+| `MISTRAL_OCR_CONCURRENCY` | `2` | Maximum PDFs in OCR conversion at the same time per event loop, whatever `parallel_docs` is. Bounds the memory of OCR. |
 
 ### Pipeline
 

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-10-29
+
+PDF conversion through Mistral OCR no longer holds several copies of the PDF in
+memory. A 45 MiB PDF peaked at ~300 MiB per request; it now needs ~13 MiB.
+
+### Fixed
+- **The OCR request body is streamed.** The JSON body (`document_url` with the
+  PDF as a base64 data URL) is encoded block by block while it is sent, with an
+  explicit `Content-Length`, instead of building the base64, the data URL and
+  the serialised JSON in memory at once (~6x the PDF). The API receives the
+  same request as before. A PDF within the limits is read from disk during the
+  send, not loaded whole first.
+
+### Added
+- **`mistral_ocr_concurrency`** (`configure()`, env `MISTRAL_OCR_CONCURRENCY`,
+  default `2`, `PdfConverter(concurrency=...)`): at most this many PDFs are in
+  OCR conversion at the same time per event loop, whatever `parallel_docs` is.
+  The semaphore is per event loop, so callers that run `asyncio.run()` per task
+  (Celery workers) need no reset between runs.
+
 ## [0.4.5] - 2026-10-27
 
 A catalogue model can now be present in a scope because documents were classified
