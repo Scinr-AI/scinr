@@ -135,12 +135,6 @@ normalizes the values and rebuilds the `uid`; do not write `toLower(mi.field) = 
 a function applied to the property prevents the planner from using any index. A filter on
 **part** of the key (`where={"field": normalize_key(value)}`) uses the per-field index.
 
-> **⚠️ Blank keys collapse.** Only `None` values are left out of the hash; `""` is hashed like
-> any other value. Every record whose key fields are all `""` therefore merges into **one**
-> `:ModelInstance` per tenant, and each new record overwrites its fields. Make the main key
-> required (`Field(...)`) or derive it; keep `default=""` for anchor/reference fields, where an
-> empty value correctly means "no edge".
-
 #### Computing keys with `@model_validator` (documents pipeline only)
 
 `normalize_key` keeps punctuation, prefixes and separators, so `"Q.I.a.1"`, `"QIa1"` and the
@@ -1155,5 +1149,4 @@ configure(
 | `instance_relationships` target node never merged (shell stays empty) | Target model does not declare `instance_key: True` on its key fields; UID mismatch between shell and real node | Add `instance_key: True` to the correct key fields of the target model |
 | Fan-out creates zero target nodes | The list field is empty OR the fan-out field name in `join_via` does not match the actual field name | Check `join_via` key matches the exact Python field name |
 | Two models create duplicate `ModelInstance` nodes | `instance_key` values differ in punctuation/separators/prefix (case, accents and whitespace are already normalized); or a target key field is missing from `join_via` | Canonicalize both sides with the same helper (`field_validator`, or `@model_validator(mode="before")` for derived keys); verify `join_via` covers every target key field |
-| Unrelated records merged into one `ModelInstance` | Their key fields were all blank `""` — `""` is hashed, only `None` is skipped | Make the main key required or derive it |
 | `RecursionError` when instantiating a model | Unconditional `self.x = ...` inside `@model_validator(mode="after")` (`validate_assignment=True`) | Use `mode="before"` and edit the input dict |

@@ -255,13 +255,6 @@ code: str = Field(..., description="...")
 root_code: str = Field(default="", description="...")
 ```
 
-> **⚠️ Blank keys collapse.** Only `None` values are left out of the instance-key hash; `""` is
-> hashed like any other value. Every record of a model whose key fields are all `""` therefore
-> merges into **one** `:ModelInstance` per tenant, and each new record overwrites its fields.
-> The model's *main* key (the one that identifies the record) should be required (`Field(...)`)
-> or derived (§6.7). Reserve `default=""` for anchor/reference fields, where an empty value
-> correctly means "no edge".
-
 ### 4.2 List fields
 
 ```python
@@ -1135,7 +1128,6 @@ class XxxModelList(ExtractionModel):
 | Declaring a mappable field as `int`/`float`/`bool`/`date`/`Enum`/nested-submodel on a model used with the TABULAR pipeline | `model_construct()` skips validation; multi-column combination only merges `str`/`list[str]` fields, so if two columns map to that field the last one processed silently wins and earlier column data is lost (warning-only, no error) | Use `str` or `list[str]` for the field. If a real type is genuinely needed, wrap it in a nested submodel marked `normalization_model: True` (see §4.7/§6.4) — never a `@model_validator`, which never runs in this pipeline |
 | Key value formats differ between the target's `instance_key` and the referencing field (`"Q.I.a.1"` vs `"QIa1"`) | `normalize_key` only lowercases, strips accents and collapses whitespace — the shell and the real instance get different uids and never merge | Canonicalize both sides with the same helper in a `mode="before"` `@model_validator` or shared `field_validator` (§6.7) |
 | Unconditional `self.x = ...` inside a `@model_validator(mode="after")` | `validate_assignment=True` re-runs the validator on every assignment → `RecursionError` | Use `mode="before"` and edit the input dict |
-| Main `instance_key` field defaulting to `""` and left blank | `""` is hashed (only `None` is skipped) — every blank-key record merges into one node | Make the main key required or derive it (§4.1, §6.7) |
 | Adding `@model_validator`/`@field_validator` to a model expecting it to coerce a tabular field's type | `model_construct()` (used for ALL row instantiation in the tabular pipeline) unconditionally skips every validator, in every mode; the field silently stays a raw `str` forever | Do not rely on validators for tabular-pipeline type coercion at all; use a `normalization_model`-marked nested submodel instead (see §4.7/§6.4) |
 
 ---
@@ -1162,7 +1154,7 @@ class XxxModelList(ExtractionModel):
 - [ ] `instance_relationships` declared where cross-section or cross-document linking is needed
 - [ ] Every `target_model` in `instance_relationships` has `instance_key: True` on its key fields
 - [ ] Fan-out `join_via` field names exactly match Python field names
-- [ ] Key values are canonicalized identically on the target's `instance_key` fields and on every field that references them (§6.7); the main key can never be blank
+- [ ] Key values are canonicalized identically on the target's `instance_key` fields and on every field that references them (§6.7)
 
 ### Normalization (`normalization_model`)
 - [ ] Structured-vs-unstructured-vs-both usage was clarified with the user/developer before deciding whether to add `normalization_model` keys
