@@ -103,11 +103,19 @@ Ask about anything you can't infer from the request:
 ```
 
 Inside the package, use relative imports: `from .models import X`, `from ..baseModels import Y`.
-The one absolute import allowed is `from scinr.newton.models.base import ExtractionModel`.
+One dot is the current folder, and each extra dot goes up one level. Never a bare
+`from models import X`, and never an absolute import of your own package. The one absolute
+import allowed is `from scinr.newton.models.base import ExtractionModel`.
+Put shared validators and helpers in a `baseModels.py` at the lowest folder that all the
+models using it share. Create one only when several models really share the logic.
 
 ### 3. Model rules
 
-- Inherit from `ExtractionModel`. It sets `extra="forbid"`, which rejects hallucinated fields.
+- Inherit from `ExtractionModel`, never plain `BaseModel`. Its config matters:
+  - `extra="forbid"` rejects hallucinated fields.
+  - `str_strip_whitespace=True` strips strings during validation, not in `mode="before"` validators.
+  - `use_enum_values=True` stores enums as plain strings, so compare `self.status == "active"`.
+  - `validate_assignment=True` re-validates every assignment (see Gotchas).
 - **Class docstring**: first line ≤ 15 words, starting with the entity type ("A single…",
   "Use when…"). Where two models could be confused, add `USE THIS MODEL when…` /
   `DO NOT use… — use OtherModel instead` lines below it.
@@ -130,7 +138,8 @@ The one absolute import allowed is `from scinr.newton.models.base import Extract
 - Put `entity_label` only on short, stable identifiers. Never on free text, sentences,
   measurements, booleans or statuses.
 - **List wrapper** `XxxModelList`: exactly one field, `list[XxxModel]`, with a docstring
-  starting "Use when the section defines TWO OR MORE…". It inherits `ExtractionModel`, not the
+  starting "Use when the section defines TWO OR MORE…" and a line "DO NOT use this model for a
+  single Xxx — use XxxModel instead." It inherits `ExtractionModel`, not the
   main model's base. Put both `XxxModelList` and `XxxModel` in `SELECTABLE_MODELS`. Skip the
   wrapper when a section always holds exactly one instance, or when the items are already a
   `list[Sub]` field of a parent model.
@@ -201,6 +210,8 @@ To ship a theme as a pip package, use an entry point:
   edges → [references/graph-annotations.md](references/graph-annotations.md)
 - Tabular use, typed values from strings, OCR fixes, or shared normalizing validators →
   [references/tabular-and-normalization.md](references/tabular-and-normalization.md)
+- What the written graph really looks like (instance_key merges, normalized nodes) →
+  https://scinr-ai.github.io/scinr/user-guides/neo4j-graph.md
 - Anything not covered here → the full guide at
   https://scinr-ai.github.io/scinr/user-guides/custom-models.md and
   https://scinr-ai.github.io/scinr/user-guides/model-patterns.md

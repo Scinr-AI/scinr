@@ -123,7 +123,11 @@ class ItemModel(ExtractionModel):
 
 
 class ItemModelList(ExtractionModel):
-    """Use when the section defines TWO OR MORE item entries in a list or table."""
+    """
+    Use when the section defines TWO OR MORE item entries in a list or table.
+
+    DO NOT use this model for a single item — use ItemModel instead.
+    """
 
     items: list[ItemModel] = Field(
         default_factory=list,

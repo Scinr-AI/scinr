@@ -7,8 +7,9 @@ builds each row with `model_construct(**kwargs)`, which **skips all Pydantic val
 That has these consequences:
 
 1. **Every mappable field must be `str` or `list[str]`** (or `| None`). When several columns
-   map to one field, only those types are combined: deduplicated, then `"; "`-joined for `str`
-   or appended for `list[str]`. With `int`, `float`, `bool`, `date`, `Enum` or a nested model,
+   map to one field, only those types are combined. A value is dropped as a duplicate when it
+   is contained in a fuller value of the group, or when all its words appear in one. The rest
+   are `"; "`-joined for `str` or appended for `list[str]`. With `int`, `float`, `bool`, `date`, `Enum` or a nested model,
    the last column wins, a warning is logged, and the other columns' data is lost.
 2. **`field_validator` / `model_validator` never run** on tabular rows, in any mode. A
    validator passes unit tests (`Model(year="2023")`) but does nothing in production tabular
