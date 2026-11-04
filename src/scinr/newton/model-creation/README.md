@@ -269,15 +269,22 @@ SELECTABLE_MODELS: list[type] = [
 `ThemeRegistry` discovers the new theme automatically. Verify with:
 
 ```bash
+# Run from the folder ABOVE your package's top __init__.py (or set PYTHONPATH to it)
 python -c "
-from utils.theme_registry import ThemeRegistry
-r = ThemeRegistry()
-print(r.list_themes())
+from scinr.newton import configure
+from scinr.newton.utils.theme_registry import get_theme_registry
+configure(neo4j_user='x', neo4j_password='x', neo4j_database='x',
+          extra_models_paths=['/abs/path/to/models_root'])
+reg = get_theme_registry()
+for p in reg.get_all_theme_paths():
+    print(p, len(reg.find_best_theme(p).models), 'models')
 "
 ```
 
-The new theme path (`my_domain`) must appear in the output. If it does not, check for
-import errors in `catalog.py`.
+The new theme path (`my_domain`) must appear in the output **with a non-zero model count**.
+A catalog that fails to import is only logged as a WARNING and the theme is still listed,
+with 0 models — check for import errors in `catalog.py` and that the folder above your top
+`__init__.py` is on `sys.path`.
 
 ---
 
@@ -889,9 +896,18 @@ Use this checklist before merging a new extraction domain.
 
 - [ ] `THEME_DESCRIPTION` is specific and technically distinguishable from existing themes
 - [ ] `SELECTABLE_MODELS` includes all top-level models (sub-models that are only embedded fields do not need to be listed)
-- [ ] Auto-discovery verified:
+- [ ] Auto-discovery verified (theme listed with a non-zero model count):
   ```bash
-  python -c "from utils.theme_registry import ThemeRegistry; r = ThemeRegistry(); print(r.list_themes())"
+  # Run from the folder ABOVE your package's top __init__.py (or set PYTHONPATH to it)
+  python -c "
+  from scinr.newton import configure
+  from scinr.newton.utils.theme_registry import get_theme_registry
+  configure(neo4j_user='x', neo4j_password='x', neo4j_database='x',
+            extra_models_paths=['/abs/path/to/models_root'])
+  reg = get_theme_registry()
+  for p in reg.get_all_theme_paths():
+      print(p, len(reg.find_best_theme(p).models), 'models')
+  "
   ```
 - [ ] No import errors when loading `catalog.py`
 
@@ -1096,7 +1112,7 @@ configure(
 
 | Error | Cause | Fix |
 |---|---|---|
-| Theme missing from `list_themes()` | No `catalog.py` in the folder, or it has an import error | Create/fix `catalog.py`; check all imports resolve |
+| Theme missing from `get_all_theme_paths()`, or listed with 0 models | No `catalog.py` in the folder, or it has an import error (only logged as a WARNING) | Create/fix `catalog.py`; check all imports resolve |
 | `KeyError: No model registered for 'X'` | Class not reachable by BFS from `SELECTABLE_MODELS` | Add the class directly to `SELECTABLE_MODELS`, or make sure it is a field type of a model that is already listed |
 | `extra inputs are not permitted` | LLM produced a field not in the model schema | If the field should exist, add it; otherwise this is correct behavior (`extra="forbid"`) |
 | Sub-model never selected by agent | Not in `SELECTABLE_MODELS` | Add it if it should be a primary extraction target |
