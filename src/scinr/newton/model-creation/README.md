@@ -135,6 +135,39 @@ normalizes the values and rebuilds the `uid`; do not write `toLower(mi.field) = 
 a function applied to the property prevents the planner from using any index. A filter on
 **part** of the key (`where={"field": normalize_key(value)}`) uses the per-field index.
 
+> **⚠️ Blank keys collapse.** Only `None` values are left out of the hash; `""` is hashed like
+> any other value. Every record whose key fields are all `""` therefore merges into **one**
+> `:ModelInstance` per tenant, and each new record overwrites its fields. Make the main key
+> required (`Field(...)`) or derive it; keep `default=""` for anchor/reference fields, where an
+> empty value correctly means "no edge".
+
+#### Computing keys with `@model_validator` (documents pipeline only)
+
+`normalize_key` keeps punctuation, prefixes and separators, so `"Q.I.a.1"`, `"QIa1"` and the
+OCR'd `"Q.1.a.1"` are three different nodes. When the value must be canonicalized, derived from
+another field (`parent_code` from `code`) or split into composite parts, do it in a
+`@model_validator(mode="before")` that runs **one shared helper on the key and on every field
+that references it** — a shell's uid is hashed from the *local* `join_via` values, so both
+sides must match:
+
+```python
+@model_validator(mode="before")
+@classmethod
+def _derive_keys(cls, data: Any) -> Any:
+    if isinstance(data, dict) and "code" in data:
+        code = canonical_code(data["code"] or "")
+        data = {**data, "code": code}
+        if code and not data.get("parent_code") and "." in code:
+            data["parent_code"] = code.rsplit(".", 1)[0]   # "3.2.S.2" → "3.2.S"
+    return data
+```
+
+- Prefer `mode="before"`: `ExtractionModel` sets `validate_assignment=True`, so an
+  unconditional `self.x = ...` in a `mode="after"` validator raises `RecursionError`.
+- Validators never run in the tabular pipeline (`model_construct()`); there the key must come
+  from the mapped column as-is, or from a `normalization_model` submodel.
+- Full rules and a worked example: [`AGENTS.md` §6.7](AGENTS.md#67-computing-instance-keys-with-model_validator-stage-34-only).
+
 > **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Cross-Section `:ModelInstance` Linking via `instance_key`](../../../../docs/user-guides/neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) shows this exact mechanism (UID hashing, shell-node lifecycle) against a real, populated graph example (`CTDSectionSpec`).
 
 ### LabeledEntity
@@ -733,7 +766,8 @@ class Fee(ExtractionModel):
 ### Rules
 
 - `target_model` must be a **string** containing the PascalCase class name of the target model (not the class itself).
-- Every field listed as a remote key in `join_via` **must** be marked `instance_key: True` on the target model.
+- Every field listed as a remote key in `join_via` **must** be marked `instance_key: True` on the target model, and together they must cover the target's **whole** `instance_key` set — a shell's uid is hashed from the `join_via` values only, so a partial key never merges with the real instance.
+- The field that declares `instance_relationships` must itself appear as a key in its own `join_via`; otherwise the entry is skipped with only a log warning.
 - A **list field** acting as the fan-out key must be the same field that declares `instance_relationships`. One `:ModelInstance` edge is created per list item.
 - **Scalar fields** in `join_via` (other than the fan-out field) act as fixed scope keys — they narrow the target to a specific parent context.
 - A field may declare **multiple** `instance_relationships` entries (list); each creates a different typed edge.
@@ -1120,4 +1154,6 @@ configure(
 | `ThemeRegistry: failed to import catalog` | Syntax or import error in `catalog.py` | Fix the error; run `python -c "import models.my_domain.catalog"` to surface it |
 | `instance_relationships` target node never merged (shell stays empty) | Target model does not declare `instance_key: True` on its key fields; UID mismatch between shell and real node | Add `instance_key: True` to the correct key fields of the target model |
 | Fan-out creates zero target nodes | The list field is empty OR the fan-out field name in `join_via` does not match the actual field name | Check `join_via` key matches the exact Python field name |
-| Two models create duplicate `ModelInstance` nodes | `instance_key` fields include a non-normalized value (e.g. mixed case); or a required key field is missing from `join_via` | Normalize values in a `field_validator`; verify all remote key fields are in `join_via` |
+| Two models create duplicate `ModelInstance` nodes | `instance_key` values differ in punctuation/separators/prefix (case, accents and whitespace are already normalized); or a target key field is missing from `join_via` | Canonicalize both sides with the same helper (`field_validator`, or `@model_validator(mode="before")` for derived keys); verify `join_via` covers every target key field |
+| Unrelated records merged into one `ModelInstance` | Their key fields were all blank `""` — `""` is hashed, only `None` is skipped | Make the main key required or derive it |
+| `RecursionError` when instantiating a model | Unconditional `self.x = ...` inside `@model_validator(mode="after")` (`validate_assignment=True`) | Use `mode="before"` and edit the input dict |
