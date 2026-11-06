@@ -140,6 +140,7 @@ class ScinrConfig:
     mistral_ocr_retry_backoff_seconds: float = 2.0
     mistral_ocr_chunk_concurrency: int = 1  # reservado para paralelismo futuro, no usado aún
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] = "fail_fast"
+    mistral_ocr_concurrency: int = 2  # PDFs en conversión OCR a la vez, por event loop
     # Pipeline behaviour
     prompt_caching_enabled: bool = True
     full_docstring: bool = True
@@ -250,6 +251,7 @@ def configure(
     mistral_ocr_retry_backoff_seconds: float | None = None,
     mistral_ocr_chunk_concurrency: int | None = None,
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
+    mistral_ocr_concurrency: int | None = None,
     # Pipeline behaviour
     prompt_caching_enabled: bool | None = None,
     full_docstring: bool | None = None,
@@ -339,6 +341,11 @@ def configure(
             una página individual excede `mistral_ocr_safe_max_bytes` incluso
             aislada) — en ese caso el documento aborta siempre,
             independientemente del valor de `mistral_ocr_error_strategy`.
+        mistral_ocr_concurrency: Máximo de PDFs en conversión OCR a la vez (desde
+            que se lee el PDF hasta que llega la respuesta de su último chunk), por
+            event loop. Acota la memoria del OCR con independencia de
+            `parallel_docs`: cada conversión mantiene como mucho un chunk y su
+            respuesta. Env: `MISTRAL_OCR_CONCURRENCY`. Default: `2`.
         prompt_caching_enabled: Enable prompt caching for supported LLM providers.
         full_docstring: Use the full class docstring (True, default) or only its first
             non-empty line (False) when building the model catalog description shown
@@ -549,6 +556,16 @@ def configure(
             f"Unknown mistral_ocr_error_strategy: {resolved_mistral_ocr_error_strategy!r}. "
             f"Valid values: 'fail_fast', 'best_effort'."
         )
+    resolved_mistral_ocr_concurrency = (
+        mistral_ocr_concurrency
+        if mistral_ocr_concurrency is not None
+        else int(os.getenv("MISTRAL_OCR_CONCURRENCY", "2"))
+    )
+    if resolved_mistral_ocr_concurrency < 1:
+        raise ConfigurationError(
+            f"mistral_ocr_concurrency must be >= 1. "
+            f"Received: {resolved_mistral_ocr_concurrency!r}."
+        )
 
     # ── Pipeline behaviour ────────────────────────────────────────────────────
     resolved_caching = (
@@ -692,6 +709,7 @@ def configure(
         mistral_ocr_retry_backoff_seconds=resolved_mistral_ocr_retry_backoff_seconds,
         mistral_ocr_chunk_concurrency=resolved_mistral_ocr_chunk_concurrency,
         mistral_ocr_error_strategy=resolved_mistral_ocr_error_strategy,
+        mistral_ocr_concurrency=resolved_mistral_ocr_concurrency,
         prompt_caching_enabled=resolved_caching,
         full_docstring=resolved_full_docstring,
         extraction_batch_size=resolved_batch_size,

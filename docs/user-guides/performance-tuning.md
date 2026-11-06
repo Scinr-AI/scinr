@@ -373,6 +373,7 @@ configure(
     mistral_ocr_retry_backoff_seconds=2.0, # Retry backoff base (default)
     mistral_ocr_chunk_concurrency=1,       # OCR chunk concurrency (default)
     mistral_ocr_error_strategy="best_effort",  # Error handling (default is "fail_fast")
+    mistral_ocr_concurrency=2,             # PDFs in OCR conversion at once (default)
 )
 ```
 
@@ -438,6 +439,14 @@ Controls error handling during OCR processing.
 | `"best_effort"` | Continues processing and collects whatever OCR results are available |
 
 For production pipelines processing many documents, `"best_effort"` is recommended to avoid a single OCR failure blocking the entire batch.
+
+### `mistral_ocr_concurrency`
+
+**Default:** `2`  **Env var:** `MISTRAL_OCR_CONCURRENCY`
+
+Maximum number of PDFs being converted by Mistral OCR at the same time, per event loop, from the moment a PDF is read until the response for its last chunk arrives. It applies on top of `parallel_docs`: with `parallel_docs=5` and the default `2`, at most two PDFs are in OCR while the other documents keep running their later stages.
+
+Each conversion holds at most one chunk (up to `mistral_ocr_safe_max_bytes`) and Mistral's response for it; the request body itself is streamed, so it needs a few MB whatever the size of the PDF. Lower it to `1` on memory-constrained workers; raise it when many small PDFs make OCR the bottleneck.
 
 ---
 

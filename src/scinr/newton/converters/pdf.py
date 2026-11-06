@@ -1,10 +1,15 @@
 """
 converters/pdf.py — PDF to Markdown converter via Mistral OCR API.
 
-Encodes the PDF as base64 and submits it to the Mistral OCR endpoint
-(``POST https://api.mistral.ai/v1/ocr``).  The API response already
-matches the intermediate document format, so each page is mapped
-directly to an ``IntermediatePage``.
+Submits the PDF as a base64 data URL to the Mistral OCR endpoint
+(``POST https://api.mistral.ai/v1/ocr``).  The JSON body is streamed: the
+base64 is encoded block by block while it is sent (``_OcrRequestBody``), so
+a request needs a few MB of memory whatever the size of the PDF.  The API
+response already matches the intermediate document format, so each page is
+mapped directly to an ``IntermediatePage``.
+
+At most ``mistral_ocr_concurrency`` PDFs are converted at the same time per
+event loop, independently of the caller's ``parallel_docs``.
 
 Para PDFs que exceden los límites de la API de Mistral OCR (máx. 1000
 páginas / 50 MB por solicitud), el documento se divide automáticamente
@@ -22,8 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
+import weakref
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +61,20 @@ _DEFAULT_SAFE_MAX_BYTES = 45 * 1024 * 1024
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
 _DEFAULT_ERROR_STRATEGY = "fail_fast"
+_DEFAULT_OCR_CONCURRENCY = 2
+
+# PDF bytes encoded per step of the streamed body. A multiple of 3, so every
+# block but the last encodes to base64 without padding and the blocks can be
+# concatenated into one valid base64 string.
+_BASE64_BLOCK_BYTES = 3 * 1024 * 1024
+
+# The OCR request body is this prefix, the PDF in base64 and this suffix: the same
+# JSON the API received when the body was built with json=payload.
+_OCR_BODY_PREFIX = (
+    '{"model": ' + json.dumps(_MISTRAL_OCR_MODEL) + ', "document": '
+    '{"type": "document_url", "document_url": "data:application/pdf;base64,'
+).encode("ascii")
+_OCR_BODY_SUFFIX = b'"}}'
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
@@ -73,6 +95,81 @@ class _OcrLimits:
     max_retries: int
     retry_backoff_seconds: float
     error_strategy: str
+    concurrency: int
+
+
+class _OcrRequestBody:
+    """JSON body of one OCR request, produced block by block while httpx sends it.
+
+    Only one block of the PDF and its base64 are alive at a time. ``document`` is
+    either the path of the PDF (read from disk during the send) or the bytes of a
+    chunk already serialised by the splitter. Iterable more than once, so every
+    retry streams it again from the start.
+    """
+
+    def __init__(self, document: Path | bytes) -> None:
+        self._document = document
+        if isinstance(document, Path):
+            try:
+                self._size = document.stat().st_size
+            except OSError as exc:
+                raise ConversionError(f"Cannot read PDF file {document}: {exc}") from exc
+        else:
+            self._size = len(document)
+        self.content_length = (
+            len(_OCR_BODY_PREFIX) + 4 * ((self._size + 2) // 3) + len(_OCR_BODY_SUFFIX)
+        )
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield _OCR_BODY_PREFIX
+        if isinstance(self._document, Path):
+            async for block in self._file_blocks(self._document):
+                yield base64.b64encode(block)
+        else:
+            view = memoryview(self._document)
+            for start in range(0, self._size, _BASE64_BLOCK_BYTES):
+                yield base64.b64encode(view[start : start + _BASE64_BLOCK_BYTES])
+        yield _OCR_BODY_SUFFIX
+
+    async def _file_blocks(self, path: Path) -> AsyncIterator[bytes]:
+        # Reads exactly the size measured for Content-Length: a file that changed in
+        # between is an error, not a request that disagrees with its own header.
+        remaining = self._size
+        try:
+            with path.open("rb") as fh:
+                while remaining > 0:
+                    block = await asyncio.to_thread(fh.read, min(_BASE64_BLOCK_BYTES, remaining))
+                    if not block:
+                        break
+                    remaining -= len(block)
+                    yield block
+        except OSError as exc:
+            raise ConversionError(f"Cannot read PDF file {path}: {exc}") from exc
+        if remaining:
+            raise ConversionError(
+                f"PDF file {path} changed size while it was being sent to Mistral OCR"
+            )
+
+
+# One semaphore per event loop: an asyncio.Semaphore is bound to the loop that first
+# waits on it, and callers such as Celery workers run asyncio.run() once per task.
+_ocr_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]
+] = weakref.WeakKeyDictionary()
+
+
+def _get_ocr_semaphore(limit: int) -> asyncio.Semaphore:
+    """Semaphore bounding the PDFs in OCR conversion on the running event loop.
+
+    A different *limit* (``configure(mistral_ocr_concurrency=N)`` between runs)
+    replaces it for the conversions that start afterwards.
+    """
+    loop = asyncio.get_running_loop()
+    entry = _ocr_semaphores.get(loop)
+    if entry is None or entry[0] != limit:
+        entry = (limit, asyncio.Semaphore(limit))
+        _ocr_semaphores[loop] = entry
+    return entry[1]
 
 
 class PdfConverter(BaseConverter):
@@ -118,6 +215,10 @@ class PdfConverter(BaseConverter):
         aborta siempre, independientemente del ``error_strategy``
         configurado. Como los chunks se generan bajo demanda, ese error
         puede detectarse tras haber enviado ya chunks anteriores a la API.
+    concurrency:
+        Override explícito del máximo de PDFs en conversión a la vez en el
+        event loop. Si ``None``, se resuelve vía ``get_config()``
+        (``mistral_ocr_concurrency``) o el default del módulo.
     """
 
     supported_extensions: frozenset[str] = frozenset({"pdf"})
@@ -131,6 +232,7 @@ class PdfConverter(BaseConverter):
         max_retries: int | None = None,
         retry_backoff_seconds: float | None = None,
         error_strategy: str | None = None,
+        concurrency: int | None = None,
     ) -> None:
         self._api_key: str | None = api_key
         self._safe_max_pages = safe_max_pages
@@ -138,6 +240,7 @@ class PdfConverter(BaseConverter):
         self._max_retries = max_retries
         self._retry_backoff_seconds = retry_backoff_seconds
         self._error_strategy = error_strategy
+        self._concurrency = concurrency
 
     # ------------------------------------------------------------------
     # Public interface
@@ -205,27 +308,30 @@ class PdfConverter(BaseConverter):
                 "  - Pass it to configure(mistral_api_key='your_key')"
             )
 
+        limits = self._resolve_limits()
+
+        # Each conversion holds at most one chunk and Mistral's response for it; the
+        # semaphore bounds how many coincide, whatever the caller's parallel_docs.
+        async with _get_ocr_semaphore(limits.concurrency):
+            return await self._convert_pdf(source, api_key, limits)
+
+    async def _convert_pdf(
+        self, source: Path, api_key: str, limits: _OcrLimits
+    ) -> IntermediateDocument:
+        """Body of :meth:`convert`, run while holding the OCR semaphore."""
         logger.info("Reading PDF: %s", source.name)
         # Only the size and the page index are read here — never the whole file.
         size_bytes, total_pages_original = probe_pdf(source)
-
-        limits = self._resolve_limits()
 
         must_split = (
             size_bytes > limits.safe_max_bytes or total_pages_original > limits.safe_max_pages
         )
 
         if not must_split:
-            # Within the API limits (<= safe_max_bytes): read it once and send it as is.
-            try:
-                with source.open("rb") as fh:
-                    pdf_bytes = fh.read()
-            except OSError as exc:
-                raise ConversionError(f"Cannot read PDF file {source}: {exc}") from exc
+            # Within the API limits (<= safe_max_bytes): streamed from disk as is.
             pages = await self._convert_chunk(
-                pdf_bytes, api_key, source.name, page_offset=0, limits=limits
+                source, api_key, source.name, page_offset=0, limits=limits
             )
-            del pdf_bytes
             logger.info("Converted %d page(s) from %s", len(pages), source.name)
             return IntermediateDocument(pages=pages)
 
@@ -356,6 +462,16 @@ class PdfConverter(BaseConverter):
         if error_strategy is None:
             error_strategy = _DEFAULT_ERROR_STRATEGY
 
+        concurrency = self._concurrency
+        if concurrency is None:
+            concurrency = getattr(cfg, "mistral_ocr_concurrency", None)
+        if concurrency is None:
+            concurrency = _DEFAULT_OCR_CONCURRENCY
+        if concurrency < 1:
+            raise ConversionError(
+                f"mistral_ocr_concurrency debe ser >= 1. Recibido: {concurrency!r}."
+            )
+
         if error_strategy not in ("fail_fast", "best_effort"):
             raise ConversionError(
                 f"Valor inválido para mistral_ocr_error_strategy: {error_strategy!r}. "
@@ -368,11 +484,12 @@ class PdfConverter(BaseConverter):
             max_retries=max_retries,
             retry_backoff_seconds=retry_backoff_seconds,
             error_strategy=error_strategy,
+            concurrency=concurrency,
         )
 
     async def _convert_chunk(
         self,
-        pdf_bytes: bytes,
+        document: Path | bytes,
         api_key: str,
         chunk_label: str,
         page_offset: int,
@@ -383,8 +500,9 @@ class PdfConverter(BaseConverter):
 
         Parameters
         ----------
-        pdf_bytes:
-            Bytes del chunk (PDF autocontenido) a enviar.
+        document:
+            PDF autocontenido a enviar: la ruta del fichero (caso sin split, se
+            lee por bloques al enviarlo) o los bytes del chunk (caso con split).
         api_key:
             Mistral API key.
         chunk_label:
@@ -408,23 +526,18 @@ class PdfConverter(BaseConverter):
         -------
         list[IntermediatePage]
         """
-        pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-
-        payload = {
-            "model": _MISTRAL_OCR_MODEL,
-            "document": {
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{pdf_b64}",
-            },
-        }
+        body = _OcrRequestBody(document)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # An explicit Content-Length makes httpx send the streamed body as a plain
+            # request, not with Transfer-Encoding: chunked.
+            "Content-Length": str(body.content_length),
         }
 
         logger.info("Calling Mistral OCR API for %s", chunk_label)
         data = await self._post_to_mistral_with_retry(
-            payload, headers, limits, chunk_label, error_label=error_label
+            body, headers, limits, chunk_label, error_label=error_label
         )
 
         if "pages" not in data:
@@ -438,7 +551,7 @@ class PdfConverter(BaseConverter):
 
     async def _post_to_mistral_with_retry(
         self,
-        payload: dict,
+        body: _OcrRequestBody,
         headers: dict,
         limits: _OcrLimits,
         chunk_label: str,
@@ -449,8 +562,8 @@ class PdfConverter(BaseConverter):
 
         Parameters
         ----------
-        payload:
-            Cuerpo JSON de la solicitud.
+        body:
+            Cuerpo JSON de la solicitud, generado por bloques en cada intento.
         headers:
             Cabeceras HTTP (incluye Authorization).
         limits:
@@ -481,7 +594,7 @@ class PdfConverter(BaseConverter):
                 async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
                     response = await client.post(
                         _MISTRAL_OCR_URL,
-                        json=payload,
+                        content=body,
                         headers=headers,
                     )
             except httpx.RequestError as exc:
