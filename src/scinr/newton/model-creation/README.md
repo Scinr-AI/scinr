@@ -135,6 +135,33 @@ normalizes the values and rebuilds the `uid`; do not write `toLower(mi.field) = 
 a function applied to the property prevents the planner from using any index. A filter on
 **part** of the key (`where={"field": normalize_key(value)}`) uses the per-field index.
 
+#### Computing keys with `@model_validator` (documents pipeline only)
+
+`normalize_key` keeps punctuation, prefixes and separators, so `"Q.I.a.1"`, `"QIa1"` and the
+OCR'd `"Q.1.a.1"` are three different nodes. When the value must be canonicalized, derived from
+another field (`parent_code` from `code`) or split into composite parts, do it in a
+`@model_validator(mode="before")` that runs **one shared helper on the key and on every field
+that references it** — a shell's uid is hashed from the *local* `join_via` values, so both
+sides must match:
+
+```python
+@model_validator(mode="before")
+@classmethod
+def _derive_keys(cls, data: Any) -> Any:
+    if isinstance(data, dict) and "code" in data:
+        code = canonical_code(data["code"] or "")
+        data = {**data, "code": code}
+        if code and not data.get("parent_code") and "." in code:
+            data["parent_code"] = code.rsplit(".", 1)[0]   # "3.2.S.2" → "3.2.S"
+    return data
+```
+
+- Prefer `mode="before"`: `ExtractionModel` sets `validate_assignment=True`, so an
+  unconditional `self.x = ...` in a `mode="after"` validator raises `RecursionError`.
+- Validators never run in the tabular pipeline (`model_construct()`); there the key must come
+  from the mapped column as-is, or from a `normalization_model` submodel.
+- Full rules and a worked example: [`AGENTS.md` §6.7](AGENTS.md#67-computing-instance-keys-with-model_validator-stage-34-only).
+
 > **See it validated against a live graph:** [`docs/user-guides/neo4j-graph.md` — Cross-Section `:ModelInstance` Linking via `instance_key`](../../../../docs/user-guides/neo4j-graph.md#cross-section-modelinstance-linking-via-instance_key) shows this exact mechanism (UID hashing, shell-node lifecycle) against a real, populated graph example (`CTDSectionSpec`).
 
 ### LabeledEntity
@@ -269,15 +296,22 @@ SELECTABLE_MODELS: list[type] = [
 `ThemeRegistry` discovers the new theme automatically. Verify with:
 
 ```bash
+# Run from the folder ABOVE your package's top __init__.py (or set PYTHONPATH to it)
 python -c "
-from utils.theme_registry import ThemeRegistry
-r = ThemeRegistry()
-print(r.list_themes())
+from scinr.newton import configure
+from scinr.newton.utils.theme_registry import get_theme_registry
+configure(neo4j_user='x', neo4j_password='x', neo4j_database='x',
+          extra_models_paths=['/abs/path/to/models_root'])
+reg = get_theme_registry()
+for p in reg.get_all_theme_paths():
+    print(p, len(reg.find_best_theme(p).models), 'models')
 "
 ```
 
-The new theme path (`my_domain`) must appear in the output. If it does not, check for
-import errors in `catalog.py`.
+The new theme path (`my_domain`) must appear in the output **with a non-zero model count**.
+A catalog that fails to import is only logged as a WARNING and the theme is still listed,
+with 0 models — check for import errors in `catalog.py` and that the folder above your top
+`__init__.py` is on `sys.path`.
 
 ---
 
@@ -726,7 +760,8 @@ class Fee(ExtractionModel):
 ### Rules
 
 - `target_model` must be a **string** containing the PascalCase class name of the target model (not the class itself).
-- Every field listed as a remote key in `join_via` **must** be marked `instance_key: True` on the target model.
+- Every field listed as a remote key in `join_via` **must** be marked `instance_key: True` on the target model, and together they must cover the target's **whole** `instance_key` set — a shell's uid is hashed from the `join_via` values only, so a partial key never merges with the real instance.
+- The field that declares `instance_relationships` must itself appear as a key in its own `join_via`; otherwise the entry is skipped with only a log warning.
 - A **list field** acting as the fan-out key must be the same field that declares `instance_relationships`. One `:ModelInstance` edge is created per list item.
 - **Scalar fields** in `join_via` (other than the fan-out field) act as fixed scope keys — they narrow the target to a specific parent context.
 - A field may declare **multiple** `instance_relationships` entries (list); each creates a different typed edge.
@@ -889,9 +924,18 @@ Use this checklist before merging a new extraction domain.
 
 - [ ] `THEME_DESCRIPTION` is specific and technically distinguishable from existing themes
 - [ ] `SELECTABLE_MODELS` includes all top-level models (sub-models that are only embedded fields do not need to be listed)
-- [ ] Auto-discovery verified:
+- [ ] Auto-discovery verified (theme listed with a non-zero model count):
   ```bash
-  python -c "from utils.theme_registry import ThemeRegistry; r = ThemeRegistry(); print(r.list_themes())"
+  # Run from the folder ABOVE your package's top __init__.py (or set PYTHONPATH to it)
+  python -c "
+  from scinr.newton import configure
+  from scinr.newton.utils.theme_registry import get_theme_registry
+  configure(neo4j_user='x', neo4j_password='x', neo4j_database='x',
+            extra_models_paths=['/abs/path/to/models_root'])
+  reg = get_theme_registry()
+  for p in reg.get_all_theme_paths():
+      print(p, len(reg.find_best_theme(p).models), 'models')
+  "
   ```
 - [ ] No import errors when loading `catalog.py`
 
@@ -1096,7 +1140,7 @@ configure(
 
 | Error | Cause | Fix |
 |---|---|---|
-| Theme missing from `list_themes()` | No `catalog.py` in the folder, or it has an import error | Create/fix `catalog.py`; check all imports resolve |
+| Theme missing from `get_all_theme_paths()`, or listed with 0 models | No `catalog.py` in the folder, or it has an import error (only logged as a WARNING) | Create/fix `catalog.py`; check all imports resolve |
 | `KeyError: No model registered for 'X'` | Class not reachable by BFS from `SELECTABLE_MODELS` | Add the class directly to `SELECTABLE_MODELS`, or make sure it is a field type of a model that is already listed |
 | `extra inputs are not permitted` | LLM produced a field not in the model schema | If the field should exist, add it; otherwise this is correct behavior (`extra="forbid"`) |
 | Sub-model never selected by agent | Not in `SELECTABLE_MODELS` | Add it if it should be a primary extraction target |
@@ -1104,4 +1148,5 @@ configure(
 | `ThemeRegistry: failed to import catalog` | Syntax or import error in `catalog.py` | Fix the error; run `python -c "import models.my_domain.catalog"` to surface it |
 | `instance_relationships` target node never merged (shell stays empty) | Target model does not declare `instance_key: True` on its key fields; UID mismatch between shell and real node | Add `instance_key: True` to the correct key fields of the target model |
 | Fan-out creates zero target nodes | The list field is empty OR the fan-out field name in `join_via` does not match the actual field name | Check `join_via` key matches the exact Python field name |
-| Two models create duplicate `ModelInstance` nodes | `instance_key` fields include a non-normalized value (e.g. mixed case); or a required key field is missing from `join_via` | Normalize values in a `field_validator`; verify all remote key fields are in `join_via` |
+| Two models create duplicate `ModelInstance` nodes | `instance_key` values differ in punctuation/separators/prefix (case, accents and whitespace are already normalized); or a target key field is missing from `join_via` | Canonicalize both sides with the same helper (`field_validator`, or `@model_validator(mode="before")` for derived keys); verify `join_via` covers every target key field |
+| `RecursionError` when instantiating a model | Unconditional `self.x = ...` inside `@model_validator(mode="after")` (`validate_assignment=True`) | Use `mode="before"` and edit the input dict |

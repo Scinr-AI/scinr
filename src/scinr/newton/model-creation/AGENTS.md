@@ -668,10 +668,12 @@ class ContactRecord(ExtractionModel):
    Pydantic validation).
 
 This mechanism is:
-- **Opt-in and off by default.** It only runs if the pipeline caller has explicitly called
-  `configure(normalization_enabled=True, normalization_llm=..., normalization_batch_size=...)`.
-  If `normalization_enabled` is `False` (the default), `normalization_model` is completely
-  inert — everywhere, including in the tabular pipeline.
+- **Per-field opt-in, enabled by default.** `normalization_enabled` defaults to `True`
+  (env `NORMALIZATION_ENABLED`, default `"true"`), so the engine runs on every tabular
+  ingestion — but it only touches fields marked `normalization_model: True`. Tune it with
+  `configure(normalization_llm=..., normalization_batch_size=...)`. Only
+  `configure(normalization_enabled=False)` switches it off, and then `normalization_model`
+  is completely inert — everywhere, including in the tabular pipeline.
 - **Tabular-only hook, but the keys stay visible everywhere.** The `NormalizationEngine`
   hook itself is wired into the tabular ingestion pipeline and nowhere else — it never
   runs during Stage 3–4 (PDF/DOCX) extraction. During Stage 3–4, the nested field is
@@ -816,6 +818,73 @@ class ContactRecord(ExtractionModel):
 fields the normalization actually needs. Never rely on the implicit "all other scalar
 fields" fallback — it silently widens the LLM's input on every wide model and is invisible
 in code review.
+
+### 6.7 Computing instance keys with `@model_validator` (Stage 3–4 only)
+
+The `:ModelInstance` uid is hashed from the instance's attribute values **after** Pydantic
+validation. On top of that, the pipeline only applies `normalize_key` (NFKD, drop accents,
+collapse whitespace, lowercase — `src/scinr/newton/utils/uid.py`). Punctuation, prefixes and
+separators are kept, so `"Q.I.a.1"`, `"QIa1"` and the OCR'd `"Q.1.a.1"` are **three different
+nodes**. Making the values match is the model's job. Use a `field_validator` (§6.1) for a
+single-field cleanup; use a `@model_validator` when the key depends on other fields:
+
+| Use | Example |
+|---|---|
+| **Canonicalize** a key the same way on both sides of a join | `ItemModel.item_code` and `ConditionModel.item_code` both pass through one `canonical_code()` |
+| **Derive** a key or anchor from another field instead of trusting the LLM to fill it | `parent_code` from `code` (`"3.2.S.2"` → `"3.2.S"`), `root_variation_code` from `variation_code` |
+| **Split** one value into the parts of a composite key | `"A-001/2"` → `item_code="A-001"`, `condition_id="2"` |
+
+```python
+import re
+from typing import Any
+from pydantic import Field, model_validator
+
+
+def canonical_code(v: str) -> str:
+    return re.sub(r"\s+", "", v).upper()   # use the SAME helper on every model that joins on it
+
+
+class SectionSpec(ExtractionModel):
+    """A single CTD section specification with its code and title."""
+
+    code: str = Field(..., description="...", json_schema_extra={"entity_label": "CTDSection", "instance_key": True})
+    parent_code: str = Field(default="", description="...", json_schema_extra={
+        "instance_relationships": [{"target_model": "SectionSpec", "join_via": {"parent_code": "code"}, "rel_type": "HAS_PARENT_SECTION"}],
+    })
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "code" in data:
+            data["code"] = canonical_code(data["code"] or "")
+        code = data.get("code") or ""
+        if code and not data.get("parent_code") and "." in code:
+            data["parent_code"] = code.rsplit(".", 1)[0]
+        else:
+            data["parent_code"] = canonical_code(data.get("parent_code") or "")
+        return data
+```
+
+**Rules:**
+- **Prefer `mode="before"`** — it edits the input dict once. `ExtractionModel` sets
+  `validate_assignment=True`, so in `mode="after"` every `self.x = ...` re-runs validation,
+  including the `after` validator itself: an unconditional assignment raises `RecursionError`.
+  If you must use `after`, assign only when the value actually changes.
+- **Normalize the reference side too.** A shell's uid is hashed from the *local* `join_via`
+  values, so the source fields (`parent_code`, `condition_ids` items) must go through the same
+  helper as the target's key — fixing only the target leaves the two sides different.
+- `str_strip_whitespace=True` runs during field validation, i.e. *after* a `mode="before"`
+  validator — strip inside the helper yourself. `use_enum_values=True` means enum fields hold
+  plain strings in `mode="after"` validators.
+- **Never** derive a key from a list or free-text field, and never pack several values into one
+  key (`"A; B"`).
+- **Documents pipeline only.** Validators run in Stage 4 (`with_structured_output` validates
+  fully) and on direct `Model(...)` calls; the tabular pipeline uses `model_construct()` and
+  never runs them (§4.7). A tabular key must come from the mapped column as-is, or from a
+  `normalization_model` submodel (§6.4).
 
 ---
 
@@ -1057,6 +1126,8 @@ class XxxModelList(ExtractionModel):
 | Omitting `normalization_model` on a field of a model used with the TABULAR pipeline | The tabular `NormalizationEngine` hook has nothing to trigger on; the nested submodel field silently stays `None`/unpopulated on every row, with no error raised | Add `normalization_model: True` + explicit `normalization_source_fields` on every field that needs tabular-time normalization (mandatory for structured/tabular usage — see §6.5) |
 | Omitting `normalization_source_fields` (relying on the implicit fallback) on a wide model | Engine silently sends ALL other scalar fields of the parent model as source data to the normalization LLM — wastes tokens and leaks irrelevant context | Always set `normalization_source_fields` explicitly to the exact sibling fields needed |
 | Declaring a mappable field as `int`/`float`/`bool`/`date`/`Enum`/nested-submodel on a model used with the TABULAR pipeline | `model_construct()` skips validation; multi-column combination only merges `str`/`list[str]` fields, so if two columns map to that field the last one processed silently wins and earlier column data is lost (warning-only, no error) | Use `str` or `list[str]` for the field. If a real type is genuinely needed, wrap it in a nested submodel marked `normalization_model: True` (see §4.7/§6.4) — never a `@model_validator`, which never runs in this pipeline |
+| Key value formats differ between the target's `instance_key` and the referencing field (`"Q.I.a.1"` vs `"QIa1"`) | `normalize_key` only lowercases, strips accents and collapses whitespace — the shell and the real instance get different uids and never merge | Canonicalize both sides with the same helper in a `mode="before"` `@model_validator` or shared `field_validator` (§6.7) |
+| Unconditional `self.x = ...` inside a `@model_validator(mode="after")` | `validate_assignment=True` re-runs the validator on every assignment → `RecursionError` | Use `mode="before"` and edit the input dict |
 | Adding `@model_validator`/`@field_validator` to a model expecting it to coerce a tabular field's type | `model_construct()` (used for ALL row instantiation in the tabular pipeline) unconditionally skips every validator, in every mode; the field silently stays a raw `str` forever | Do not rely on validators for tabular-pipeline type coercion at all; use a `normalization_model`-marked nested submodel instead (see §4.7/§6.4) |
 
 ---
@@ -1083,6 +1154,7 @@ class XxxModelList(ExtractionModel):
 - [ ] `instance_relationships` declared where cross-section or cross-document linking is needed
 - [ ] Every `target_model` in `instance_relationships` has `instance_key: True` on its key fields
 - [ ] Fan-out `join_via` field names exactly match Python field names
+- [ ] Key values are canonicalized identically on the target's `instance_key` fields and on every field that references them (§6.7)
 
 ### Normalization (`normalization_model`)
 - [ ] Structured-vs-unstructured-vs-both usage was clarified with the user/developer before deciding whether to add `normalization_model` keys
@@ -1095,7 +1167,19 @@ class XxxModelList(ExtractionModel):
 - [ ] If list wrapper `XxxModelList` exists, both `XxxModel` and `XxxModelList` are in `SELECTABLE_MODELS`
 
 ### Validation
-- [ ] Auto-discovery verified: `python -c "from scinr.newton.utils.theme_registry import ThemeRegistry; print(ThemeRegistry().list_themes())"`
+- [ ] Auto-discovery verified, with a **non-zero model count** for every theme (a catalog that fails to import is only logged as a WARNING and the theme is still listed, with 0 models):
+  ```bash
+  # Run from the folder ABOVE your package's top __init__.py (or set PYTHONPATH to it)
+  python -c "
+  from scinr.newton import configure
+  from scinr.newton.utils.theme_registry import get_theme_registry
+  configure(neo4j_user='x', neo4j_password='x', neo4j_database='x',
+            extra_models_paths=['/abs/path/to/models_root'])
+  reg = get_theme_registry()
+  for p in reg.get_all_theme_paths():
+      print(p, len(reg.find_best_theme(p).models), 'models')
+  "
+  ```
 - [ ] No import errors: `python -c "import my_package.my_theme.catalog"`
 - [ ] At least one real document processed end-to-end (Stage 3 + Stage 4)
 

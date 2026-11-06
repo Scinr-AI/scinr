@@ -1,0 +1,12 @@
+{
+  "name": "scinr",
+  "description": "Scinr AI plugins for Claude Code.",
+  "owner": { "name": "Scinr AI", "url": "https://www.scinr.com/" },
+  "plugins": [
+    {
+      "name": "scinr",
+      "source": "./",
+      "description": "Skills for the scinr SDK: create and validate custom extraction models and themes."
+    }
+  ]
+}
