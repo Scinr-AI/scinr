@@ -294,6 +294,9 @@ It returns an `OrphanCollectionResult` with `tenant_id` and the four `gc_*` coun
 | `gc_entity_model_instance_passes` | `int` | GC rounds run over `:Entity`/`:ModelInstance` candidates: `0` when there was none, one more each time a deleted node turned what it pointed at into candidates. |
 | `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes this deletion left orphaned, and deleted. |
 | `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates. |
+| `raw_files_deleted` | `int` | Original uploads deleted from the storage backend, for the `raw_file_id`s of the deleted documents. |
+| `converted_pages_deleted` | `int` | Converted pages deleted from the storage backend for the same `raw_file_id`s. |
+| `page_images_deleted` | `int` | Stored images and video frames deleted from the storage backend for the same `raw_file_id`s (deleted before the pages). Always `0` with a backend that stores no images. |
 
 When the call finished an interrupted delete or freeze, the `gc_*` counters are those of a sweep of the whole tenant (see [What it does not collect](#what-it-does-not-collect)).
 

@@ -100,6 +100,8 @@ from scinr.newton.navigation.models import (
     NodePath,
     NodeSelector,
     OriginalFile,
+    PageImageFile,
+    PageImageRef,
     PageText,
     PathResult,
     ProposedModelRef,
@@ -1703,6 +1705,7 @@ class GraphNavigator(ABC):
         self,
         node_ids: Sequence[str],
         *,
+        include_images: bool = False,
         tenant_id: str | None = None,
         include_public: bool = False,
         created_by_user_id: str | Sequence[str] | None = None,
@@ -1718,6 +1721,9 @@ class GraphNavigator(ABC):
         status groups instead of raising. See
         :func:`scinr.newton.navigation.pages.get_structure_nodes_source_pages`.
 
+        *include_images*: fill each page's ``images`` with its stored images
+        (one storage read per ``(tenant, raw_file_id)``, in the node's tenant).
+
         Raises:
             StorageError: If there are pages to read and no persistent storage
                 backend is configured.
@@ -1725,7 +1731,7 @@ class GraphNavigator(ABC):
         from scinr.newton.navigation import pages
 
         return await pages.get_structure_nodes_source_pages(
-            self, node_ids, tenant_id=tenant_id, include_public=include_public,
+            self, node_ids, include_images=include_images, tenant_id=tenant_id, include_public=include_public,
             created_by_user_id=created_by_user_id, job_id=job_id,
         )
 
@@ -1733,6 +1739,7 @@ class GraphNavigator(ABC):
         self,
         uid: str,
         *,
+        include_images: bool = False,
         tenant_id: str | None = None,
         include_public: bool = False,
         created_by_user_id: str | Sequence[str] | None = None,
@@ -1740,13 +1747,15 @@ class GraphNavigator(ABC):
     ) -> list[PageText]:
         """Return the source pages behind the structure node owning info unit *uid*.
 
+        *include_images*: fill each page's ``images`` with its stored images.
+
         Raises:
             StorageError: If no persistent storage backend is configured.
         """
         from scinr.newton.navigation import pages
 
         return await pages.get_info_unit_source_text(
-            self, uid, tenant_id=tenant_id, include_public=include_public,
+            self, uid, include_images=include_images, tenant_id=tenant_id, include_public=include_public,
             created_by_user_id=created_by_user_id, job_id=job_id,
         )
 
@@ -1755,6 +1764,7 @@ class GraphNavigator(ABC):
         document: _Selector,
         *,
         version: int | None = None,
+        include_images: bool = False,
         tenant_id: str | None = None,
         include_public: bool = False,
         created_by_user_id: str | Sequence[str] | None = None,
@@ -1763,13 +1773,17 @@ class GraphNavigator(ABC):
         """Return every converted page of *document* (latest, or *version*),
         ordered by page index.
 
+        *include_images*: fill each page's ``images`` with its stored images
+        (one storage read, in the document's tenant).
+
         Raises:
             StorageError: If no persistent storage backend is configured.
         """
         from scinr.newton.navigation import pages
 
         return await pages.get_document_source_text(
-            self, document, version=version, tenant_id=tenant_id,
+            self, document, version=version, include_images=include_images,
+            tenant_id=tenant_id,
             include_public=include_public, created_by_user_id=created_by_user_id,
             job_id=job_id,
         )
@@ -1800,4 +1814,61 @@ class GraphNavigator(ABC):
             self, document, version=version, tenant_id=tenant_id,
             include_public=include_public, created_by_user_id=created_by_user_id,
             job_id=job_id,
+        )
+
+    async def get_document_images(
+        self,
+        document: _Selector,
+        *,
+        version: int | None = None,
+        page_indexes: Sequence[int] | None = None,
+        kind: Literal["embedded", "frame"] | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[PageImageRef]:
+        """Return the stored images of *document* (latest, or *version*),
+        ordered by ``(page_index, image_index)``; optionally only some
+        *page_indexes* or one *kind* (``"embedded"`` / ``"frame"``).
+
+        ``[]`` when the document is not found in the scope or has no stored
+        original. See :func:`scinr.newton.navigation.pages.get_document_images`.
+
+        Raises:
+            StorageError: If no persistent storage backend is configured.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_document_images(
+            self, document, version=version, page_indexes=page_indexes, kind=kind,
+            tenant_id=tenant_id, include_public=include_public,
+            created_by_user_id=created_by_user_id, job_id=job_id,
+        )
+
+    async def get_page_image(
+        self,
+        image_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> PageImageFile | None:
+        """Open the stored image *image_id* (``PageImageRef.image_id``): its
+        ``PageImageRecord`` plus a single-use stream of the bytes.
+
+        The storage read applies the call's full scope (no graph node to
+        resolve); an image outside it returns ``None``, like a missing one.
+        See :func:`scinr.newton.navigation.pages.get_page_image`.
+
+        Raises:
+            StorageError: If no persistent storage backend is configured, or
+                the record exists but its binary is missing.
+        """
+        from scinr.newton.navigation import pages
+
+        return await pages.get_page_image(
+            self, image_id, tenant_id=tenant_id, include_public=include_public,
+            created_by_user_id=created_by_user_id, job_id=job_id,
         )

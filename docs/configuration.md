@@ -60,6 +60,8 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `FREEZE_BACKEND` | *(inherits `STORAGE_BACKEND`)* | Backend for document snapshots (`freeze_document()`, `restore_document()`): `none`, `mongodb` or `custom`. See [Document Freezing](user-guides/document-freezing.md). |
 | `MONGODB_FROZEN_COLLECTION` | `frozen_documents` | Collection for snapshot metadata. |
 | `MONGODB_FROZEN_GRIDFS_BUCKET` | `frozen_snapshots` | GridFS bucket for snapshot files. |
+| `MONGODB_IMAGES_COLLECTION` | `page_images` | Collection for the metadata of stored images and video frames. |
+| `MONGODB_IMAGES_GRIDFS_BUCKET` | `page_image_binaries` | GridFS bucket for the bytes of stored images and video frames. |
 
 ### PDF / Mistral OCR
 
@@ -82,6 +84,8 @@ See [Multimodal Ingestion](user-guides/multimodal-ingestion.md). `vision_llm` an
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `DESCRIBE_EMBEDDED_IMAGES` | `true` | Describe the embedded images of PDF, DOCX and PPTX. **Only acts with a `vision_llm` configured**; without one, nothing is requested from Mistral and no image blob is read. |
+| `STORE_DESCRIBED_IMAGES` | `true` | Store the original of each embedded image that gets a description. Only acts with a persistent storage backend that stores images (`RawFileRepository.stores_images`). See [Retrieving images and frames](user-guides/multimodal-ingestion.md#retrieving-images-and-frames). |
+| `STORE_VIDEO_FRAMES` | `true` | Store each described video frame, with its instant. Long videos take about `video_frames_per_minute × minutes` JPEGs. |
 | `MEDIA_ERROR_STRATEGY` | `best_effort` | A failed embedded image, audio/video segment or frame: `best_effort` skips it and records it in `missing_images` / `missing_segments`; `fail_fast` fails the document. |
 | `STRIP_LOCATION` | `true` | With `true` the GPS location of images is not read nor stored. |
 | `IMAGE_MAX_SIDE_PX` | `1568` | Longer side, in pixels, of the images sent to the `vision_llm` (downscaled before sending). |
@@ -161,6 +165,8 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 | `freeze_backend` | `str \| None` | Snapshot backend: `none`, `mongodb` or `custom`. Unset → `FREEZE_BACKEND`, else the resolved `storage_backend`. |
 | `mongodb_frozen_collection` | `str \| None` | Collection for snapshot metadata (default `frozen_documents`). |
 | `mongodb_frozen_gridfs_bucket` | `str \| None` | GridFS bucket for snapshot files (default `frozen_snapshots`). |
+| `mongodb_images_collection` | `str \| None` | Collection for stored images and frames (default `page_images`). |
+| `mongodb_images_gridfs_bucket` | `str \| None` | GridFS bucket for stored images and frames (default `page_image_binaries`). |
 | `custom_freeze_storage` | `FreezeRepository \| None` | Snapshot repository instance when `freeze_backend='custom'`. |
 
 ### Converter Parameters
@@ -194,6 +200,8 @@ The same settings as the [multimodal environment variables](#multimodal-images-a
 | `vision_llm` | `BaseChatModel \| None` | Multimodal chat model (accepts images) that describes embedded images, image files and video frames. No `with_structured_output` needed. **Does not fall back to `llm`.** Default `None`. |
 | `transcriber` | `Transcriber \| None` | Speech-to-text for audio and video (`OpenAICompatibleTranscriber`, `FasterWhisperTranscriber` or your own). Default `None`. |
 | `describe_embedded_images` | `bool \| None` | Default `True` (acts only with `vision_llm`). |
+| `store_described_images` | `bool \| None` | Default `True` (acts only with a storage backend that stores images). |
+| `store_video_frames` | `bool \| None` | Default `True`. |
 | `media_error_strategy` | `Literal["fail_fast", "best_effort"] \| None` | Default `"best_effort"`. |
 | `strip_location` | `bool \| None` | Default `True`. |
 | `image_max_side_px` | `int \| None` | Default `1568` (minimum `64`). |
@@ -466,6 +474,8 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Freeze Backend** | `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` |
 | **MongoDB Frozen Collection** | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `frozen_documents` |
 | **MongoDB Frozen GridFS** | `mongodb_frozen_gridfs_bucket` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `frozen_snapshots` |
+| **MongoDB Images Collection** | `mongodb_images_collection` | `MONGODB_IMAGES_COLLECTION` | `page_images` |
+| **MongoDB Images GridFS** | `mongodb_images_gridfs_bucket` | `MONGODB_IMAGES_GRIDFS_BUCKET` | `page_image_binaries` |
 | **Custom Freeze Storage** | `custom_freeze_storage` | *(none)* | `None` |
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
 | **OCR Max Pages** | `mistral_ocr_safe_max_pages` | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` |
@@ -479,6 +489,8 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Vision LLM** | `vision_llm` | *(none)* | `None` (no fallback to `llm`) |
 | **Transcriber** | `transcriber` | *(none)* | `None` |
 | **Describe Embedded Images** | `describe_embedded_images` | `DESCRIBE_EMBEDDED_IMAGES` | `true` (only with `vision_llm`) |
+| **Store Described Images** | `store_described_images` | `STORE_DESCRIBED_IMAGES` | `true` (only with image storage) |
+| **Store Video Frames** | `store_video_frames` | `STORE_VIDEO_FRAMES` | `true` |
 | **Media Error Strategy** | `media_error_strategy` | `MEDIA_ERROR_STRATEGY` | `best_effort` |
 | **Strip Location** | `strip_location` | `STRIP_LOCATION` | `true` |
 | **Image Max Side** | `image_max_side_px` | `IMAGE_MAX_SIDE_PX` | `1568` |

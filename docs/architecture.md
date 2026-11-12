@@ -162,6 +162,7 @@ The actual per-file conversion is dispatched via `_run_convert()`: synchronous c
 
 When `storage_backend` is configured (not `"none"`), Stage 0 stores:
 - Raw file binary via `RawFileRepository.store()` (GridFS for MongoDB)
+- Each described embedded image and video frame, right after its description, via `RawFileRepository.store_image()` / `store_image_file()` (`converters/image_store.py`; `store_described_images` / `store_video_frames`, only with a backend whose `stores_images` is `True`). A failed image write fails the document and deletes the images already stored
 - Converted pages via `PageRepository.store()` (MongoDB collection)
 
 The storage layer is abstracted behind `storage/factory.py` and supports three backends: `"none"`, `"mongodb"`, and `"custom"`.
@@ -931,14 +932,15 @@ The storage layer abstracts raw file and converted page persistence behind repos
 When `storage_backend="mongodb"`:
 - **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path, tenant_id, created_by_user_id, job_id)
 - **`raw_files` collection** (`mongodb_raw_files_collection`): Raw file metadata records
-- **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, images, and dimensions
+- **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, the time range and transcript cues of audio / video pages
+- **`page_images` collection** (`mongodb_images_collection`) and **`page_image_binaries` GridFS bucket** (`mongodb_images_gridfs_bucket`): the stored described images and video frames, one record per `(raw_file_id, page_index, image_index)`
 
 Every record carries the stored `tenant_id` (`"__public__"` for public uploads), `created_by_user_id` and `job_id` of the upload.
 
 ### Repository Interfaces
 
-- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`
-- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
+- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`; optional (not abstract) image methods: `stores_images`, `store_image()`, `store_image_file()`, `list_images()`, `open_image()` and `delete_images()`
+- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>, start_ms=None, end_ms=None, transcript=None) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
 
 `<owner>` is `tenant_id` / `created_by_user_id` / `job_id` (writes; `None` = public). `<scope>` is the navigation scope — `tenant_id` (`None` = all tenants), `include_public`, `created_by_user_id`, `job_id` — shared through `utils/scope.py`. Ingestion verifies that a document's `raw_file_id` belongs to its tenant (`ingest/raw_file_check.py`). See [Storage Backends — Multi-tenancy](user-guides/storage-backends.md#multi-tenancy).
 
@@ -1144,7 +1146,8 @@ DeletionResult
 ├── gc_labeled_entity_deleted: int
 ├── gc_labeled_entity_passes: int
 ├── raw_files_deleted: int
-└── converted_pages_deleted: int
+├── converted_pages_deleted: int
+└── page_images_deleted: int
 
 OrphanCollectionResult                       (collect_orphans)
 ├── tenant_id: str | None

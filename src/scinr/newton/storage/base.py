@@ -36,7 +36,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
-from scinr.newton.storage.models import ConvertedPageRecord, RawFileRecord
+from scinr.newton.storage.models import ConvertedPageRecord, PageImageRecord, RawFileRecord
 
 
 class RawFileRepository(ABC):
@@ -250,6 +250,257 @@ class RawFileRepository(ABC):
             Si los filtros son inválidos.
         """
 
+    # ------------------------------------------------------------------
+    # Imágenes de página (opcionales, D4)
+    # ------------------------------------------------------------------
+    #
+    # Los métodos de este bloque no son abstractos: un backend propio que no
+    # los implemente sigue funcionando, no guarda imágenes y la ingesta avisa
+    # una vez por proceso de que las imágenes descritas no se conservan.
+
+    @property
+    def stores_images(self) -> bool:
+        """``True`` si el backend guarda imágenes de página.
+
+        Si es ``False``, la ingesta no llama a los demás métodos de escritura
+        de imágenes y avisa una vez por proceso de que las imágenes descritas
+        no se conservan.
+        """
+        return False
+
+    async def store_image(
+        self,
+        raw_file_id: str,
+        page_index: int,
+        image_index: int,
+        content: bytes,
+        *,
+        kind: str,
+        content_type: str,
+        description: str,
+        filename: str,
+        folder_path: str | None,
+        width: int | None = None,
+        height: int | None = None,
+        time_ms: int | None = None,
+        tenant_id: str | None = None,
+        created_by_user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> str:
+        """Guarda el original de una imagen descrita y devuelve su image_id.
+
+        La escritura guarda el tenant como
+        :func:`~scinr.newton.utils.tenancy.tenant_key` (``None`` y
+        ``"__public__"`` = público), igual que :meth:`store`.
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID del :class:`~storage.models.RawFileRecord` al que pertenece la
+            imagen.
+        page_index:
+            Índice 0-based de la página, idéntico a
+            :attr:`~converters.base.IntermediatePage.index` (el índice del
+            tramo, en vídeo).
+        image_index:
+            Índice de la imagen dentro de su página, es decir el ``index``
+            del bloque ``<image index="N">`` de esa página.
+        content:
+            Bytes originales de la imagen (sin reescalar).
+        kind:
+            ``"embedded"`` para una imagen incrustada en el documento,
+            ``"frame"`` para un fotograma de vídeo.
+        content_type:
+            MIME type de la imagen (p.ej. ``"image/png"``, ``"image/jpeg"``).
+        description:
+            La misma descripción que aparece en el bloque del markdown.
+        filename:
+            Nombre del documento fuente, con su extensión.
+        folder_path:
+            Ruta relativa de la carpeta contenedora, o ``None``.
+        width, height:
+            Dimensiones de la imagen en píxeles, o ``None``.
+        time_ms:
+            Solo fotogramas: instante del fotograma en el vídeo.
+        tenant_id, created_by_user_id, job_id:
+            Igual que en :meth:`store`.
+
+        Returns
+        -------
+        str
+            El ``image_id``: representación en cadena del identificador
+            único asignado por el backend.
+
+        Notes
+        -----
+        Los backends capaces de hacer streaming pueden sobrescribir además
+        :meth:`store_image_file` para subir el fichero sin materializarlo en
+        memoria, igual que :meth:`store_file` respecto de :meth:`store`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not store page images "
+            "(RawFileRepository.stores_images is False)"
+        )
+
+    async def store_image_file(
+        self,
+        path: Path,
+        raw_file_id: str,
+        page_index: int,
+        image_index: int,
+        *,
+        kind: str,
+        content_type: str,
+        description: str,
+        filename: str,
+        folder_path: str | None,
+        width: int | None = None,
+        height: int | None = None,
+        time_ms: int | None = None,
+        tenant_id: str | None = None,
+        created_by_user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> str:
+        """Guarda la imagen situada en *path* y devuelve su image_id.
+
+        Implementación por defecto: lee el fichero completo y delega en
+        :meth:`store_image`. Un backend con streaming la sobrescribe para no
+        mantener la imagen entera en memoria, igual que :meth:`store_file`
+        respecto de :meth:`store`.
+
+        Parameters
+        ----------
+        path:
+            Ruta del fichero de imagen a guardar.
+        raw_file_id, page_index, image_index, kind, content_type, description,
+        filename, folder_path, width, height, time_ms, tenant_id,
+        created_by_user_id, job_id:
+            Igual que en :meth:`store_image`.
+
+        Returns
+        -------
+        str
+            El ``image_id`` asignado por el backend.
+        """
+        content = await asyncio.to_thread(path.read_bytes)
+        return await self.store_image(
+            raw_file_id,
+            page_index,
+            image_index,
+            content,
+            kind=kind,
+            content_type=content_type,
+            description=description,
+            filename=filename,
+            folder_path=folder_path,
+            width=width,
+            height=height,
+            time_ms=time_ms,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        )
+
+    async def list_images(
+        self,
+        raw_file_id: str,
+        *,
+        page_indexes: Sequence[int] | None = None,
+        kind: str | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[PageImageRecord]:
+        """Inventario de las imágenes guardadas de *raw_file_id*, dentro del
+        scope, ordenadas por ``(page_index, image_index)``.
+
+        *page_indexes* filtra por esos índices de página (``None`` = todas) y
+        *kind* por igualdad exacta sobre el tipo (``None`` = sin filtro).
+
+        La implementación por defecto no guarda nada y devuelve ``[]``.
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID del :class:`~storage.models.RawFileRecord` cuyas imágenes se
+            quieren listar.
+        page_indexes, kind:
+            Filtros de contenido (ver arriba).
+        tenant_id, include_public, created_by_user_id, job_id:
+            Filtros de scope (ver el docstring del módulo).
+
+        Raises
+        ------
+        ScopeError
+            Si los filtros son inválidos.
+        """
+        return []
+
+    async def open_image(
+        self,
+        image_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> tuple[PageImageRecord, AsyncIterator[bytes]] | None:
+        """Abre el binario de la imagen *image_id*, dentro del scope.
+
+        Igual que :meth:`open_with_record`: devuelve ``(record, stream)`` con
+        una sola lectura del registro, o ``None`` si no existe o queda fuera
+        del scope (ambos casos son indistinguibles). El backend debe localizar
+        el binario a partir del registro ya filtrado, nunca a partir de un id
+        recibido del llamador.
+
+        La implementación por defecto no guarda nada y devuelve ``None``.
+
+        Raises
+        ------
+        ScopeError
+            Si los filtros son inválidos.
+        StorageError
+            Si el registro existe pero falta el binario.
+        """
+        return None
+
+    async def delete_images(
+        self,
+        raw_file_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> int:
+        """Borra las imágenes guardadas de *raw_file_id*, dentro del scope.
+
+        Debe ser idempotente: si no hay ninguna imagen en el scope (ya
+        borradas, fuera de scope o llamada repetida), devuelve ``0`` sin
+        lanzar excepción. La implementación por defecto no guarda nada y
+        devuelve ``0``.
+
+        Parameters
+        ----------
+        raw_file_id:
+            ID del :class:`~storage.models.RawFileRecord` cuyas imágenes se
+            quieren borrar.
+        tenant_id, include_public, created_by_user_id, job_id:
+            Filtros de scope (ver el docstring del módulo).
+
+        Returns
+        -------
+        int
+            Número de imágenes borradas (``0`` si no había ninguna).
+
+        Raises
+        ------
+        ScopeError
+            Si los filtros son inválidos.
+        """
+        return 0
+
 
 class PageRepository(ABC):
     """Almacena las páginas convertidas (markdown) de un documento."""
@@ -268,6 +519,7 @@ class PageRepository(ABC):
         job_id: str | None = None,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        transcript: list[dict] | None = None,
     ) -> str:
         """Persiste una página y devuelve su page_id (str).
 
@@ -294,6 +546,13 @@ class PageRepository(ABC):
             cuando no son ``None``: un repositorio propio con la firma
             anterior a 0.5.0 sigue funcionando para todo lo que no sea audio
             o vídeo, pero para ingerir audio y vídeo debe aceptarlos.
+        transcript:
+            Frases transcritas de la página con sus tiempos absolutos
+            (audio y vídeo; decisión D7), como lista de dicts
+            ``{start_ms, end_ms, text}``, o ``None``. El conversor solo la
+            pasa cuando no es ``None``: para ingerir audio y vídeo, el
+            repositorio debe aceptar ``start_ms``, ``end_ms`` y
+            ``transcript``.
 
         Returns
         -------

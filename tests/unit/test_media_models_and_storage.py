@@ -31,6 +31,7 @@ from scinr.newton.converters.base import (  # noqa: E402
 )
 from scinr.newton.converters.main import _store_page, convert_one  # noqa: E402
 from scinr.newton.models.file_metadata import FILE_METADATA_KEYS, FileMetadata  # noqa: E402
+from scinr.newton.models.transcript import TranscriptCue  # noqa: E402
 from scinr.newton.navigation.pages import _page_text  # noqa: E402
 from scinr.newton.storage.models import ConvertedPageRecord  # noqa: E402
 from scinr.newton.storage.mongodb.pages import MongoDBPageRepository  # noqa: E402
@@ -124,6 +125,32 @@ class TestPageTimeRange:
         (stored,) = db["converted_pages"].docs
         assert stored["start_ms"] is None and stored["end_ms"] is None
 
+    async def test_mongo_transcript_round_trip(self, mongo):  # noqa: F811
+        db, _ = mongo
+        repo = MongoDBPageRepository()
+        cues = [
+            {"start_ms": 300_000, "end_ms": 305_000, "text": "hello world"},
+            {"start_ms": 305_000, "end_ms": 310_000, "text": "second cue"},
+        ]
+        pid = await repo.store_page(
+            "rf", "clip.mp3", None, 1, "texto", start_ms=300_000, end_ms=600_000,
+            transcript=cues,
+        )
+        (stored,) = db["converted_pages"].docs
+        assert stored["transcript"] == cues
+        (record,) = await repo.get_pages_by_ids([pid])
+        assert record.transcript is not None
+        assert [(c.start_ms, c.end_ms, c.text) for c in record.transcript] == [
+            (300_000, 305_000, "hello world"),
+            (305_000, 310_000, "second cue"),
+        ]
+
+    async def test_mongo_without_transcript_stores_null(self, mongo):  # noqa: F811
+        db, _ = mongo
+        await MongoDBPageRepository().store_page("rf", "a.pdf", None, 0, "x")
+        (stored,) = db["converted_pages"].docs
+        assert stored["transcript"] is None
+
     async def test_record_stored_before_0_5_reads_none(self, mongo):  # noqa: F811
         db, _ = mongo
         await db["converted_pages"].insert_one({
@@ -132,10 +159,18 @@ class TestPageTimeRange:
         })
         (record,) = await MongoDBPageRepository().get_pages("rf")
         assert record.start_ms is None and record.end_ms is None
+        assert record.transcript is None
 
     async def test_null_repository_accepts_the_range(self):
         assert await NullPageRepository().store_page(
             "rf", "a.mp3", None, 0, "x", start_ms=0, end_ms=1
+        ) == ""
+
+    async def test_null_repository_accepts_the_transcript(self):
+        assert await NullPageRepository().store_page(
+            "rf", "a.mp3", None, 0, "x",
+            start_ms=0, end_ms=1,
+            transcript=[{"start_ms": 0, "end_ms": 1, "text": "hello"}],
         ) == ""
 
 
@@ -184,6 +219,25 @@ class TestConverterPassesTheRangeOnlyWhenSet:
             tenant_id=None, created_by_user_id=None, job_id=None,
         )
         assert (seen["start_ms"], seen["end_ms"], seen["page_index"]) == (900_000, 1_200_000, 3)
+        assert "transcript" not in seen
+
+    async def test_transcript_is_forwarded_when_present(self):
+        seen: dict = {}
+
+        class _Pages:
+            async def store_page(self, *args, **kwargs):
+                seen.update(kwargs)
+                return "p"
+
+        page = IntermediatePage(
+            index=3, markdown="x", start_ms=900_000, end_ms=1_200_000,
+            transcript=[TranscriptCue(start_ms=900_000, end_ms=901_000, text="hello")],
+        )
+        await _store_page(
+            _Pages(), page, raw_file_id="rf", filename="a.mp3", folder_path=None,
+            tenant_id=None, created_by_user_id=None, job_id=None,
+        )
+        assert seen["transcript"] == [{"start_ms": 900_000, "end_ms": 901_000, "text": "hello"}]
 
     async def test_range_is_omitted_when_absent(self):
         seen: dict = {}
@@ -199,6 +253,7 @@ class TestConverterPassesTheRangeOnlyWhenSet:
             job_id=None,
         )
         assert "start_ms" not in seen and "end_ms" not in seen
+        assert "transcript" not in seen
 
 
 def test_page_text_exposes_the_time_range():

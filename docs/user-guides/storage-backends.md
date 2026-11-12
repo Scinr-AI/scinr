@@ -141,6 +141,8 @@ configure(
     mongodb_raw_files_collection="raw_files",
     mongodb_pages_collection="converted_pages",
     mongodb_gridfs_bucket="raw_binaries",
+    mongodb_images_collection="page_images",          # described images and frames
+    mongodb_images_gridfs_bucket="page_image_binaries",
 )
 ```
 
@@ -154,6 +156,8 @@ MONGODB_DATABASE=scinr_production
 MONGODB_RAW_FILES_COLLECTION=raw_files
 MONGODB_PAGES_COLLECTION=converted_pages
 MONGODB_GRIDFS_BUCKET=raw_binaries
+MONGODB_IMAGES_COLLECTION=page_images
+MONGODB_IMAGES_GRIDFS_BUCKET=page_image_binaries
 ```
 
 ### Collections
@@ -211,7 +215,8 @@ One document per converted page, linked to its parent raw file.
   "created_by_user_id": "user-42",
   "job_id": "job-2025-01-15-001",
   "start_ms": null,
-  "end_ms": null
+  "end_ms": null,
+  "transcript": null
 }
 ```
 
@@ -226,6 +231,7 @@ One document per converted page, linked to its parent raw file.
 | `converted_at` | DateTime | UTC timestamp when the page was persisted. |
 | `tenant_id`, `created_by_user_id`, `job_id` | String | Same values as the parent `raw_files` record. |
 | `start_ms`, `end_ms` | Integer or null | Time range `[start_ms, end_ms)` of the page in the source medium: one page per audio / video segment. `null` for documents without a time axis; absent on pages stored before 0.5.0 (read as `null`). See [Multimodal Ingestion](multimodal-ingestion.md#playing-a-segment). |
+| `transcript` | Array or null | Transcribed sentences of an audio / video page, as `{start_ms, end_ms, text}` with times absolute in the source medium. Not part of `markdown`. `null` for documents without a time axis and for pages stored before this field existed. |
 
 #### `raw_binaries` — GridFS Bucket
 
@@ -235,6 +241,50 @@ GridFS automatically creates two internal collections:
 - `raw_binaries.chunks` — binary data chunks (255 kB each by default).
 
 GridFS handles files of arbitrary size, removing the 16 MB BSON document limit. The `gridfs_id` in `raw_files` points to the corresponding GridFS file document. The GridFS `metadata` holds `content_type`, `folder_path`, `tenant_id`, `created_by_user_id` and `job_id`, so the owner is also visible from the bucket alone.
+
+#### `page_images` — Stored Images and Frames
+
+One document per described image stored at Stage 0: an embedded image of a DOCX, PPTX or PDF page (`kind: "embedded"`, its original bytes) or a described video frame (`kind: "frame"`, the JPEG that was described). See [Multimodal Ingestion](multimodal-ingestion.md#retrieving-images-and-frames) for what is and is not stored. The bytes live in the `page_image_binaries` GridFS bucket, never in `raw_binaries`.
+
+```json
+{
+  "_id": "ObjectId('67a3b2c1d4e5f6a7b8c9d0f1')",
+  "raw_file_id": "67a3b2c1d4e5f6a7b8c9d0e1",
+  "page_index": 3,
+  "image_index": 0,
+  "kind": "embedded",
+  "content_type": "image/png",
+  "size_bytes": 48211,
+  "checksum_sha256": "9f2c...",
+  "width": 1200,
+  "height": 800,
+  "time_ms": null,
+  "description": "Bar chart of quarterly sales in 2025 ...",
+  "filename": "report.docx",
+  "folder_path": "ModuleA",
+  "stored_at": "2025-01-15T10:30:04Z",
+  "gridfs_id": "ObjectId('67a3b2c1d4e5f6a7b8c9d0f2')",
+  "tenant_id": "acme",
+  "created_by_user_id": "user-42",
+  "job_id": "job-2025-01-15-001"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `raw_file_id` | String | The upload the image belongs to (`raw_files._id`). |
+| `page_index` | Integer | Page of the image (the segment, for a video frame). |
+| `image_index` | Integer | The `index` of its `<image index="N">` block in that page's markdown. |
+| `kind` | String | `"embedded"` or `"frame"`. |
+| `content_type`, `size_bytes`, `checksum_sha256` | | Of the stored bytes. |
+| `width`, `height` | Integer or null | Pixel size, when known. |
+| `time_ms` | Integer or null | Frames only: instant of the frame in the video. |
+| `description` | String | The description written in the page markdown. |
+| `filename`, `folder_path` | | Of the source document. |
+| `gridfs_id` | ObjectId | The binary in `page_image_binaries`. |
+| `tenant_id`, `created_by_user_id`, `job_id` | String | Same values as the parent `raw_files` record. |
+
+`page_image_binaries` is a GridFS bucket like `raw_binaries`; its `metadata` holds `raw_file_id`, `page_index`, `image_index`, `kind` and the owner.
 
 ### Indexes
 
@@ -262,6 +312,14 @@ db.raw_files.create_index(
 # raw_files: inventory / audit by provenance (list_raw_files)
 db.raw_files.create_index([("tenant_id", 1), ("created_by_user_id", 1)], name="raw_files_by_tenant_user")
 db.raw_files.create_index([("tenant_id", 1), ("job_id", 1)], name="raw_files_by_tenant_job")
+
+# page_images: identity of an image inside its upload. Unique: a duplicate is a bug
+# and surfaces as a write error (the document fails), never as a silent overwrite.
+db.page_images.create_index(
+    [("tenant_id", 1), ("raw_file_id", 1), ("page_index", 1), ("image_index", 1)],
+    name="page_images_by_tenant_raw_file_page_image",
+    unique=True,
+)
 ```
 
 The pre-multitenancy indexes `pages_by_raw_file_and_index`, `pages_by_filename_folder` and `raw_files_by_checksum` are dropped if present.
@@ -425,7 +483,7 @@ The storage layer follows the same tenant model as the graph: the tenant is part
 
 ### What is stored
 
-Every `raw_files` record, its GridFS `metadata` and every `converted_pages` record carry the **stored** `tenant_id` plus `created_by_user_id` and `job_id` of the upload (scalars — a raw file belongs to exactly one upload). On write, `tenant_id=None` and `tenant_id="__public__"` both mean public; `""` raises `ValueError`.
+Every `raw_files` record, its GridFS `metadata`, every `converted_pages` record and every `page_images` record (and its GridFS `metadata`) carry the **stored** `tenant_id` plus `created_by_user_id` and `job_id` of the upload (scalars — a raw file belongs to exactly one upload). On write, `tenant_id=None` and `tenant_id="__public__"` both mean public; `""` raises `ValueError`.
 
 The owner comes from the conversion call: `run_pipeline(tenant_id=..., created_by_user_id=..., job_id=...)`, `run_preprocess(...)`, `convert_one` / `convert_folder` / `convert_single_file(...)` and `run_tabular_pipeline(...)`. It is also stamped on the intermediate JSON (`IntermediateDocument.tenant_id`, …), so a later extraction / ingestion of that JSON keeps the tenant unless the run overrides it.
 
@@ -465,6 +523,8 @@ From the graph side, the navigator methods resolve the node or document through 
 - `get_structure_nodes_source_pages()` / `get_info_unit_source_text()` read only the nodes' `source_page_ids` with `get_pages_by_ids()` (one call per stored tenant of the nodes) — the documents and their other pages are never loaded.
 - `get_document_source_text()` reads every page of the document with `get_pages()`.
 - `get_document_original(document)` reads the record and the binary with `open_with_record()`.
+- With `include_images=True`, the three page functions also call `list_images()`, once per `(tenant, raw_file_id)`, in the node's / document's tenant; `get_document_images(document)` does the same without reading pages.
+- `get_page_image(image_id)` calls `open_image()` with the call's **full scope**: there is no graph node to resolve from an image id.
 
 ### Ingestion checks the owner of `raw_file_id`
 
@@ -523,11 +583,36 @@ class RawFileRepository(ABC):
     async def delete(self, raw_file_id, SCOPE) -> None:
         """Delete binary + metadata if inside the scope. Idempotent (no error if missing)."""
 
+    # --- Optional: stored images (described embedded images and video frames) ---
+    @property
+    def stores_images(self) -> bool:
+        """Optional. True if the backend stores images. Default: False (none are stored)."""
+
+    async def store_image(self, raw_file_id, page_index, image_index, content: bytes, *,
+                          kind, content_type, description, filename, folder_path,
+                          width=None, height=None, time_ms=None, OWNER) -> str:
+        """Optional. Store one image and return its image_id. Default: NotImplementedError."""
+
+    async def store_image_file(self, path: Path, raw_file_id, page_index, image_index, *,
+                               ...same keywords...) -> str:
+        """Optional. Store the image at `path`. Default: read it and call `store_image()`."""
+
+    async def list_images(self, raw_file_id, *, page_indexes=None, kind=None,
+                          SCOPE) -> list[PageImageRecord]:
+        """Optional. Images inside the scope, ordered by (page_index, image_index). Default: []."""
+
+    async def open_image(self, image_id, SCOPE) -> tuple[PageImageRecord, AsyncIterator[bytes]] | None:
+        """Optional. (record, stream), or None if missing / outside the scope. Default: None."""
+
+    async def delete_images(self, raw_file_id, SCOPE) -> int:
+        """Optional. Delete the images inside the scope; return how many. Default: 0."""
+
 class PageRepository(ABC):
     @abstractmethod
     async def store_page(self, raw_file_id, filename, folder_path, page_index, markdown, OWNER,
-                         *, start_ms=None, end_ms=None) -> str:
-        """Store a converted page with its owner (and time range, for audio / video)."""
+                         *, start_ms=None, end_ms=None, transcript=None) -> str:
+        """Store a converted page with its owner (and time range + transcript cues,
+        for audio / video)."""
 
     @abstractmethod
     async def get_pages(self, raw_file_id, SCOPE) -> list[ConvertedPageRecord]:
@@ -545,6 +630,8 @@ class PageRepository(ABC):
 > **Breaking (multi-tenancy):** `get`, `open`, `open_with_record`, `list_raw_files` and `get_pages_by_ids` are new `@abstractmethod`s, and every method takes the owner (writes) or the scope (reads / deletes) keyword-only arguments. A custom backend written before must add them, or it cannot be instantiated / will fail with `TypeError` on the new keyword arguments.
 
 > Validate and resolve the scope with `scinr.newton.utils.scope.make_scope(tenant_id, include_public, created_by_user_id, job_id)` — it raises the same `ScopeError` as the built-in backends — and store the owner's tenant as `scinr.newton.utils.tenancy.tenant_key(tenant_id)`. For MongoDB-like filters, `scinr.newton.storage.filters.mongo_scope_filter(...)` renders the scope directly. A record outside the scope must behave exactly like a missing one (never reveal it exists). `open()` must locate the binary from the already-filtered record, never from an id supplied by the caller.
+
+> **Image storage is optional.** The image methods are not abstract: a backend that does not override them keeps working, `stores_images` is `False`, no images are stored, and the ingestion logs one warning per process. To store images, return `True` from `stores_images` and implement the six methods with the same scope rules as the raw files; `open_image()` must locate the binary from the already-filtered record. `store_image_file()` defaults to reading the whole file: override it to stream video frames from disk. A failed `store_image()` / `store_image_file()` fails the document (whatever `media_error_strategy`), after `delete_images(raw_file_id)` removes what was already stored. `delete_document()` calls `delete_images()` before `delete_pages()`.
 
 > `store_file` is **optional** (not abstract). The pipeline calls `store_file(path=...)`, whose default implementation reads the whole file and delegates to `store()`, so a backend that only implements `store()` keeps working. Override `store_file` if your backend can upload from a file handle (S3 multipart, Azure Blob, etc.): the built-in `mongodb` backend does this to stream files to GridFS without loading them into memory, which matters for large PDFs. With `storage_backend="none"` the file is never opened.
 
@@ -715,7 +802,8 @@ configure(
 - Implement **every** abstract method: `store` + `get` + `open` + `open_with_record` + `list_raw_files` + `delete` (raw files) and `store_page` + `get_pages` + `get_pages_by_ids` + `delete_pages` (pages). The S3/DynamoDB sketch above omits several of them for brevity — a real implementation must add them, all honouring the scope filters.
 - Store the owner on every record and filter every read / delete by the scope (see [Multi-tenancy](#multi-tenancy)).
 - The `store()` and `store_page()` methods return a string identifier. The pipeline uses these IDs to link pages to their parent raw file.
-- **Audio and video need `start_ms` / `end_ms` in `store_page()`** (keyword-only, `int | None`), stored and returned on `ConvertedPageRecord`. The converter passes them only when a page has them, so a repository written against the pre-0.5.0 signature keeps working for every other format; ingesting an audio or video with it fails with a `TypeError` on `store_page()`.
+- **Audio and video need `start_ms` / `end_ms` / `transcript` in `store_page()`** (keyword-only; `int | None`, and `list[dict] | None` of `{start_ms, end_ms, text}`), stored and returned on `ConvertedPageRecord` (`transcript` as `list[TranscriptCue]`). The converter passes them only when a page has them, so a repository written against the pre-0.5.0 signature keeps working for every other format; ingesting an audio or video with it fails with a `TypeError` on `store_page()`.
+- The image methods of `RawFileRepository` are optional (see above); the in-memory example below omits them, so it stores no images.
 - `get_pages()` and `get_pages_by_ids()` return `ConvertedPageRecord` Pydantic models ordered by `page_index` ascending. `get_pages_by_ids()` must fetch only the requested pages (it backs the source text of a single structure node) and skip ids that do not exist, lie outside the scope or are invalid for the backend.
 - If `storage_backend="custom"` but `custom_storage` is not provided, the pipeline raises a `ConfigurationError` at `get_storage()` time.
 
@@ -914,7 +1002,8 @@ Reads, lookups and deletes receive the **stored** tenant key, the `tenant_id` pr
 Storage is called during **Stage 0 (preprocess)** and the **tabular pipeline**:
 
 1. **Raw file storage** — immediately after reading a file from disk, before conversion. The binary content is stored and a `raw_file_id` is returned.
-2. **Page storage** — after each page is converted to Markdown, the page content is stored and linked to the `raw_file_id`.
+2. **Image storage** — during conversion, each embedded image or video frame that gets a description is stored right after it, linked to the `raw_file_id` and its page (`store_described_images` / `store_video_frames`, with a backend whose `stores_images` is `True`).
+3. **Page storage** — after each page is converted to Markdown, the page content is stored and linked to the `raw_file_id`.
 
 ```
 Pipeline Flow (with storage enabled):
@@ -979,6 +1068,10 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | Snapshot metadata collection | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` |
 | Snapshot GridFS bucket | `mongodb_frozen_gridfs_bucket` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` |
 | Custom snapshot repository | `custom_freeze_storage` | *(none)* | `None` |
+| Stored images collection | `mongodb_images_collection` | `MONGODB_IMAGES_COLLECTION` | `"page_images"` |
+| Stored images GridFS bucket | `mongodb_images_gridfs_bucket` | `MONGODB_IMAGES_GRIDFS_BUCKET` | `"page_image_binaries"` |
+| Store described embedded images | `store_described_images` | `STORE_DESCRIBED_IMAGES` | `True` |
+| Store described video frames | `store_video_frames` | `STORE_VIDEO_FRAMES` | `True` |
 
 ---
 

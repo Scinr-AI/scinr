@@ -14,6 +14,7 @@ from scinr.newton.exceptions import (
     ExtractionError,
     FreezeError,
     GraphConnectionError,
+    ImageStorageError,
     IngestionError,
     ModelError,
     NavigationError,
@@ -26,6 +27,7 @@ from scinr.newton.ingest.deletion import collect_orphans, delete_document
 from scinr.newton.ingest.freeze import export_document_snapshot, freeze_document
 from scinr.newton.ingest.restore import restore_document
 from scinr.newton.media.transcriber import Transcriber, TranscriptSegment
+from scinr.newton.models.transcript import TranscriptCue
 from scinr.newton.navigation import (
     GraphNavigator,
     get_graph_navigator,
@@ -69,6 +71,7 @@ __all__ = [
     "ThemePath",
     # Media (audio / video transcription)
     "Transcriber",
+    "TranscriptCue",
     "TranscriptSegment",
     # Exceptions
     "ScinrError",
@@ -78,6 +81,7 @@ __all__ = [
     "IngestionError",
     "ModelError",
     "StorageError",
+    "ImageStorageError",
     "ConversionError",
     "NavigationError",
     "GraphConnectionError",

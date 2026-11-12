@@ -30,10 +30,10 @@ class _FakeCollection:
     def drop_index(self, name):
         self._log.append(("drop", self.name, name))
 
-    def create_index(self, keys, name):
+    def create_index(self, keys, name, **options):
         if self._fail:
             raise OperationFailure("not authorized to execute command createIndexes", code=13)
-        self._log.append(("create", self.name, name, tuple(keys)))
+        self._log.append(("create", self.name, name, tuple(keys), options))
 
 
 class _FakeClient:
@@ -89,14 +89,24 @@ def test_get_storage_pings_and_indexes_once_per_process(mongo_cfg):
     assert len(_FakeClient.instances) == 1
     client = _FakeClient.instances[0]
     assert client.log[0] == ("command", "ping")
-    assert sorted(_creates(client)) == sorted(name for _, _, name in mongo_client._INDEX_SPECS)
+    assert sorted(_creates(client)) == sorted(name for _, _, name, _ in mongo_client._INDEX_SPECS)
     # The same client serves ping and indexes, and is closed afterwards.
     assert client.closed
 
 
 def test_every_index_is_prefixed_by_tenant():
-    for _, keys, name in mongo_client._INDEX_SPECS:
+    for _, keys, name, _ in mongo_client._INDEX_SPECS:
         assert keys[0] == ("tenant_id", 1), name
+
+
+def test_page_images_index_is_unique(mongo_cfg):
+    """The (tenant, raw_file, page, image) index is the safety net against a
+    duplicate described image: ``create_index`` must receive ``unique=True``."""
+    factory.get_storage()
+    creates = {
+        entry[2]: entry[4] for entry in _FakeClient.instances[0].log if entry[0] == "create"
+    }
+    assert creates["page_images_by_tenant_raw_file_page_image"] == {"unique": True}
 
 
 def test_indexes_skipped_when_disabled(mongo_cfg):

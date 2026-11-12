@@ -22,6 +22,17 @@ video_small / video_big: 1 min / ~10 min high-bitrate video (hundreds of MB).
                         Criterion: does not depend on the file size.
 batch8                : 8 audios with parallel_docs=4. Criterion: at most media_concurrency (1)
                         media conversions in flight.
+*_stored              : docx_100 / pdf_images / video_small with a raw-file repository that
+                        stores every described image / frame (it consumes and drops the bytes).
+                        Criterion (stored-images plan WP9): *_stored - * <= the largest stored
+                        original + 2 MiB.
+
+Measured on 2026-11-12 (stored images):
+    docx_100 34.4 | docx_100_stored 34.6     (+0.2; 100 stored, largest original 261 KiB)
+    pdf_images 23.0 | pdf_images_stored 23.2 (+0.2; 300 stored, largest crop 261 KiB)
+    video_small 1.7 | video_small_stored 2.2 (+0.5; 2 frames stored, streamed from disk)
+The original of an embedded image is re-read inside the decode lane
+(image_decode_concurrency), so stored originals in memory never exceed that count.
 
 Measured on 2026-11-11 (macOS arm64, Python 3.14, tracemalloc peak in MiB):
     pdf_text 1.9 | pdf_images 23.9   one 50-page chunk response with images = 17.0 MiB of JSON;
@@ -235,7 +246,49 @@ CASES = {
     "video_small": ("video_small.mp4", True),
     "video_big": ("video_big.mp4", True),
     "batch8": (None, True),
+    # Stored images / frames (stored-images plan WP9): same inputs, with a raw-file
+    # repository that stores the described originals (and consumes and drops the bytes).
+    "docx_100_stored": ("doc_100.docx", True),
+    "pdf_images_stored": ("doc300.pdf", True),
+    "video_small_stored": ("video_small.mp4", True),
 }
+
+
+class _DiscardingRawRepo:
+    """Raw-file repository that **stores images** but keeps nothing: every upload
+    is consumed (streamed from disk in 256 KiB reads for files) and dropped, so
+    the measured peak is what the library itself holds to store them."""
+
+    stores_images = True
+
+    def __init__(self) -> None:
+        self.images = 0
+        self.largest = 0
+
+    @staticmethod
+    def _drain(path) -> int:
+        size = 0
+        with open(path, "rb") as fh:
+            while chunk := fh.read(256 * 1024):
+                size += len(chunk)
+        return size
+
+    async def store_file(self, path, **kwargs) -> str:
+        self._drain(path)
+        return "bench-raw-file"
+
+    async def store_image(self, raw_file_id, page_index, image_index, content, **kwargs) -> str:
+        self.images += 1
+        self.largest = max(self.largest, len(content))
+        return f"img-{self.images}"
+
+    async def store_image_file(self, path, raw_file_id, page_index, image_index, **kwargs) -> str:
+        self.images += 1
+        self.largest = max(self.largest, self._drain(path))
+        return f"img-{self.images}"
+
+    async def delete_images(self, raw_file_id, **kwargs) -> int:
+        return 0
 
 
 async def _run(case: str) -> None:
@@ -249,7 +302,7 @@ async def _run(case: str) -> None:
         vision_llm=_fake_vision(), transcriber=_fake_transcriber(in_flight),
         describe_embedded_images=describe, mistral_api_key="bench", log_level="WARNING",
     )
-    chunk_bytes = _fake_ocr(prebuild_pages=300 if case == "pdf_images" else 0)
+    chunk_bytes = _fake_ocr(prebuild_pages=300 if case.startswith("pdf_images") else 0)
 
     if case == "batch8":
         from scinr.newton.converters import audio as audio_module
@@ -281,13 +334,17 @@ async def _run(case: str) -> None:
         extra = f" max_in_flight={in_flight['max']}"
     else:
         path = DIR / source
+        repo = _DiscardingRawRepo() if case.endswith("_stored") else None
         tracemalloc.start()
         t0 = time.time()
-        written, failures = await converters_main.convert_one(path, None)
+        written, failures = await converters_main.convert_one(path, None, raw_file_repo=repo)
         assert not failures, failures
         doc = written[0][2]
         assert all(not img.has_content for p in doc.pages for img in p.images)
         extra = f" pages={len(doc.pages)} file={path.stat().st_size / MIB:.1f}MiB"
+        if repo is not None:
+            assert repo.images, "nothing was stored"
+            extra += f" stored={repo.images} largest_original={repo.largest / 1024:.0f}KiB"
         if chunk_bytes:
             extra += f" one_chunk_response={chunk_bytes / MIB:.1f}MiB"
     _, peak = tracemalloc.get_traced_memory()

@@ -12,8 +12,11 @@ Document storage backends for raw file and page content archival.
 
 ## Records
 
-`RawFileRecord` and `ConvertedPageRecord` (with `start_ms` / `end_ms` for audio and
-video segments since 0.5.0).
+`RawFileRecord`, `ConvertedPageRecord` (with `start_ms` / `end_ms` and the
+`transcript` cues for audio and video segments since 0.5.0) and `PageImageRecord`
+(a stored described image or video frame, 0.5.0). The image methods of
+`RawFileRepository` (`stores_images`, `store_image`, `store_image_file`,
+`list_images`, `open_image`, `delete_images`) are optional for custom backends.
 
 ::: scinr.newton.storage.models
 

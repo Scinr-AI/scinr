@@ -425,10 +425,12 @@ def test_get_storage_created_the_indexes(mongo_env):
     from scinr.newton.storage.mongodb.client import _INDEX_SPECS
 
     db, cfg = mongo_env
-    for coll_attr, keys, name in _INDEX_SPECS:
+    for coll_attr, keys, name, options in _INDEX_SPECS:
         info = db[getattr(cfg, coll_attr)].index_information()
         assert name in info, f"{name} missing on {getattr(cfg, coll_attr)}"
         assert info[name]["key"] == keys
+        if "unique" in options:
+            assert info[name].get("unique") is True, f"{name} must be unique"
 
 
 @pytest.mark.parametrize("include_public", [False, True])

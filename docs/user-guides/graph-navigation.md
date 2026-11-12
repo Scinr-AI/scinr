@@ -585,7 +585,9 @@ A `PageText` carries `page_id`, `index`, `markdown`, and the `raw_file_id`,
 it from `get_document_original()` (see
 [Multimodal Ingestion — Playing a segment](multimodal-ingestion.md#playing-a-segment));
 both are `None` for documents without a time axis and for pages stored before
-0.5.0. The `file_*` properties of an image, audio or video document (duration,
+0.5.0. Those pages also carry `transcript`, the transcribed sentences with
+their own times, and `find_in_transcript(text)` finds the sentence of a quote.
+The `file_*` properties of an image, audio or video document (duration,
 codecs, size, capture time…) are in `DocumentRef.raw`. The functions are
 also available in `scinr.newton.navigation.pages`, taking the navigator as
 first argument (`get_structure_nodes_source_pages(nav, [id_a, id_b], ...)`).
@@ -634,6 +636,36 @@ if original is not None:
         response.write(chunk)
     # or: data = await original.read()
 ```
+
+**Images and frames.** The described images of a page (embedded in DOCX, PPTX
+or PDF) and the described video frames are stored with it (see
+[Multimodal Ingestion — Retrieving images and frames](multimodal-ingestion.md#retrieving-images-and-frames)):
+
+```python
+pages = await acme.get_document_source_text("Reports/annual.docx", include_images=True)
+for ref in pages[0].images:                               # list[PageImageRef]
+    image = await acme.get_page_image(ref.image_id)       # PageImageFile | None
+    if image is not None:
+        data = await image.read()                         # or: async for chunk in image.stream
+
+refs = await acme.get_document_images("Courses/class-03.mp4", kind="frame")
+```
+
+- `include_images=True` on `get_structure_nodes_source_pages`,
+  `get_info_unit_source_text` and `get_document_source_text` fills
+  `PageText.images` (`[]` for a page without images), with one storage read per
+  `(tenant, raw_file_id)`. Without it, `images` is `None` and the image storage
+  is not touched.
+- `get_document_images(document, version=None, page_indexes=None, kind=None)`
+  lists a document's `PageImageRef`s (`image_id`, `page_index`, `image_index`,
+  `kind`, `content_type`, `size_bytes`, `width`, `height`, `time_ms`,
+  `description`), ordered by page and image index. `[]` when the document is
+  not found in the scope.
+- `get_page_image(image_id)` opens one image. **Tenancy:** there is no graph node
+  to resolve from an image id, so the storage read applies the call's full
+  scope (tenant, `include_public`, user and job, matched against the upload's
+  provenance). An image of another tenant or outside the scope returns `None`,
+  exactly like a missing one. On a scoped navigator the view's scope applies.
 
 **How the pages are read.** The structure nodes are looked up in one graph
 query (for an info unit, the node that owns it), and only their

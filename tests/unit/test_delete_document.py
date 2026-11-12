@@ -18,6 +18,7 @@ import pytest
 from scinr.newton.ingest import _cascade, _gc, deletion
 from scinr.newton.ingest.deletion import GC_MAX_PASSES, collect_orphans, delete_document
 from scinr.newton.results import DeletionResult, OrphanCollectionResult
+from scinr.newton.storage.base import RawFileRepository
 
 # ---------------------------------------------------------------------------
 # Minimal fake Neo4j driver/session/transaction stack
@@ -339,12 +340,23 @@ class _FakeRawFileRepo:
         driver: _FakeDriver,
         raise_exc: Exception | None = None,
         raise_on_id: str | None = None,
+        images_per_id: dict[str, int] | None = None,
+        image_raise_exc: Exception | None = None,
+        image_raise_on_id: str | None = None,
     ) -> None:
         self.driver = driver
+        # raise_exc / raise_on_id apply to delete() only; delete_images()
+        # has its own channel so each step's failure mode can be tested
+        # independently (it runs first for each id).
         self.raise_exc = raise_exc
         self.raise_on_id = raise_on_id
+        self.images_per_id = images_per_id or {}
+        self.image_raise_exc = image_raise_exc
+        self.image_raise_on_id = image_raise_on_id
         self.deleted_ids: list[str] = []
         self.scopes: list[dict] = []
+        self.image_deleted_ids: list[str] = []
+        self.image_scopes: list[dict] = []
 
     async def delete(self, raw_file_id: str, **scope) -> None:
         self.scopes.append(scope)
@@ -354,6 +366,16 @@ class _FakeRawFileRepo:
         ):
             raise self.raise_exc
         self.deleted_ids.append(raw_file_id)
+
+    async def delete_images(self, raw_file_id: str, **scope) -> int:
+        self.image_scopes.append(scope)
+        self.driver.calls.append(("storage.image_delete", raw_file_id, {}))
+        if self.image_raise_exc is not None and (
+            self.image_raise_on_id is None or raw_file_id == self.image_raise_on_id
+        ):
+            raise self.image_raise_exc
+        self.image_deleted_ids.append(raw_file_id)
+        return self.images_per_id.get(raw_file_id, 0)
 
 
 class _FakePageRepo:
@@ -1129,16 +1151,18 @@ class TestDeleteDocumentStorageCleanup:
                 gc_le_sequence=[0],
             )
         )
-        raw_repo = _FakeRawFileRepo(fake_driver)
+        raw_repo = _FakeRawFileRepo(fake_driver, images_per_id={"rid1": 2, "rid2": 4})
         page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 3, "rid2": 5})
         patch_storage(raw_repo, page_repo)
 
         result = await delete_document("docs/k", version=1, tenant_id=None)
 
         assert raw_repo.deleted_ids == ["rid1", "rid2"]
+        assert raw_repo.image_deleted_ids == ["rid1", "rid2"]
         assert page_repo.deleted_ids == ["rid1", "rid2"]
         assert result.raw_files_deleted == 2
         assert result.converted_pages_deleted == 8
+        assert result.page_images_deleted == 6
 
         # All storage deletion calls must complete before the cascade
         # delete ever runs.
@@ -1146,7 +1170,7 @@ class TestDeleteDocumentStorageCleanup:
         storage_indices = [
             i
             for i, k in enumerate(kinds_in_order)
-            if k in ("storage.raw_delete", "storage.page_delete")
+            if k in ("storage.raw_delete", "storage.page_delete", "storage.image_delete")
         ]
         cascade_indices = _cascade_indices(fake_driver)
         assert storage_indices, "expected storage deletion calls to have happened"
@@ -1174,6 +1198,7 @@ class TestDeleteDocumentStorageCleanup:
         await delete_document("docs/m", version=1, tenant_id="acme", created_by_user_id="u1")
 
         assert raw_repo.scopes == [{"tenant_id": "acme"}]
+        assert raw_repo.image_scopes == [{"tenant_id": "acme"}]
         assert page_repo.scopes == [{"tenant_id": "acme"}]
 
     async def test_documents_with_empty_raw_file_id_are_excluded(
@@ -1407,6 +1432,95 @@ class TestDeleteDocumentStorageCleanup:
         ]
         assert raw_delete_calls == ["rid1", "rid2"]
         assert raw_repo.deleted_ids == ["rid1"]
+        assert _cascade_indices(fake_driver) == []
+
+    async def test_page_images_deleted_sums_across_raw_file_ids(
+        self, patch_driver, patch_storage
+    ):
+        """delete_images() runs per raw_file_id with the tenant of the node,
+        and page_images_deleted sums what it returns."""
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[
+                    {"raw_file_id": "rid1", "tenant_id": "acme"},
+                    {"raw_file_id": "rid2", "tenant_id": "acme"},
+                    {"raw_file_id": "rid3", "tenant_id": "acme"},
+                ],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(fake_driver, images_per_id={"rid1": 2, "rid2": 0, "rid3": 5})
+        page_repo = _FakePageRepo(fake_driver)
+        patch_storage(raw_repo, page_repo)
+
+        result = await delete_document("docs/t", version=1, tenant_id="acme")
+
+        assert raw_repo.image_deleted_ids == ["rid1", "rid2", "rid3"]
+        assert raw_repo.image_scopes == [{"tenant_id": "acme"}] * 3
+        assert result.page_images_deleted == 7
+        assert result.raw_files_deleted == 3
+
+    async def test_backend_without_delete_images_implementation_still_deletes(
+        self, patch_driver, patch_storage
+    ):
+        """A custom backend that does not override delete_images() (the
+        RawFileRepository default returns 0) must not break the deletion."""
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1"}],
+                gc_emi_sequence=[0],
+                gc_le_sequence=[0],
+            )
+        )
+
+        class _LegacyRawFileRepo(_FakeRawFileRepo):
+            async def delete_images(self, raw_file_id: str, **scope) -> int:
+                # Legacy backend without the WP1 method: the ABC default.
+                return await RawFileRepository.delete_images(
+                    self, raw_file_id, **scope
+                )
+
+        raw_repo = _LegacyRawFileRepo(fake_driver)
+        page_repo = _FakePageRepo(fake_driver, pages_per_id={"rid1": 1})
+        patch_storage(raw_repo, page_repo)
+
+        result = await delete_document("docs/u", version=1, tenant_id=None)
+
+        assert result.found is True
+        assert result.documents_deleted == 1
+        assert result.raw_files_deleted == 1
+        assert result.page_images_deleted == 0
+        assert raw_repo.deleted_ids == ["rid1"]
+
+    async def test_delete_images_failure_propagates_before_pages_and_cascade(
+        self, patch_driver, patch_storage
+    ):
+        """delete_images() runs first for each raw_file_id: if it raises,
+        neither delete_pages() nor delete() run for that id, later ids are
+        never touched, and the Neo4j cascade delete never runs."""
+        fake_driver = patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                raw_file_id_rows=[{"raw_file_id": "rid1"}, {"raw_file_id": "rid2"}],
+            )
+        )
+        raw_repo = _FakeRawFileRepo(
+            fake_driver,
+            image_raise_exc=RuntimeError("images store down"),
+            image_raise_on_id="rid1",
+        )
+        page_repo = _FakePageRepo(fake_driver)
+        patch_storage(raw_repo, page_repo)
+
+        with pytest.raises(RuntimeError, match="images store down"):
+            await delete_document("docs/v", version=1, tenant_id=None)
+
+        assert fake_driver.closed is True
+        assert page_repo.deleted_ids == []
+        assert raw_repo.deleted_ids == []
         assert _cascade_indices(fake_driver) == []
 
 

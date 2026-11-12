@@ -9,8 +9,11 @@ in GridFS and are identified by the ``id`` field of :class:`RawFileRecord`.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
+
+from scinr.newton.models.transcript import TranscriptCue
 
 
 class RawFileRecord(BaseModel):
@@ -83,6 +86,10 @@ class ConvertedPageRecord(BaseModel):
         Time range ``[start_ms, end_ms)`` of the page in the source medium
         (audio / video segments). ``None`` for documents without a time axis
         and for records written before 0.5.0.
+    transcript:
+        Transcribed sentences of the page with their absolute times (audio /
+        video; decision D7). ``None`` for documents without a time axis and
+        for records written before this change.
     """
 
     id: str
@@ -97,3 +104,78 @@ class ConvertedPageRecord(BaseModel):
     job_id: str | None = None
     start_ms: int | None = None
     end_ms: int | None = None
+    transcript: list[TranscriptCue] | None = None
+    transcript: list[TranscriptCue] | None = None
+
+
+class PageImageRecord(BaseModel):
+    """Metadata record for a described page image stored in ``page_images``.
+
+    Each embedded image or video frame that got a non-empty description is
+    persisted (original bytes in GridFS, metadata here), linked to the page
+    where it appears. Images that were discarded (too small, repeated, above
+    the per-page limit, illegible or left without a description) are not
+    stored.
+
+    Attributes
+    ----------
+    id:
+        ``str(ObjectId)`` of the document in the ``page_images`` MongoDB
+        collection. Use this value as ``image_id`` when opening the binary.
+    raw_file_id:
+        Reference to the parent :attr:`RawFileRecord.id`.
+    page_index:
+        Zero-based page index, identical to
+        :attr:`~converters.base.IntermediatePage.index` (the segment index
+        for video).
+    image_index:
+        Index of the image within its page, i.e. the ``index`` of the
+        ``<image index="N">`` block of that page.
+    kind:
+        ``"embedded"`` for an image embedded in a document, ``"frame"`` for
+        a video frame.
+    content_type:
+        MIME type of the stored image, e.g. ``"image/png"`` or
+        ``"image/jpeg"``.
+    size_bytes:
+        Size of the stored binary in bytes.
+    checksum_sha256:
+        Full hex-encoded SHA-256 digest of the stored binary.
+    width, height:
+        Pixel dimensions of the stored image, ``None`` when unknown.
+    time_ms:
+        Instant of the frame in the video, in milliseconds. Only set for
+        ``kind="frame"``; ``None`` for embedded images.
+    description:
+        The description produced by the vision model — the same text that
+        appears in the ``<image>`` block of the page markdown.
+    filename:
+        Name of the source document with its extension, e.g.
+        ``"3.2.P.1.pdf"``.
+    folder_path:
+        Relative path of the containing folder of the source document, or
+        ``None``.
+    stored_at:
+        UTC timestamp when this record was persisted.
+    tenant_id, created_by_user_id, job_id:
+        Same as in :class:`RawFileRecord` (copied from the upload).
+    """
+
+    id: str
+    raw_file_id: str
+    page_index: int
+    image_index: int
+    kind: Literal["embedded", "frame"]
+    content_type: str
+    size_bytes: int
+    checksum_sha256: str
+    width: int | None = None
+    height: int | None = None
+    time_ms: int | None = None
+    description: str
+    filename: str
+    folder_path: str | None
+    stored_at: datetime
+    tenant_id: str | None = None
+    created_by_user_id: str | None = None
+    job_id: str | None = None

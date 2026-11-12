@@ -79,6 +79,10 @@ configure(
 | `mongodb_frozen_collection` | `str` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` | Collection for snapshot metadata. |
 | `mongodb_frozen_gridfs_bucket` | `str` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` | GridFS bucket for snapshot files. |
 | `custom_freeze_storage` | `FreezeRepository \| None` | — | `None` | Snapshot repository when `freeze_backend="custom"`. |
+| `mongodb_images_collection` | `str` | `MONGODB_IMAGES_COLLECTION` | `"page_images"` | Collection for stored images and video frames. |
+| `mongodb_images_gridfs_bucket` | `str` | `MONGODB_IMAGES_GRIDFS_BUCKET` | `"page_image_binaries"` | GridFS bucket for stored images and video frames. |
+| `store_described_images` | `bool` | `STORE_DESCRIBED_IMAGES` | `True` | Store the original of each described embedded image (only with a backend whose `stores_images` is `True`). |
+| `store_video_frames` | `bool` | `STORE_VIDEO_FRAMES` | `True` | Store each described video frame with its instant. |
 | `extra_converters` | `dict[str, type] \| None` | — | `{}` | Maps file extensions to `BaseConverter` subclasses, overriding built-in converters. |
 | `mistral_api_key` | `str \| None` | `MISTRAL_API_KEY` | `None` | Mistral OCR API key. **Required to convert any PDF** — PDF conversion is Mistral OCR only, there is no fallback. |
 | `prompt_caching_enabled` | `bool \| None` | `PROMPT_CACHING_ENABLED` | `True` | Enable Bedrock Converse prompt caching (~90% token cost reduction on repeated calls). |
@@ -340,6 +344,7 @@ Result of a `delete_document()` call — full Document + cascade + garbage-colle
 | `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates (0 when there was none). |
 | `raw_files_deleted` | `int` | Number of `RawFileRecord` (binaries) deleted from the storage layer for the `raw_file_id`s referenced by the deleted Document(s) and their descendants. |
 | `converted_pages_deleted` | `int` | Number of `ConvertedPageRecord` (converted Markdown pages) deleted from the storage layer for the same `raw_file_id`s. |
+| `page_images_deleted` | `int` | Number of `PageImageRecord` (stored images and video frames) deleted from the storage layer for the same `raw_file_id`s. `0` with a backend that stores no images. |
 
 #### `OrphanCollectionResult`
 
@@ -680,6 +685,8 @@ When enabled (`STORAGE_BACKEND=mongodb`), the storage layer persists:
 | `raw_files` (MongoDB) | Metadata for each ingested raw file (filename, content type, folder path, upload timestamp). |
 | `converted_pages` (MongoDB) | Converted page content (markdown) + source page metadata per page. |
 | `raw_binaries` (GridFS) | Binary content of raw source files (PDF bytes, DOCX bytes, etc.). |
+| `page_images` (MongoDB) | Metadata of each stored described image or video frame: `raw_file_id`, `page_index`, `image_index`, kind, description, owner. |
+| `page_image_binaries` (GridFS) | The bytes of those images (the original for embedded images, the described JPEG for frames). |
 
 The `raw_file_id` and `page_id` fields stored in Neo4j nodes allow cross-referencing back to the original binary and page content in MongoDB.
 

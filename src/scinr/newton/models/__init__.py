@@ -5,6 +5,7 @@ from .document_structure import (
     NodeRole,
     StructureNode,
 )
+from .transcript import TranscriptCue
 
 __all__ = [
     "Document",
@@ -12,4 +13,5 @@ __all__ = [
     "StructureNode",
     "InfoUnit",
     "NodeRole",
+    "TranscriptCue",
 ]

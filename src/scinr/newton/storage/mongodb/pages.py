@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from bson.errors import InvalidId
 from bson.objectid import ObjectId
 
+from scinr.newton.models.transcript import TranscriptCue
 from scinr.newton.storage.base import PageRepository
 from scinr.newton.storage.filters import mongo_scope_filter
 from scinr.newton.storage.models import ConvertedPageRecord
@@ -44,6 +45,9 @@ def _to_record(doc: dict) -> ConvertedPageRecord:
         # Records written before 0.5.0 have neither field.
         start_ms=doc.get("start_ms"),
         end_ms=doc.get("end_ms"),
+        transcript=[TranscriptCue(**cue) for cue in doc["transcript"]]
+        if doc.get("transcript")
+        else None,
     )
 
 
@@ -68,6 +72,7 @@ class MongoDBPageRepository(PageRepository):
         job_id: str | None = None,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        transcript: list[dict] | None = None,
     ) -> str:
         """Persist a single converted page in MongoDB.
 
@@ -91,6 +96,10 @@ class MongoDBPageRepository(PageRepository):
         start_ms, end_ms:
             Time range ``[start_ms, end_ms)`` of the page in the source medium
             (audio / video segments), or ``None``.
+        transcript:
+            Transcribed sentences of the page with their absolute times
+            (audio / video), as a list of ``{start_ms, end_ms, text}`` dicts,
+            or ``None``.
 
         Returns
         -------
@@ -112,6 +121,7 @@ class MongoDBPageRepository(PageRepository):
             "job_id": job_id,
             "start_ms": start_ms,
             "end_ms": end_ms,
+            "transcript": transcript,
         }
         result = await db[cfg.mongodb_pages_collection].insert_one(doc)
         page_id = str(result.inserted_id)

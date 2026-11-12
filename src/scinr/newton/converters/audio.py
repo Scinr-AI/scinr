@@ -41,6 +41,7 @@ from scinr.newton.converters.media_common import (
     resolve_binaries,
     time_header,
     transcribe_segment,
+    transcript_text,
 )
 from scinr.newton.exceptions import ConfigurationError
 from scinr.newton.media import ffmpeg
@@ -97,7 +98,7 @@ class AudioConverter(BaseConverter):
                 info.duration_ms, cfg.media_segment_seconds, cfg.media_min_segment_seconds
             ):
                 try:
-                    text = await transcribe_segment(
+                    cues = await transcribe_segment(
                         binaries=binaries,
                         transcriber=transcriber,
                         source=source,
@@ -120,6 +121,7 @@ class AudioConverter(BaseConverter):
                     )
                     missing.append((segment.start_ms, segment.end_ms))
                     continue
+                text = transcript_text(cues)
                 if not text:
                     continue  # silence: no page
                 pages.append(
@@ -128,6 +130,7 @@ class AudioConverter(BaseConverter):
                         markdown=f"{time_header(segment.start_ms, segment.end_ms)}\n\n{text}",
                         start_ms=segment.start_ms,
                         end_ms=segment.end_ms,
+                        transcript=cues,
                     )
                 )
         logger.info(

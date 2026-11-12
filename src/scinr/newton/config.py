@@ -130,6 +130,9 @@ class ScinrConfig:
     mongodb_frozen_collection: str = "frozen_documents"
     mongodb_frozen_gridfs_bucket: str = "frozen_snapshots"
     custom_freeze_storage: Any = None  # FreezeRepository
+    # Page images (described embedded images and video frames)
+    mongodb_images_collection: str = "page_images"
+    mongodb_images_gridfs_bucket: str = "page_image_binaries"
     # Converters
     extra_converters: dict[str, type] = field(default_factory=dict)
     # PDF
@@ -146,6 +149,8 @@ class ScinrConfig:
     vision_llm: Any = None  # BaseChatModel multimodal — NO recurre a llm
     transcriber: Any = None  # scinr.newton.media.Transcriber
     describe_embedded_images: bool = True  # solo actúa con vision_llm
+    store_described_images: bool = True  # guarda el original descrito; solo con stores_images=True
+    store_video_frames: bool = True  # guarda cada fotograma descrito, con su instante
     media_error_strategy: Literal["fail_fast", "best_effort"] = "best_effort"
     strip_location: bool = True
     image_max_side_px: int = 1568
@@ -270,6 +275,9 @@ def configure(
     mongodb_frozen_collection: str | None = None,
     mongodb_frozen_gridfs_bucket: str | None = None,
     custom_freeze_storage: Any | None = None,
+    # Page images (described embedded images and video frames)
+    mongodb_images_collection: str | None = None,
+    mongodb_images_gridfs_bucket: str | None = None,
     # Converters
     extra_converters: dict[str, type] | None = None,
     # PDF
@@ -286,6 +294,8 @@ def configure(
     vision_llm: Any | None = None,
     transcriber: Any | None = None,
     describe_embedded_images: bool | None = None,
+    store_described_images: bool | None = None,
+    store_video_frames: bool | None = None,
     media_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
     strip_location: bool | None = None,
     image_max_side_px: int | None = None,
@@ -362,6 +372,12 @@ def configure(
         mongodb_frozen_gridfs_bucket: GridFS bucket for snapshot files.
             Env: `MONGODB_FROZEN_GRIDFS_BUCKET`. Default: `'frozen_snapshots'`.
         custom_freeze_storage: A `FreezeRepository` instance when `freeze_backend='custom'`.
+        mongodb_images_collection: Collection for the metadata of the described
+            page images and video frames. Env: `MONGODB_IMAGES_COLLECTION`.
+            Default: `'page_images'`.
+        mongodb_images_gridfs_bucket: GridFS bucket for the original bytes of the
+            described page images and video frames. Env:
+            `MONGODB_IMAGES_GRIDFS_BUCKET`. Default: `'page_image_binaries'`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
         mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
@@ -412,6 +428,12 @@ def configure(
             e insertar la descripción en el markdown de su página. **Solo actúa si hay
             un `vision_llm`**; sin él no se piden imágenes a Mistral ni se extraen
             blobs. Env: `DESCRIBE_EMBEDDED_IMAGES`. Default: `True`.
+        store_described_images: Guarda el original de cada imagen incrustada que se
+            describe. Solo actúa con un backend de storage persistente cuyo
+            `stores_images` sea `True`. Env: `STORE_DESCRIBED_IMAGES`. Default: `True`.
+        store_video_frames: Guarda cada fotograma descrito, con su instante. En vídeos
+            largos ocupa unos `video_frames_per_minute × minutos` JPEG.
+            Env: `STORE_VIDEO_FRAMES`. Default: `True`.
         media_error_strategy: Qué hacer cuando falla una imagen embebida, un tramo de
             audio o vídeo o un fotograma: `'best_effort'` (default: se omite, se
             registra en `missing_images` / `missing_segments` del documento y se
@@ -703,6 +725,12 @@ def configure(
     resolved_describe_embedded_images = _resolve_bool(
         describe_embedded_images, "DESCRIBE_EMBEDDED_IMAGES", True
     )
+    resolved_store_described_images = _resolve_bool(
+        store_described_images, "STORE_DESCRIBED_IMAGES", True
+    )
+    resolved_store_video_frames = _resolve_bool(
+        store_video_frames, "STORE_VIDEO_FRAMES", True
+    )
     resolved_media_error_strategy = media_error_strategy or os.getenv(
         "MEDIA_ERROR_STRATEGY", "best_effort"
     )
@@ -932,6 +960,14 @@ def configure(
             or os.getenv("MONGODB_FROZEN_GRIDFS_BUCKET", "frozen_snapshots")
         ),
         custom_freeze_storage=custom_freeze_storage,
+        mongodb_images_collection=(
+            mongodb_images_collection
+            or os.getenv("MONGODB_IMAGES_COLLECTION", "page_images")
+        ),
+        mongodb_images_gridfs_bucket=(
+            mongodb_images_gridfs_bucket
+            or os.getenv("MONGODB_IMAGES_GRIDFS_BUCKET", "page_image_binaries")
+        ),
         extra_converters=extra_converters or {},
         mistral_api_key=mistral_api_key or os.getenv("MISTRAL_API_KEY"),
         mistral_ocr_safe_max_pages=resolved_mistral_ocr_safe_max_pages,
@@ -945,6 +981,8 @@ def configure(
         vision_llm=vision_llm,
         transcriber=transcriber,
         describe_embedded_images=resolved_describe_embedded_images,
+        store_described_images=resolved_store_described_images,
+        store_video_frames=resolved_store_video_frames,
         media_error_strategy=resolved_media_error_strategy,
         strip_location=resolved_strip_location,
         image_max_side_px=resolved_image_max_side_px,

@@ -20,7 +20,8 @@ from scinr.newton.media.transcriber import Transcriber, TranscriptSegment
 _NEO = {"neo4j_user": "neo4j", "neo4j_password": "pw", "neo4j_database": "neo4j"}
 
 _ENV_VARS = (
-    "DESCRIBE_EMBEDDED_IMAGES", "MEDIA_ERROR_STRATEGY", "STRIP_LOCATION",
+    "DESCRIBE_EMBEDDED_IMAGES", "STORE_DESCRIBED_IMAGES", "STORE_VIDEO_FRAMES",
+    "MEDIA_ERROR_STRATEGY", "STRIP_LOCATION",
     "IMAGE_MAX_SIDE_PX", "IMAGE_MIN_SIDE_PX", "MAX_IMAGES_PER_PAGE", "MEDIA_SEGMENT_SECONDS",
     "MEDIA_LANGUAGE", "MAX_MEDIA_DURATION_SECONDS", "VIDEO_FRAMES_PER_MINUTE",
     "MEDIA_CONCURRENCY", "MISTRAL_OCR_IMAGE_MAX_PAGES", "FFMPEG_PATH", "FFPROBE_PATH",
@@ -57,6 +58,8 @@ class TestDefaults:
         cfg = configure(**_NEO)
         assert cfg.vision_llm is None and cfg.transcriber is None
         assert cfg.describe_embedded_images is True
+        assert cfg.store_described_images is True
+        assert cfg.store_video_frames is True
         assert cfg.media_error_strategy == "best_effort"
         assert cfg.strip_location is True
         assert (cfg.image_max_side_px, cfg.image_min_side_px, cfg.max_images_per_page) == (
@@ -74,6 +77,8 @@ class TestDefaults:
 
     def test_env_fallback(self, monkeypatch):
         monkeypatch.setenv("DESCRIBE_EMBEDDED_IMAGES", "false")
+        monkeypatch.setenv("STORE_DESCRIBED_IMAGES", "false")
+        monkeypatch.setenv("STORE_VIDEO_FRAMES", "false")
         monkeypatch.setenv("MEDIA_ERROR_STRATEGY", "fail_fast")
         monkeypatch.setenv("STRIP_LOCATION", "false")
         monkeypatch.setenv("IMAGE_MAX_SIDE_PX", "1024")
@@ -93,6 +98,8 @@ class TestDefaults:
         cfg = configure(**_NEO)
 
         assert cfg.describe_embedded_images is False
+        assert cfg.store_described_images is False
+        assert cfg.store_video_frames is False
         assert cfg.media_error_strategy == "fail_fast"
         assert cfg.strip_location is False
         assert (cfg.image_max_side_px, cfg.image_min_side_px, cfg.max_images_per_page) == (
@@ -112,6 +119,12 @@ class TestDefaults:
         monkeypatch.setenv("MAX_MEDIA_DURATION_SECONDS", "60")
         assert configure(**_NEO, max_media_duration_seconds=None).max_media_duration_seconds is None
         assert configure(**_NEO).max_media_duration_seconds == 60
+
+    def test_explicit_argument_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("STORE_DESCRIBED_IMAGES", "true")
+        monkeypatch.setenv("STORE_VIDEO_FRAMES", "false")
+        assert configure(**_NEO, store_described_images=False).store_described_images is False
+        assert configure(**_NEO, store_video_frames=True).store_video_frames is True
 
 
 class TestValidation:

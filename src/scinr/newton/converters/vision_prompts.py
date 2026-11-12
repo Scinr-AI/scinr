@@ -53,8 +53,8 @@ shows, its layout and any chart, diagram or photo content, with the data values 
 {_COMMON_RULES}""",
     "frame": f"""\
 You describe a still frame taken from a video in two or three sentences: what is shown, who \
-or what is doing what, and the setting. Then transcribe any text on screen (slides, \
-captions, labels) verbatim.
+or what is doing what, and the setting. Focus on what is seen, never summarize what is said. \
+Then transcribe any text on screen (slides, captions, labels) verbatim.
 
 {_COMMON_RULES}""",
 }
@@ -72,11 +72,23 @@ def system_prompt(mode: VisionMode) -> str:
 
 
 def user_prompt(mode: VisionMode, context: str | None = None) -> str:
-    """User prompt for *mode*, with the page text as context when given."""
+    """User prompt for *mode*, with context when given.
+
+    The context is the page text in ``embedded`` mode and the transcript of
+    the frame's segment in ``frame`` mode; it is always context only, never
+    to be repeated in the answer.
+    """
     prompt = _USER[mode]
     if context:
-        prompt += (
-            "\n\nText of the page where the image appears (context only, do not repeat it):\n"
-            "<page>\n" + context + "\n</page>"
-        )
+        if mode == "frame":
+            prompt += (
+                "\n\nTranscript of the video segment this frame belongs to (context only, "
+                "do not repeat it; use it to identify people, topics and what is on screen):\n"
+                "<transcript>\n" + context + "\n</transcript>"
+            )
+        else:
+            prompt += (
+                "\n\nText of the page where the image appears (context only, do not repeat it):\n"
+                "<page>\n" + context + "\n</page>"
+            )
     return prompt

@@ -168,6 +168,9 @@ class DeletionResult:
             includes ids that were already absent, since delete() returns None either way.
         converted_pages_deleted: Number of ConvertedPageRecord (converted Markdown
             pages) deleted from the storage layer for the same raw_file_ids.
+        page_images_deleted: Number of PageImageRecord (stored images: embedded
+            images, video frames) deleted from the storage layer for the same
+            raw_file_ids. A backend that stores no images always reports 0.
     """
 
     path: str | None
@@ -190,6 +193,7 @@ class DeletionResult:
     job_id: str | list[str] | tuple[str, ...] | None = None
     tenant_id: str | None = None
     created_by_user_id: str | list[str] | tuple[str, ...] | None = None
+    page_images_deleted: int = 0
 
 
 @dataclass

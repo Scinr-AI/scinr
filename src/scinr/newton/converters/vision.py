@@ -23,6 +23,7 @@ import io
 import logging
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 
 from scinr.newton.config import get_config, get_llm_semaphore, get_vision_llm
 from scinr.newton.converters.base import ConversionError
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "image_size",
+    "image_bytes_lane",
     "prepare_image",
     "prepare_for_vision",
     "describe_image",
@@ -51,8 +53,23 @@ _decode_semaphores = LoopSemaphore()
 ImageSource = bytes | Callable[[], bytes]
 
 
-def _open(data: bytes):
-    """Open *data* with Pillow, turning a decompression bomb into ConversionError."""
+def image_bytes_lane() -> asyncio.Semaphore:
+    """The lane that bounds the images read and decoded at once per event loop.
+
+    Same semaphore :func:`prepare_for_vision` uses (``_decode_semaphores``,
+    sized ``image_decode_concurrency`` per event loop): anything that holds
+    one image's original bytes in memory — decoding, or re-reading them to
+    store the described original (``converters/image_store.store_embedded``)
+    — acquires a slot here, so the number of originals in memory at a time
+    has the same cap as the images being decoded, whatever the
+    ``llm_concurrency`` calls in flight.
+    """
+    return _decode_semaphores.get(get_config().image_decode_concurrency)
+
+
+def _open(data: bytes | Path):
+    """Open *data* (bytes, or a file read lazily from disk) with Pillow, turning
+    a decompression bomb into ConversionError."""
     from PIL import Image
 
     _register_heif()
@@ -60,7 +77,7 @@ def _open(data: bytes):
         with warnings.catch_warnings():
             # Pillow warns (and later raises) on very large images: treat both as an error.
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            return Image.open(io.BytesIO(data))
+            return Image.open(data if isinstance(data, Path) else io.BytesIO(data))
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ConversionError(f"Image too large to process safely: {exc}") from exc
     except Exception as exc:
@@ -83,8 +100,12 @@ def _register_heif() -> None:
     _heif_registered = True
 
 
-def image_size(data: bytes) -> tuple[int, int]:
-    """Return ``(width, height)`` of the encoded image *data*, reading only its header."""
+def image_size(data: bytes | Path) -> tuple[int, int]:
+    """Return ``(width, height)`` of the encoded image *data*, reading only its header.
+
+    *data* may be a :class:`~pathlib.Path`: then only the header is read from
+    disk (a stored video frame never passes through memory for this).
+    """
     with _open(data) as image:
         return image.size
 
@@ -131,7 +152,7 @@ async def prepare_for_vision(image: ImageSource, max_side: int) -> bytes:
     many images are in memory at a time; the bytes are dropped as soon as the
     downscaled JPEG exists.
     """
-    async with _decode_semaphores.get(get_config().image_decode_concurrency):
+    async with image_bytes_lane():
         data = await asyncio.to_thread(image) if callable(image) else image
         try:
             return await asyncio.to_thread(prepare_image, data, max_side)
@@ -176,8 +197,9 @@ async def describe_image(
     mode:
         ``"embedded"``, ``"standalone"`` or ``"frame"`` (see :mod:`vision_prompts`).
     context:
-        ``embedded`` mode: the page markdown (truncated to
-        :data:`CONTEXT_MAX_CHARS`).
+        ``embedded`` mode: the page markdown; ``frame`` mode: the transcript
+        of the video segment the frame belongs to (``None`` when the segment
+        has none). Always truncated to :data:`CONTEXT_MAX_CHARS`.
 
     Returns
     -------

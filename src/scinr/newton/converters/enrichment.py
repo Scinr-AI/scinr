@@ -35,7 +35,9 @@ from dataclasses import dataclass, field
 
 from scinr.newton.config import get_config
 from scinr.newton.converters.base import ConversionError, IntermediatePage, PageImage
+from scinr.newton.converters.image_store import store_embedded
 from scinr.newton.converters.vision import describe_image, image_size
+from scinr.newton.exceptions import ImageStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +128,17 @@ def _select(
     return to_describe, discarded, unreadable
 
 
-async def _describe(image: PageImage, context: str) -> str:
+async def _describe(image: PageImage, context: str, page_index: int) -> str:
     # The loader is called only when it is this image's turn to be decoded
     # (one at a time, see vision.prepare_for_vision): the images of a page
-    # waiting for their turn are not read in the meantime.
+    # waiting for their turn are not read in the meantime. Storing the
+    # described original re-reads them inside that same lane (see
+    # image_store.store_embedded).
     try:
-        return await describe_image(image.load_bytes, mode="embedded", context=context)
+        description = await describe_image(image.load_bytes, mode="embedded", context=context)
+        if description:
+            image.image_id = await store_embedded(page_index, image, description)
+        return description
     finally:
         image.release()
 
@@ -148,6 +155,10 @@ async def enrich_pages(
     ------
     ConversionError
         An image failed and ``media_error_strategy`` is ``"fail_fast"``.
+    ImageStorageError
+        A described image could not be stored. Always re-raised, whatever
+        the ``media_error_strategy`` (D5: a described image is never kept
+        without its original).
     """
     cfg = get_config()
     fail_fast = cfg.media_error_strategy == "fail_fast"
@@ -169,8 +180,13 @@ async def enrich_pages(
 
         context = page.markdown
         results = await asyncio.gather(
-            *(_describe(image, context) for image in to_describe), return_exceptions=True
+            *(_describe(image, context, page.index) for image in to_describe),
+            return_exceptions=True,
         )
+        # A storage failure of a described image is never best-effort (D5).
+        for result in results:
+            if isinstance(result, ImageStorageError):
+                raise result
         trailing: list[str] = []
         first_error: BaseException | None = None
         for image, result in zip(to_describe, results, strict=True):

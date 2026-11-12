@@ -17,6 +17,7 @@ from pathlib import Path
 from scinr.newton.converters.base import ConversionError
 from scinr.newton.media import ffmpeg
 from scinr.newton.media.transcriber import TranscriptSegment
+from scinr.newton.models.transcript import TranscriptCue
 from scinr.newton.utils.loop_semaphore import LoopSemaphore
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,34 @@ def transcript_text(segments: list[TranscriptSegment]) -> str:
     return "\n".join(s.text.strip() for s in segments if s.text and s.text.strip())
 
 
+def transcript_cues(segment: Segment, segments: list[TranscriptSegment]) -> list[TranscriptCue]:
+    """The transcribed sentences of *segment* as cues with **absolute** times.
+
+    The transcriber's times are relative to the segment file: they are shifted
+    by ``segment.start_ms`` and clipped to ``[segment.start_ms, segment.end_ms]``.
+    A transcriber without timestamps returns a single segment with
+    ``end_ms <= start_ms`` (``OpenAICompatibleTranscriber``'s
+    ``response_format=json`` fallback); it becomes a single cue with the whole
+    segment range — times are never invented. Cues without text are discarded,
+    same as :func:`transcript_text`.
+    """
+    cues: list[TranscriptCue] = []
+    for seg in segments:
+        if not seg.text or not seg.text.strip():
+            continue
+        if seg.end_ms <= seg.start_ms:  # no timestamps: the whole segment range
+            cues.append(
+                TranscriptCue(start_ms=segment.start_ms, end_ms=segment.end_ms, text=seg.text.strip())
+            )
+            continue
+        start = max(segment.start_ms, segment.start_ms + seg.start_ms)
+        end = min(segment.end_ms, segment.start_ms + seg.end_ms)
+        if end < start:  # fully outside the segment (provider glitch)
+            continue
+        cues.append(TranscriptCue(start_ms=start, end_ms=end, text=seg.text.strip()))
+    return cues
+
+
 async def transcribe_segment(
     *,
     binaries: ffmpeg.Binaries,
@@ -101,8 +130,13 @@ async def transcribe_segment(
     segment: Segment,
     workdir: Path,
     language: str | None,
-) -> str:
-    """Cut *segment* to a temporary FLAC, transcribe it, delete it (also on failure)."""
+) -> list[TranscriptCue]:
+    """Cut *segment* to a temporary FLAC, transcribe it, delete it (also on failure).
+
+    Returns the segment's :class:`TranscriptCue` list (absolute times); the
+    page text comes from those cues, one per line, as :func:`transcript_text`
+    does today.
+    """
     tmp = workdir / f"segment_{segment.index:05d}.flac"
     try:
         await ffmpeg.extract_audio_segment(
@@ -111,7 +145,7 @@ async def transcribe_segment(
         result = await transcriber.transcribe(tmp, language)
     finally:
         tmp.unlink(missing_ok=True)
-    return transcript_text(result)
+    return transcript_cues(segment, result)
 
 
 def resolve_binaries() -> ffmpeg.Binaries:

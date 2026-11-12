@@ -189,7 +189,14 @@ class TestSignatureContract:
 # Contract by Cypher
 # ---------------------------------------------------------------------------
 
-_NON_EXEMPT = sorted(n for n in _public_methods(GraphNavigator) if n not in EXEMPT)
+#: Storage-only methods: they take the four filters (checked above) but resolve
+#: nothing in the graph — ``get_page_image`` opens an image by id and applies the
+#: full scope to the storage read (pinned in ``test_navigation_pages.py``,
+#: ``test_get_page_image_applies_the_full_scope``), so no Cypher to check here.
+_STORAGE_ONLY = {"get_page_image"}
+_NON_EXEMPT = sorted(
+    n for n in _public_methods(GraphNavigator) if n not in EXEMPT and n not in _STORAGE_ONLY
+)
 #: The uid embeds the tenant, so this lookup cannot span "all tenants" and
 #: resolves ``include_public`` by trying each tenant in turn (see its own tests).
 _TENANT_KEYED = {"get_model_instance_by_key"}

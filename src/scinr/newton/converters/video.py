@@ -12,7 +12,22 @@ with ``start_ms`` / ``end_ms``). Each page holds:
        </image>
 
 Frames are sampled uniformly at ``video_frames_per_minute`` (``0`` =
-transcription only); a frame identical to the previous one is skipped.
+transcription only); a frame identical to the previous one is skipped. Each
+frame that gets a description:
+
+1. is described with the segment's transcript as context (``frame`` mode,
+   ``None`` when the segment has none: no transcriber, a failed or empty
+   transcription — decision D6);
+2. is stored with its ``time_ms`` through
+   :func:`~scinr.newton.converters.image_store.store_frame`, inside the same
+   call that describes it, when the :func:`image_sink` context has the
+   ``frames`` switch (``store_video_frames``) on — streamed from disk
+   (``store_image_file``), with the ``width`` / ``height`` read from the JPEG
+   header, without decoding; a skipped (identical) frame is never stored; and
+3. is deleted from disk right after its turn, whatever the outcome.
+
+A storage failure (:class:`~scinr.newton.exceptions.ImageStorageError`) fails
+the video, whatever the ``media_error_strategy`` (D5).
 
 Requirements: ``ffmpeg`` / ``ffprobe``; a ``transcriber`` when the video has
 audio; a ``vision_llm`` for the frames (without it the frames are skipped
@@ -27,7 +42,10 @@ extract the frames of a segment, every frame planned for it is recorded in
 
 Memory: the video is never opened in Python. The frames of one segment are on
 disk at a time, already scaled to ``image_max_side_px``; they pass through
-memory one by one (or as many as the LLM semaphore lets describe at once).
+memory one by one (or as many as the LLM semaphore lets describe at once),
+and each is uploaded from disk inside its own turn — never all at once. The
+segment's transcript is just text (a few KB for 5 minutes), shared between
+the segment's description calls.
 """
 
 from __future__ import annotations
@@ -55,8 +73,9 @@ from scinr.newton.converters.media_common import (
     resolve_binaries,
     time_header,
     transcribe_segment,
+    transcript_text,
 )
-from scinr.newton.exceptions import ConfigurationError
+from scinr.newton.exceptions import ConfigurationError, ImageStorageError
 from scinr.newton.media import ffmpeg
 from scinr.newton.models.file_metadata import FileMetadata
 
@@ -133,12 +152,15 @@ class VideoConverter(BaseConverter):
                 info.duration_ms, cfg.media_segment_seconds, cfg.media_min_segment_seconds
             ):
                 parts: list[str] = []
+                text: str | None = None
+                cues = None
                 if transcriber is not None:
                     try:
-                        text = await transcribe_segment(
+                        cues = await transcribe_segment(
                             binaries=binaries, transcriber=transcriber, source=source,
                             segment=segment, workdir=workdir, language=cfg.media_language,
                         )
+                        text = transcript_text(cues)
                     except Exception as exc:
                         if fail_fast:
                             raise ConversionError(
@@ -150,12 +172,14 @@ class VideoConverter(BaseConverter):
                             time_header(segment.start_ms, segment.end_ms), source.name, exc,
                         )
                         missing_segments.append((segment.start_ms, segment.end_ms))
+                        cues = None
                         text = ""
                     if text:
                         parts.append(text)
                 if with_frames:
                     blocks, failed, last_digest = await self._frames(
-                        binaries, source, segment, workdir, cfg, last_digest, fail_fast
+                        binaries, source, segment, workdir, cfg, last_digest, fail_fast,
+                        transcript=text or None,
                     )
                     parts.extend(blocks)
                     missing_images.extend((segment.index, f) for f in failed)
@@ -169,6 +193,7 @@ class VideoConverter(BaseConverter):
                         + "\n\n".join(parts),
                         start_ms=segment.start_ms,
                         end_ms=segment.end_ms,
+                        transcript=cues,
                     )
                 )
         logger.info("Video %s: %d page(s).", source.name, len(pages))
@@ -189,12 +214,25 @@ class VideoConverter(BaseConverter):
 
     async def _frames(
         self, binaries, source: Path, segment: Segment, workdir: Path, cfg,
-        last_digest: str | None, fail_fast: bool,
+        last_digest: str | None, fail_fast: bool, transcript: str | None = None,
     ) -> tuple[list[str], list[int], str | None]:
-        """Describe the sampled frames of *segment*.
+        """Describe the sampled frames of *segment* and store the described ones.
+
+        *transcript* is the segment's transcription (``None`` when there is
+        no transcriber, when it failed in ``best_effort`` or when it came out
+        empty): it is passed as context to every ``frame`` description (D6).
 
         Returns ``(blocks, failed_frame_indexes, digest_of_the_last_frame)``.
+
+        Raises
+        ------
+        ConversionError
+            A frame failed and ``fail_fast``.
+        ImageStorageError
+            A described frame could not be stored. Always re-raised after the
+            ``gather``, whatever the ``media_error_strategy`` (D5).
         """
+        from scinr.newton.converters.image_store import store_frame
         from scinr.newton.converters.vision import describe_image
 
         count = max(1, round(cfg.video_frames_per_minute * segment.duration_s / 60))
@@ -230,15 +268,23 @@ class VideoConverter(BaseConverter):
                 last_digest = digest
                 kept.append((k, frame, segment.start_ms + round(k * step_ms)))
 
-            async def _describe(path: Path) -> str:
+            async def _describe(k: int, path: Path, time_ms: int) -> str:
                 # Read only on its turn to be decoded (vision.prepare_for_vision).
                 try:
-                    return await describe_image(path.read_bytes, mode="frame")
+                    description = await describe_image(
+                        path.read_bytes, mode="frame", context=transcript
+                    )
+                    if description:
+                        await store_frame(
+                            segment.index, k, path, time_ms=time_ms, description=description
+                        )
+                    return description
                 finally:
                     path.unlink(missing_ok=True)
 
             results = await asyncio.gather(
-                *(_describe(path) for _, path, _ in kept), return_exceptions=True
+                *(_describe(k, path, time_ms) for k, path, time_ms in kept),
+                return_exceptions=True,
             )
         finally:
             shutil.rmtree(frames_dir, ignore_errors=True)
@@ -248,6 +294,8 @@ class VideoConverter(BaseConverter):
         for (k, _, time_ms), result in zip(kept, results, strict=True):
             if isinstance(result, BaseException):
                 if not isinstance(result, Exception):
+                    raise result
+                if isinstance(result, ImageStorageError):
                     raise result
                 if fail_fast:
                     raise ConversionError(

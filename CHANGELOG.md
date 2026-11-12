@@ -37,10 +37,10 @@ transcription endpoint or a `Transcriber` of your own). Document names and
   when embedded-image description is off (nothing read it). With description
   on, images are described and released; no intermediate JSON carries image
   bytes.
-- **A custom `PageRepository` must accept `start_ms` / `end_ms`** (keyword-only,
-  `int | None`) in `store_page()` to ingest audio and video. They are passed
-  only when a page has them, so a repository with the old signature keeps
-  working for every other format.
+- **A custom `PageRepository` must accept `start_ms` / `end_ms` / `transcript`**
+  (keyword-only; `int | None` and `list[dict] | None`) in `store_page()` to
+  ingest audio and video. They are passed only when a page has them, so a
+  repository with the old signature keeps working for every other format.
 - **`PageImage.base64` is no longer required** (default `""`): an image may be
   lazy or already released. Custom converters that read it must not assume it
   is set; use `PageImage.load_bytes()` / `has_content`.
@@ -66,6 +66,14 @@ transcription endpoint or a `Transcriber` of your own). Document names and
   ranges. The same applies to an audio, video or image-only document with
   `media_error_strategy="best_effort"`, for example after a wrong API key. A
   document that is merely empty, with no failure, is not affected.
+- **Each video frame is described with the transcript of its segment as
+  context**, the way an embedded image gets the text of its page. Still one
+  image per call; without a transcript the frame is described without context.
+- **A failed image write fails the document**, whatever `media_error_strategy`,
+  like a failed page write. The images already stored for that upload are
+  deleted first.
+- `delete_document()` also deletes the stored images and frames of the deleted
+  documents.
 
 ### Added
 - **Image files** (`.jpg`, `.jpeg`, `.png`, `.webp`, `.tif`, `.tiff`, `.heic`,
@@ -108,6 +116,35 @@ transcription endpoint or a `Transcriber` of your own). Document names and
   `file_duration_ms`, `file_container`, `file_audio_codec`, `file_video_codec`,
   `file_frame_rate`. All are written on every ingestion (`null` erases a stale
   value).
+- **Described images and video frames are stored** in the document base,
+  linked to their page: the original bytes of each embedded image that gets a
+  description (the package blob for DOCX / PPTX, the Mistral OCR crop for PDF)
+  and the JPEG of each described frame, with its `time_ms`. Skipped, unreadable,
+  failed and undescribed images are not stored. MongoDB keeps them in the
+  `page_images` collection and the `page_image_binaries` GridFS bucket
+  (`mongodb_images_collection` / `MONGODB_IMAGES_COLLECTION`,
+  `mongodb_images_gridfs_bucket` / `MONGODB_IMAGES_GRIDFS_BUCKET`), with a
+  unique index on `(tenant_id, raw_file_id, page_index, image_index)`.
+- Retrieval: `include_images=True` on `get_structure_nodes_source_pages()`,
+  `get_info_unit_source_text()` and `get_document_source_text()` fills
+  `PageText.images` (`PageImageRef`); `get_document_images()` lists a
+  document's images; `get_page_image(image_id)` returns a `PageImageFile`
+  (record plus stream), read with the call's full scope.
+- `store_described_images` / `STORE_DESCRIBED_IMAGES` and `store_video_frames` /
+  `STORE_VIDEO_FRAMES` (both `True`).
+- `DeletionResult.page_images_deleted`.
+- **Per-sentence transcript timestamps** are stored with each audio / video page
+  as `TranscriptCue(start_ms, end_ms, text)` (absolute times; exported from
+  `scinr.newton`): `ConvertedPageRecord.transcript`
+  (`converted_pages.transcript`), `IntermediatePage.transcript`,
+  `PageText.transcript` and `PageText.find_in_transcript()`, to jump from a
+  quote to its exact second. Not written into the markdown. A transcriber
+  without timestamps gives one cue per segment.
+- Optional (not abstract) image methods on `RawFileRepository`:
+  `stores_images`, `store_image()`, `store_image_file()`, `list_images()`,
+  `open_image()`, `delete_images()`. A custom backend without them keeps
+  working, stores no images and logs one warning per process.
+  `ImageStorageError` (a `StorageError`) is exported from `scinr.newton`.
 - `IntermediateDocument.file_metadata`, `missing_images` (`(page_index,
   image_index)`) and `missing_segments` (`[start_ms, end_ms)`).
 - **Partial documents are reported at the end of the run.** The preprocess
@@ -161,6 +198,8 @@ transcription endpoint or a `Transcriber` of your own). Document names and
   with 20 → 100 images add +3.0 → +4.1 / +3.7 → +3.7 MiB over the libraries'
   own load; audio 30 min and 2 h 1.5 MiB; video 7.8 MB and 363 MB 5.2 / 5.7 MiB;
   8 audios with `parallel_docs=4` 1.4 MiB, one conversion in flight.
+  Storing the described images adds +0.2 MiB (DOCX with 100 images, 300-page
+  PDF) and +0.5 MiB (video): `*_stored` cases.
 
 ### Fixed
 - The docstring of `PageImage.description`: it is filled by the embedded-image

@@ -17,7 +17,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from scinr.newton.storage.models import RawFileRecord
+from scinr.newton.models.transcript import TranscriptCue
+from scinr.newton.storage.models import PageImageRecord, RawFileRecord
 
 
 class _Base(BaseModel):
@@ -506,6 +507,35 @@ class Subgraph(_Base):
 # ---------------------------------------------------------------------------
 
 
+class PageImageRef(_Base):
+    """A stored image of a page: a described embedded image (DOCX, PPTX,
+    PDF) or a described video frame.
+
+    Identified by ``(raw_file_id, page_index, image_index)``: ``image_index``
+    is the ``index`` of the ``<image index="N">`` block of that page's
+    markdown. Open its bytes with ``navigation.pages.get_page_image`` (or
+    ``nav.get_page_image(ref.image_id)``).
+
+    - ``kind="embedded"``: the original bytes as they came in the document
+      (the package blob for DOCX / PPTX; the crop Mistral OCR returned for
+      PDF).
+    - ``kind="frame"``: the JPEG that was described, already scaled to
+      ``image_max_side_px``; ``time_ms`` is its instant in the video.
+    """
+
+    image_id: str
+    raw_file_id: str
+    page_index: int
+    image_index: int
+    kind: Literal["embedded", "frame"]
+    content_type: str
+    size_bytes: int
+    width: int | None = None
+    height: int | None = None
+    time_ms: int | None = None
+    description: str
+
+
 class PageText(_Base):
     """One converted source page, verbatim markdown.
 
@@ -514,6 +544,11 @@ class PageText(_Base):
     a caller can play that segment from ``get_document_original``. ``None``
     for documents without a time axis (PDF, DOCX, …) and for pages stored
     before 0.5.0.
+
+    ``transcript`` holds the transcribed sentences of the page with their
+    absolute times (audio / video; decision D7). Use
+    :meth:`find_in_transcript` to go from a source-text quote to its exact
+    second.
     """
 
     page_id: str
@@ -524,6 +559,25 @@ class PageText(_Base):
     folder_path: str | None = None
     start_ms: int | None = None
     end_ms: int | None = None
+    # Transcribed sentences of the page with their absolute times (audio /
+    # video). ``None`` for documents without a time axis and for pages stored
+    # before this change.
+    transcript: list[TranscriptCue] | None = None
+    # Stored images of the page, ordered by ``image_index``. ``None`` = not
+    # requested (``include_images=False``); ``[]`` = requested, none stored.
+    images: list[PageImageRef] | None = None
+
+    def find_in_transcript(self, text: str) -> list[TranscriptCue]:
+        """The cues whose text contains *text*, compared without case or
+        repeated whitespace. Used to go from a source-text quote to its exact
+        second. Returns an empty list when the page has no transcript.
+        """
+        if self.transcript is None or not text:
+            return []
+        needle = " ".join(text.split()).lower()
+        return [
+            cue for cue in self.transcript if needle in " ".join(cue.text.split()).lower()
+        ]
 
 
 class StructureNodeSourcePages(_Base):
@@ -581,6 +635,32 @@ class OriginalFile:
         return b"".join([chunk async for chunk in self.stream])
 
 
+@dataclass(frozen=True)
+class PageImageFile:
+    """A stored page image with its bytes (see
+    ``navigation.pages.get_page_image``).
+
+    Like :class:`OriginalFile`, it holds an open, single-use stream: consume
+    it with ``async for chunk in image.stream`` (constant memory) or
+    :meth:`read` (whole image).
+    """
+
+    record: PageImageRecord
+    stream: AsyncIterator[bytes]
+
+    @property
+    def image_id(self) -> str:
+        return self.record.id
+
+    @property
+    def content_type(self) -> str:
+        return self.record.content_type
+
+    async def read(self) -> bytes:
+        """Read the whole (remaining) stream into memory."""
+        return b"".join([chunk async for chunk in self.stream])
+
+
 # Resolve forward references for the self/cross-referential trees.
 DocumentTree.model_rebuild()
 StructureTree.model_rebuild()
@@ -602,4 +682,5 @@ __all__ = [
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
     "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",
+    "PageImageRef", "PageImageFile",
 ]

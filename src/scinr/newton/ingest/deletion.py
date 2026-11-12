@@ -328,9 +328,10 @@ def _fetch_raw_file_ids(driver, filters: dict) -> list[tuple[str, str | None]]:
 
 async def _delete_storage_for_raw_file_ids(
     raw_file_ids: list[tuple[str, str | None]],
-) -> tuple[int, int]:
-    """Delete storage records (raw binaries + converted pages) for every
-    given ``(raw_file_id, tenant_id)`` pair, via the configured storage backend.
+) -> tuple[int, int, int]:
+    """Delete storage records (raw binaries + converted pages + stored
+    images) for every given ``(raw_file_id, tenant_id)`` pair, via the
+    configured storage backend.
 
     Each delete is scoped to the tenant of the graph node that carries the
     id, so a ``raw_file_id`` forged to point at another tenant's upload
@@ -344,8 +345,10 @@ async def _delete_storage_for_raw_file_ids(
     (e.g. StorageError, a dropped connection) propagates to the caller so
     that the Neo4j cascade delete is never reached. Backend implementations
     are expected to be idempotent for "already gone" cases (missing
-    metadata, missing GridFS binary, invalid ObjectId, no matching pages,
-    out of scope) and to not raise for those.
+    metadata, missing GridFS binary, invalid ObjectId, no matching pages or
+    images, out of scope) and to not raise for those. A backend without
+    image storage returns 0 from ``delete_images`` and the deletion proceeds
+    unchanged.
 
     Parameters
     ----------
@@ -354,22 +357,24 @@ async def _delete_storage_for_raw_file_ids(
 
     Returns
     -------
-    tuple[int, int]
-        (raw_files_deleted, converted_pages_deleted).
+    tuple[int, int, int]
+        (raw_files_deleted, converted_pages_deleted, page_images_deleted).
     """
     if not raw_file_ids:
-        return 0, 0
+        return 0, 0, 0
 
     from scinr.newton.storage.factory import get_storage
 
     raw_file_repo, page_repo = get_storage()
     raw_files_deleted = 0
     converted_pages_deleted = 0
+    page_images_deleted = 0
     for rid, tenant in raw_file_ids:
+        page_images_deleted += await raw_file_repo.delete_images(rid, tenant_id=tenant)
         converted_pages_deleted += await page_repo.delete_pages(rid, tenant_id=tenant)
         await raw_file_repo.delete(rid, tenant_id=tenant)
         raw_files_deleted += 1
-    return raw_files_deleted, converted_pages_deleted
+    return raw_files_deleted, converted_pages_deleted, page_images_deleted
 
 
 # ---------------------------------------------------------------------------
@@ -427,9 +432,9 @@ async def delete_document(
     calling API layer; this function only enforces the scope.
 
     Before any Neo4j deletion happens, this also deletes the documental
-    storage records (raw binary + converted Markdown pages) for every
-    non-empty ``raw_file_id`` found on the target Document(s) and their
-    ``IS_COMPOSED_OF*`` descendants, via the configured storage backend
+    storage records (raw binary + converted Markdown pages + stored images)
+    for every non-empty ``raw_file_id`` found on the target Document(s) and
+    their ``IS_COMPOSED_OF*`` descendants, via the configured storage backend
     (``storage/factory.py::get_storage()``). This step is fail-fast: if
     deleting storage for any raw_file_id raises an unexpected exception,
     it propagates immediately and the Neo4j cascade delete is never run.
@@ -531,16 +536,17 @@ async def delete_document(
         )
 
         raw_file_ids = await asyncio.to_thread(_fetch_raw_file_ids, driver, filters)
-        raw_files_deleted, converted_pages_deleted = await _delete_storage_for_raw_file_ids(
-            raw_file_ids
+        raw_files_deleted, converted_pages_deleted, page_images_deleted = (
+            await _delete_storage_for_raw_file_ids(raw_file_ids)
         )
 
         logger.info(
             "delete_document: storage cleanup complete for %s. "
-            "raw_files_deleted=%d converted_pages_deleted=%d",
+            "raw_files_deleted=%d converted_pages_deleted=%d page_images_deleted=%d",
             selector_repr,
             raw_files_deleted,
             converted_pages_deleted,
+            page_images_deleted,
         )
 
         cascade_counts, gc_counts = await asyncio.to_thread(_run_cascade_delete, driver, filters)
@@ -574,6 +580,7 @@ async def delete_document(
             **gc_counts,
             raw_files_deleted=raw_files_deleted,
             converted_pages_deleted=converted_pages_deleted,
+            page_images_deleted=page_images_deleted,
         )
     finally:
         driver.close()

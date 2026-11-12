@@ -56,6 +56,16 @@ class StorageError(ScinrError):
     """
 
 
+class ImageStorageError(StorageError):
+    """
+    Raised when a described image or video frame cannot be stored.
+
+    A described image is never kept without its original (decision D5 of
+    ``plans/stored-images-implementation-plan.md``): a storage failure fails
+    the document being converted, whatever the ``media_error_strategy``.
+    """
+
+
 class FreezeError(ScinrError):
     """
     Raised when a document cannot be frozen, restored or snapshotted.

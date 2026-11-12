@@ -290,6 +290,14 @@ A presenter in front of a slide titled "Q3 results"; on screen: "Revenue +12 %".
 - Frames are sampled uniformly at `video_frames_per_minute` (2.0, so 10 per
   5-minute segment). A frame identical to the previous one is skipped. `0`
   means transcription only. There is no scene detection in this version.
+- Each frame is described in a call of its own, with one image, and gets **the
+  transcript of its segment as context**, the way an embedded image gets the
+  text of its page. The model uses it to name the topic or the speaker on
+  screen, but describes what is seen, not what is said. Without a transcript
+  (a video without audio, or a segment whose transcription failed in
+  `best_effort`) the frame is described without context. Frames are not sent
+  several to a call: that would raise the memory per segment, many local
+  models accept a single image, and one failure would lose the whole segment.
 - A video **with** audio needs a `transcriber`. A video **without** audio is
   processed from frames only.
 - Without a `vision_llm` the frames are skipped with a warning, and the video
@@ -314,6 +322,87 @@ if original is not None and page.start_ms is not None:
 
 `start_ms` / `end_ms` are `None` for documents without a time axis (PDF,
 DOCX…) and for pages stored before 0.5.0.
+
+**Jumping to the exact sentence.** Each page also carries `transcript`: the
+transcribed sentences with their own range, as `TranscriptCue(start_ms,
+end_ms, text)`, with times absolute in the original file (not relative to the
+segment). `PageText.find_in_transcript(text)` returns the cues that contain a
+quote, compared without case or repeated whitespace, so a quote from the
+source text leads to its second:
+
+```python
+cues = page.find_in_transcript("revenue grew twelve percent")
+if cues:
+    player.seek(cues[0].start_ms)
+```
+
+The cues are stored with the page (`converted_pages.transcript`), not in the
+markdown: the text the extraction reads is the same as without them and costs
+no extra tokens. When the transcriber returns no timestamps (an
+OpenAI-compatible server that only answers `response_format=json`), each page
+gets a single cue covering the whole segment; times are never invented.
+`transcript` is `None` for documents without a time axis and for pages stored
+before this change.
+
+## Retrieving images and frames
+
+Each image that gets a description is stored in the document base, linked to
+its page, so it can be shown to the user as it was:
+
+- **Embedded images** (DOCX, PPTX, PDF): the original bytes, not resized. For
+  DOCX and PPTX, the picture as stored in the package. For PDF, the crop that
+  Mistral OCR returns, which is what was described and what the page shows.
+- **Video frames**: the JPEG that was described, already scaled to
+  `image_max_side_px`, with its `time_ms`. The full-resolution frame can be
+  taken from the original video at that instant.
+- **Not stored**: images skipped as trivial, repeated or over
+  `max_images_per_page`, images that could not be read or described, and
+  images the model left without a description. A repeated image (a logo on
+  every page) is stored once, at its first appearance. Image files (`.png`,
+  `.jpg`…) are not stored again: their original is the uploaded file
+  (`get_document_original`).
+
+An image is identified by `(raw_file_id, page_index, image_index)`, where
+`image_index` is the `index` of its `<image index="N">` block. The markdown
+carries no image id.
+
+```python
+pages = await nav.get_document_source_text("report.docx", include_images=True)
+for page in pages:
+    for ref in page.images:                      # list[PageImageRef]
+        print(page.index, ref.image_index, ref.kind, ref.description)
+        image = await nav.get_page_image(ref.image_id)   # PageImageFile | None
+        if image is not None:
+            async for chunk in image.stream:     # constant memory
+                response.write(chunk)
+```
+
+- `include_images=True` works on `get_document_source_text`,
+  `get_info_unit_source_text` and `get_structure_nodes_source_pages`.
+  Without it, `PageText.images` is `None` and the image storage is not read;
+  with it, a page without images gets `[]`.
+- `get_document_images(document, page_indexes=..., kind="embedded" | "frame")`
+  lists a document's images without reading its pages.
+- `get_page_image(image_id)` opens one image by id, the natural way to serve
+  `/images/{image_id}` from an API. There is no graph node to resolve from an
+  id, so the storage read applies the call's **full scope** (tenant,
+  `include_public`, user and job). An image outside it returns `None`, like a
+  missing one. See
+  [Graph Navigation](graph-navigation.md#reading-source-text).
+
+Storing is controlled by two switches, both on by default:
+`store_described_images` (`STORE_DESCRIBED_IMAGES`) for embedded images and
+`store_video_frames` (`STORE_VIDEO_FRAMES`) for frames. They only act with a
+persistent storage backend that stores images (MongoDB does). A custom backend
+that does not implement the image methods keeps working, stores no images and
+logs one warning per process (see
+[Storage Backends](storage-backends.md#repository-interfaces)).
+
+**A failed image write fails the document**, whatever `media_error_strategy`,
+the same as a failed page write: a described image is never kept without its
+original. The images already stored for that upload are deleted first.
+`delete_document()` deletes a document's images with its pages
+(`DeletionResult.page_images_deleted`).
 
 ## File metadata
 
@@ -391,6 +480,11 @@ images.
   page, and its images are released before the next chunk.
 - Audio and video are never read in Python. `ffmpeg` writes one temporary
   segment (or the frames of one segment) at a time.
+- Storing the described images does not change the peak. The original of an
+  embedded image is read again inside the same decoding lane, so no more than
+  `image_decode_concurrency` originals are in memory at once. A frame is
+  uploaded from disk as a stream. Measured: +0.2 MiB for a DOCX with 100
+  images and for a 300-page PDF, +0.5 MiB for a video.
 - At most `media_concurrency` (1) audio/video files are converted at once per
   event loop, and at most `mistral_ocr_concurrency` (2) PDFs, whatever
   `parallel_docs` is.
@@ -411,6 +505,11 @@ like a 30-minute one, and a 363 MB video like a 7.8 MB one. See
   other image.
 - No embeddings and no retrieval by image similarity: images are searchable
   through their text.
+- A stored PDF image is the crop Mistral OCR returns, not the object embedded
+  in the PDF. A stored video frame is at `image_max_side_px`, not at the
+  video's resolution.
+- Stored frames take space: about `video_frames_per_minute × minutes` JPEGs
+  per video. Set `store_video_frames=False` to keep only the embedded images.
 - Documents ingested before 0.5.0 are not migrated (see the next section).
 
 ## Upgrading: names keep the extension

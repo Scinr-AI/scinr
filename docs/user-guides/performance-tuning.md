@@ -470,6 +470,7 @@ See [Multimodal Ingestion](multimodal-ingestion.md). The peak depends on the siz
 | `media_segment_seconds` | `300` | Page size of audio / video. Cloud transcription APIs cap the request size (~25 MB); a 5-minute mono 16 kHz FLAC stays well below it. |
 | `media_min_segment_seconds` | `10` | Minimum length of the last segment, so a medium never ends in a segment of a few milliseconds, which some providers reject. 300.05 s in 300 s segments gives 290 s + 10.05 s. |
 | `video_frames_per_minute` | `2.0` | Vision calls per minute of video; `0` for transcription only. |
+| `store_video_frames` | `True` | Each described frame is also stored: about `video_frames_per_minute × duration` JPEGs at `image_max_side_px` per video (~600 for 5 h at 2 per minute). Set it to `False` to keep only the embedded images of documents (`store_described_images`). Storing does not change the memory peak (frames are uploaded from disk as a stream). |
 
 Measured with `scripts/memory_bench/bench_media.py` (tracemalloc, library only, simulated providers):
 
@@ -481,6 +482,7 @@ Measured with `scripts/memory_bench/bench_media.py` (tracemalloc, library only, 
 | Audio of 30 min / 2 h | 1.5 / 1.5 MiB |
 | Video of 7.8 MB / 363 MB | 5.2 / 5.7 MiB |
 | 8 audios with `parallel_docs=4` | 1.4 MiB, one conversion in flight |
+| Storing the described images / frames (DOCX 100 images, PDF 300 pages, video) | +0.2 / +0.2 / +0.5 MiB |
 
 Run inference out of the workers for bulk ingestion: a shared GPU server (Ollama, vLLM, a self-hosted Whisper server) or a cloud API. A local vision model needs gigabytes of RAM and is slow on CPU.
 

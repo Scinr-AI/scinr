@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from scinr.newton.exceptions import ScinrError
 from scinr.newton.models.file_metadata import FileMetadata
+from scinr.newton.models.transcript import TranscriptCue
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,11 @@ class PageImage(BaseModel):
         Textual description. Left empty by converters; filled by the
         embedded-image enrichment of Stage 0 (``describe_embedded_images``,
         only with a ``vision_llm`` configured).
+    image_id:
+        Id of the stored :class:`~storage.models.PageImageRecord`, when the
+        described image was stored (``store_described_images`` with a
+        persistent storage backend whose ``stores_images`` is ``True``).
+        Serialised in the intermediate JSON, like ``page_id``.
     ref:
         Text that references the image in the page markdown as
         ``![ref](ref)``. When present, the enrichment replaces that reference
@@ -88,6 +94,7 @@ class PageImage(BaseModel):
     base64: str = ""
     media_type: str = "image/png"
     description: str = ""
+    image_id: str | None = None
     ref: str | None = None
     width: int | None = None
     height: int | None = None
@@ -137,6 +144,11 @@ class IntermediatePage(BaseModel):
     # video segments). None for documents without a time axis.
     start_ms: int | None = None
     end_ms: int | None = None
+    # Transcribed sentences of the page with their absolute times (audio /
+    # video; decision D7). The markdown is the cues' text, one per line; it
+    # does not change. None for documents without a time axis. Serialised in
+    # the intermediate JSON, like ``page_id``.
+    transcript: list[TranscriptCue] | None = None
 
 
 class IntermediateDocument(BaseModel):

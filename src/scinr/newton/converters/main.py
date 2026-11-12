@@ -33,7 +33,7 @@ import json
 import logging
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from scinr.newton.storage.base import PageRepository, RawFileRepository
@@ -47,6 +47,7 @@ from scinr.newton.converters.base import (
     IntermediatePage,
     UnsupportedFormatError,
 )
+from scinr.newton.converters.image_store import ImageSink, discard_stored, image_sink
 from scinr.newton.converters.registry import get_converter
 from scinr.newton.utils.naming import source_document_name
 from scinr.newton.utils.redaction import redact_uri
@@ -148,16 +149,18 @@ async def _store_page(
 ) -> str:
     """Store one converted page and return its ``page_id``.
 
-    ``start_ms`` / ``end_ms`` are passed only when the page has them (audio
-    and video), so a custom :class:`~storage.base.PageRepository` written
-    against the pre-0.5.0 signature keeps receiving valid calls for every
-    other format.
+    ``start_ms`` / ``end_ms`` / ``transcript`` are passed only when the page
+    has them (audio and video), so a custom
+    :class:`~storage.base.PageRepository` written against the pre-0.5.0
+    signature keeps receiving valid calls for every other format.
     """
-    time_range: dict[str, int] = {}
+    time_range: dict[str, Any] = {}
     if page.start_ms is not None:
         time_range["start_ms"] = page.start_ms
     if page.end_ms is not None:
         time_range["end_ms"] = page.end_ms
+    if page.transcript is not None:
+        time_range["transcript"] = [cue.model_dump() for cue in page.transcript]
     return await page_repo.store_page(
         raw_file_id=raw_file_id,
         filename=filename,
@@ -396,6 +399,7 @@ async def convert_one(
         )
         return [], []
 
+    sink: ImageSink | None = None
     try:
         # 1. Store original file in MongoDB (if repo provided); the repo reads
         #    it itself (streaming where supported), never materialised here.
@@ -411,30 +415,58 @@ async def convert_one(
                 job_id=job_id,
             )
 
-        # 2. Convert to IntermediateDocument (existing behaviour)
-        doc = await _run_convert(converter, entry)
-        # Inject metadata
-        doc.folder_path = folder_path_str
-        doc.raw_file_id = raw_file_id  # None when no repo
-        doc.context_instructions = context_instructions
-        doc.document_name = source_document_name(entry)  # source file name, with extension
-        doc.tenant_id = tenant_id
-        doc.created_by_user_id = created_by_user_id
-        doc.job_id = job_id
+        # 2. Convert to IntermediateDocument (existing behaviour), with the
+        #    image-storage context installed: each described image is stored
+        #    right after its description (see converters/image_store.py).
+        with image_sink(
+            raw_file_repo,
+            raw_file_id or "",
+            filename=source_document_name(entry),
+            folder_path=folder_path_str,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            job_id=job_id,
+        ) as sink:
+            try:
+                doc = await _run_convert(converter, entry)
+            except ConversionError as exc:
+                logger.error("Conversion error for %s: %s", entry.name, exc)
+                if sink is not None and sink.stored:
+                    await discard_stored(sink)
+                return [], [(entry, str(exc))]
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Unexpected error converting %s: %s", entry.name, exc)
+                if sink is not None and sink.stored:
+                    await discard_stored(sink)
+                return [], [(entry, str(exc))]
+            # Inject metadata
+            doc.folder_path = folder_path_str
+            doc.raw_file_id = raw_file_id  # None when no repo
+            doc.context_instructions = context_instructions
+            doc.document_name = source_document_name(entry)  # source file name, with extension
+            doc.tenant_id = tenant_id
+            doc.created_by_user_id = created_by_user_id
+            doc.job_id = job_id
 
-        # 3. Store converted pages in MongoDB (if repos provided)
-        if page_repo is not None and raw_file_id is not None:
-            for page in doc.pages:
-                page.page_id = await _store_page(
-                    page_repo,
-                    page,
-                    raw_file_id=raw_file_id,
-                    filename=source_document_name(entry),
-                    folder_path=folder_path_str,
-                    tenant_id=tenant_id,
-                    created_by_user_id=created_by_user_id,
-                    job_id=job_id,
-                )
+            # 3. Store converted pages in MongoDB (if repos provided)
+            try:
+                if page_repo is not None and raw_file_id is not None:
+                    for page in doc.pages:
+                        page.page_id = await _store_page(
+                            page_repo,
+                            page,
+                            raw_file_id=raw_file_id,
+                            filename=source_document_name(entry),
+                            folder_path=folder_path_str,
+                            tenant_id=tenant_id,
+                            created_by_user_id=created_by_user_id,
+                            job_id=job_id,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Error storing the pages of %s: %s", entry.name, exc)
+                if sink is not None and sink.stored:
+                    await discard_stored(sink)
+                return [], [(entry, str(exc))]
 
         # 4. Write JSON to output (now includes page_ids and raw_file_id),
         #    unless the caller asked for an in-memory-only result.
@@ -723,28 +755,49 @@ async def convert_single_file(
         job_id=job_id,
     )
 
-    # 2. Convert to IntermediateDocument
-    doc = await _run_convert(converter, path)
-    doc.raw_file_id = raw_file_id
-    doc.context_instructions = context_instructions
-    doc.document_name = source_document_name(path)
-    doc.tenant_id = tenant_id
-    doc.created_by_user_id = created_by_user_id
-    doc.job_id = job_id
+    # 2. Convert to IntermediateDocument, with the image-storage context
+    #    installed: each described image is stored right after its
+    #    description (see converters/image_store.py).
+    with image_sink(
+        raw_file_repo,
+        raw_file_id,
+        filename=source_document_name(path),
+        folder_path=None,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
+    ) as sink:
+        try:
+            doc = await _run_convert(converter, path)
+        except Exception:
+            if sink is not None and sink.stored:
+                await discard_stored(sink)
+            raise
+        doc.raw_file_id = raw_file_id
+        doc.context_instructions = context_instructions
+        doc.document_name = source_document_name(path)
+        doc.tenant_id = tenant_id
+        doc.created_by_user_id = created_by_user_id
+        doc.job_id = job_id
 
-    # 3. Store converted pages
-    if page_repo is not None:
-        for page in doc.pages:
-            page.page_id = await _store_page(
-                page_repo,
-                page,
-                raw_file_id=raw_file_id,
-                filename=source_document_name(path),
-                folder_path=None,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
+        # 3. Store converted pages
+        try:
+            if page_repo is not None:
+                for page in doc.pages:
+                    page.page_id = await _store_page(
+                        page_repo,
+                        page,
+                        raw_file_id=raw_file_id,
+                        filename=source_document_name(path),
+                        folder_path=None,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
+                    )
+        except Exception:
+            if sink is not None and sink.stored:
+                await discard_stored(sink)
+            raise
 
     # 4. Write JSON (now includes raw_file_id and page_ids)
     output_path.write_text(doc.to_json(), encoding="utf-8")
