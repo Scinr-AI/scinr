@@ -84,6 +84,7 @@ nav:
       - Document Deletion: user-guides/document-deletion.md
       - Document Freezing: user-guides/document-freezing.md
       - Storage Backends: user-guides/storage-backends.md
+      - Multimodal Ingestion: user-guides/multimodal-ingestion.md
       - Performance Tuning: user-guides/performance-tuning.md
   - API Reference:
       - Overview: api/index.md
@@ -93,6 +94,7 @@ nav:
       - Stages: api/stages.md
       - Normalization: api/normalization.md
       - Converters: api/converters.md
+      - Media (Transcriber / ffmpeg): api/media.md
       - Storage: api/storage.md
       - Navigation: api/navigation.md
       - Utilities: api/utilities.md

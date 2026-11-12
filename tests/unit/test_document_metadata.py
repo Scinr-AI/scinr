@@ -195,3 +195,81 @@ def test_metadata_defaults_to_none_on_document():
     assert doc.tenant_id is None
     assert doc.created_by_user_id is None
     assert doc.job_id is None
+
+
+# ---------------------------------------------------------------------------
+# file_* properties (0.5.0, FileMetadata)
+# ---------------------------------------------------------------------------
+
+
+class TestFileMetadataProperties:
+    def test_every_key_is_in_the_set_and_bound(self):
+        from scinr.newton.models.file_metadata import FILE_METADATA_KEYS, FileMetadata
+
+        tx = _FakeTx()
+        nodes.insert_document(
+            tx, "clip.mp4", "clip.mp4", 1, tenant_id="acme",
+            file_metadata=FileMetadata(duration_ms=60_000, video_codec="h264"),
+        )
+        query, params = tx.calls[0]
+        for key in FILE_METADATA_KEYS:
+            assert f"d.file_{key} = $file_{key}" in query
+            assert f"file_{key}" in params
+        assert params["file_duration_ms"] == 60_000
+        assert params["file_video_codec"] == "h264"
+        assert params["file_width"] is None  # null erases a stale value
+
+    def test_without_metadata_every_key_is_null(self):
+        from scinr.newton.models.file_metadata import FILE_METADATA_KEYS
+
+        tx = _FakeTx()
+        nodes.insert_document(tx, "a.pdf", "a.pdf", 1, tenant_id="acme")
+        _, params = tx.calls[0]
+        assert all(params[f"file_{key}"] is None for key in FILE_METADATA_KEYS)
+
+    def test_graph_forwards_the_document_metadata(self):
+        from scinr.newton.models.file_metadata import FileMetadata
+
+        tx = _FakeTx()
+        doc = _doc(file_metadata=FileMetadata(width=10, height=20))
+        nodes.insert_document_graph(tx, doc, resolved_version=1)
+        leaf = tx.params_for("MERGE (d:Document")
+        assert (leaf["file_width"], leaf["file_height"]) == (10, 20)
+        folder_query = next(q for q, _ in tx.calls if "MERGE (f:Document" in q)
+        assert "file_" not in folder_query  # folders carry no file metadata
+
+    def test_old_extract_json_without_the_field_validates(self):
+        old = _doc().model_dump(mode="json")
+        old.pop("file_metadata")
+        assert Document.model_validate(old).file_metadata is None
+
+
+async def test_file_metadata_travels_from_intermediate_json_to_document(tmp_path, monkeypatch):
+    """End to end on disk: intermediate JSON → extract_one_file → Document → SET."""
+    from types import SimpleNamespace
+
+    from scinr.newton.converters.base import IntermediateDocument, IntermediatePage
+    from scinr.newton.models.file_metadata import FileMetadata
+    from scinr.newton.stages import extraction
+
+    async def _no_llm(document, *args, **kwargs):
+        return document
+
+    monkeypatch.setattr(extraction, "_run_chunk_extraction", _no_llm)
+    monkeypatch.setattr(extraction, "get_llm", lambda: None)
+    monkeypatch.setattr(extraction, "get_config", lambda: SimpleNamespace(extraction_batch_size=1))
+    intermediate = IntermediateDocument(
+        pages=[IntermediatePage(index=0, markdown="x", start_ms=0, end_ms=1000)],
+        document_name="clip.mp3",
+        file_metadata=FileMetadata(duration_ms=1000, audio_codec="mp3"),
+    )
+    path = tmp_path / "clip.mp3.json"
+    path.write_text(intermediate.to_json(), encoding="utf-8")
+
+    from_disk = await extraction.extract_one_file(path, None, str(tmp_path))
+    in_memory = await extraction.extract_one_intermediate(intermediate, None)
+
+    assert from_disk.file_metadata == in_memory.file_metadata == intermediate.file_metadata
+    tx = _FakeTx()
+    nodes.insert_document_graph(tx, from_disk, resolved_version=1)
+    assert tx.params_for("MERGE (d:Document")["file_audio_codec"] == "mp3"

@@ -108,8 +108,8 @@ async def test_success_emits_the_per_file_sequence(tmp_path, env):
     ]
     started = emitter.events[0]
     assert started.planned_stages == ("tabular",)
-    assert started.doc_path == "sub/data"
-    assert started.document_name == "data"
+    assert started.doc_path == "sub/data.csv"
+    assert started.document_name == "data.csv"
     assert started.source_path == str(f)
     assert started.tenant_id == "acme"
     completed = emitter.events[2]
@@ -245,4 +245,4 @@ async def test_default_discovery_numbers_files_in_sorted_order(tmp_path, env):
     await tabular_stage.run_tabular_pipeline(str(tmp_path), emitter=emitter)
 
     started = [e for e in emitter.events if e.kind == "document_started"]
-    assert sorted((e.document_index, e.document_name) for e in started) == [(0, "a"), (1, "b")]
+    assert sorted((e.document_index, e.document_name) for e in started) == [(0, "a.csv"), (1, "b.csv")]

@@ -130,7 +130,9 @@ async def run_pipeline(
 
 **Type:** `str | None`  **Default:** `None`
 
-Path to a folder containing raw source files (PDF, DOCX, XLSX, XLS, CSV). This activates Stage 0 (`"preprocess"`), which converts all supported files into an intermediate representation. (Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist but are not yet officially supported.)
+Path to a folder containing raw source files (PDF, DOCX, XLSX, XLS, CSV, images, audio, video). This activates Stage 0 (`"preprocess"`), which converts all supported files into an intermediate representation. (Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist but are not yet officially supported.)
+
+Each document's name and `doc_path` keep the source file extension (`ModuloA/informe.pdf`), so files that only differ by extension are different documents; the intermediate JSON is written as `informe.pdf.json`. Image, audio and video files are always converted: without their requirement (`vision_llm`, `transcriber`, `ffmpeg`) they become failed documents, which count for `on_partial_failure`. See [Multimodal Ingestion](multimodal-ingestion.md).
 
 ```python
 result = await run_pipeline(input_raw="./raw_docs")
@@ -281,13 +283,13 @@ These parameters select which documents to process when running annotation (`"an
 
 #### `document_names`
 
-An explicit list of Neo4j `document_name` values. The pipeline looks up each document in Neo4j and processes only those documents.
+An explicit list of Neo4j `document_name` values. The pipeline looks up each document in Neo4j and processes only those documents. Documents ingested since 0.5.0 are named with their extension (`report.pdf`); older ones keep their extension-less name.
 
 ```python
 # Run annotation on specific documents
 result = await run_pipeline(
     stages=["annotation", "entity_extraction"],
-    document_names=["Clinical_Trial_Report_2024", "Safety_Summary_Q3"],
+    document_names=["Clinical_Trial_Report_2024.pdf", "Safety_Summary_Q3.docx"],
 )
 ```
 
@@ -434,13 +436,13 @@ result = await run_pipeline(
 
 **Type:** `str | None`  **Default:** `None`
 
-The `document_name` of an existing document that is superseded by the newly ingested document. After ingestion completes, the pipeline creates a replacement relationship in Neo4j linking the new document as the successor of the old one.
+The `document_name` of an existing document that is superseded by the newly ingested document (with its extension for documents ingested since 0.5.0, e.g. `report_v1.pdf`). After ingestion completes, the pipeline creates a replacement relationship in Neo4j linking the new document as the successor of the old one.
 
 ```python
 # Ingest a new version that replaces an old document
 result = await run_pipeline(
     input_raw="./new_version/",
-    replaces="Clinical_Trial_Report_2024_v1",
+    replaces="Clinical_Trial_Report_2024_v1.pdf",
 )
 ```
 
@@ -666,7 +668,7 @@ async def main():
     # Re-annotate and re-extract entities for specific documents
     result = await run_pipeline(
         stages=["annotation", "entity_extraction"],
-        document_names=["Clinical_Trial_Report_2024"],
+        document_names=["Clinical_Trial_Report_2024.pdf"],
         only_unannotated=True,
         only_unextracted=True,
     )
@@ -731,7 +733,7 @@ async def main():
     # Ingest the new version, linking it as the replacement
     result = await run_pipeline(
         input_raw="./corrected/",
-        replaces="Clinical_Trial_Report_2024_v1",
+        replaces="Clinical_Trial_Report_2024_v1.pdf",
     )
 
     print(f"Replacement ingested: {result.success}")
@@ -871,6 +873,24 @@ asyncio.run(main())
 ```
 
 `my_db` stands for your application's own job store; see [Progress Tracking](progress-tracking.md#writing-your-own-callback) for complete MongoDB examples. The three values land on the leaf `:Document` nodes, their ancestor folder-parent nodes, and any tabular documents. They are also written into the `extract-*.json` files if the extraction stage persists them, so a later ingestion-only run can pick them up (or override them — see [the parameter reference](#tenant_id-created_by_user_id-job_id-provenance-metadata)). See [Document Deletion](document-deletion.md) for querying and deleting by these fields.
+
+---
+
+## Knowing what a run will create
+
+`discover_documents()` walks `input_raw` exactly as `run_pipeline()` does, without converting or reading anything, and tells you what each file will become. Pass the same `tabular_extensions` you pass to `run_pipeline()` (`None` applies the same default):
+
+```python
+from scinr.newton import discover_documents
+
+found = discover_documents("./raw_docs")
+found.tabular    # doc_path of each tabular file, e.g. ["ventas.csv"]
+found.documents  # doc_path of each convertible file, e.g. ["ModuloA/informe.pdf"]
+found.skipped    # SkippedFile(path, reason) for files the pipeline cannot interpret
+found.count      # leaf :Document nodes the run can create, at most
+```
+
+`count` is an upper bound: an unreadable or empty tabular file, or a file that fails before ingestion, creates no `:Document`. With `update_mode=False`, a file whose `doc_path` already exists creates a new version. Use it to decide before ingesting whether a batch fits (for example, a document quota), and adjust afterwards with what was really created.
 
 ---
 

@@ -81,6 +81,8 @@ from scinr.newton.navigation.models import (
     NodePath,
     NodeSelector,
     OriginalFile,
+    PageImageFile,
+    PageImageRef,
     PageText,
     PathResult,
     ProposedFieldRef,
@@ -130,4 +132,5 @@ __all__ = [
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
     "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",
+    "PageImageRef", "PageImageFile",
 ]

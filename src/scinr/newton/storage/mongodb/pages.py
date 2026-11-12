@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from bson.errors import InvalidId
 from bson.objectid import ObjectId
 
+from scinr.newton.models.transcript import TranscriptCue
 from scinr.newton.storage.base import PageRepository
 from scinr.newton.storage.filters import mongo_scope_filter
 from scinr.newton.storage.models import ConvertedPageRecord
@@ -41,6 +42,12 @@ def _to_record(doc: dict) -> ConvertedPageRecord:
         tenant_id=doc.get("tenant_id"),
         created_by_user_id=doc.get("created_by_user_id"),
         job_id=doc.get("job_id"),
+        # Records written before 0.5.0 have neither field.
+        start_ms=doc.get("start_ms"),
+        end_ms=doc.get("end_ms"),
+        transcript=[TranscriptCue(**cue) for cue in doc["transcript"]]
+        if doc.get("transcript")
+        else None,
     )
 
 
@@ -63,6 +70,9 @@ class MongoDBPageRepository(PageRepository):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        transcript: list[dict] | None = None,
     ) -> str:
         """Persist a single converted page in MongoDB.
 
@@ -71,7 +81,7 @@ class MongoDBPageRepository(PageRepository):
         raw_file_id:
             ID of the parent :class:`~storage.models.RawFileRecord`.
         filename:
-            Stem of the source file without extension, e.g. ``"3.2.P.1"``.
+            Name of the source file with its extension, e.g. ``"3.2.P.1.pdf"``.
         folder_path:
             Relative path of the containing folder, or ``None``.
         page_index:
@@ -83,6 +93,13 @@ class MongoDBPageRepository(PageRepository):
             :func:`~scinr.newton.utils.tenancy.tenant_key`.
         created_by_user_id, job_id:
             Provenance of the upload, stored verbatim.
+        start_ms, end_ms:
+            Time range ``[start_ms, end_ms)`` of the page in the source medium
+            (audio / video segments), or ``None``.
+        transcript:
+            Transcribed sentences of the page with their absolute times
+            (audio / video), as a list of ``{start_ms, end_ms, text}`` dicts,
+            or ``None``.
 
         Returns
         -------
@@ -102,6 +119,9 @@ class MongoDBPageRepository(PageRepository):
             "tenant_id": tenant_key(tenant_id),
             "created_by_user_id": created_by_user_id,
             "job_id": job_id,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "transcript": transcript,
         }
         result = await db[cfg.mongodb_pages_collection].insert_one(doc)
         page_id = str(result.inserted_id)

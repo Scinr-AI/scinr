@@ -12,6 +12,13 @@ The DOCX document is split into pages using a two-layer strategy
    elements (paragraphs + tables counted together).
 
 No content is ever discarded.
+
+Inline images of body paragraphs become lazy ``PageImage`` objects
+(``ref="docx-img-N"``, referenced in the paragraph text as
+``![docx-img-N](docx-img-N)``) only when embedded images are described
+(``describe_embedded_images`` with a ``vision_llm``); otherwise no image blob
+is read. Limitation: images in headers, footers, floating shapes and table
+cells are not treated.
 """
 
 from __future__ import annotations
@@ -19,7 +26,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from scinr.newton.converters.base import BaseConverter, ConversionError, IntermediateDocument
+from scinr.newton.converters.base import (
+    BaseConverter,
+    ConversionError,
+    IntermediateDocument,
+    PageImage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +104,10 @@ class DocxConverter(BaseConverter):
             # ------------------------------------------------------------------
             # Collect all elements in document order
             # ------------------------------------------------------------------
+            from scinr.newton.config import embedded_images_enabled
+
+            with_images = embedded_images_enabled()
+            image_counter = 0
             elements: list[dict] = []
             body = doc.element.body
             for child in body:
@@ -100,11 +116,25 @@ class DocxConverter(BaseConverter):
                     heading_level = _heading_level(para)
                     text = _para_to_markdown(para, heading_level)
                     has_pb = _has_page_break(para)
+                    images: list[PageImage] = []
+                    # A paragraph that only holds pictures does not count for
+                    # pagination, so the pages are the same with or without
+                    # image description.
+                    image_only = False
+                    if with_images:
+                        images = _inline_images(child, doc, start=image_counter)
+                        image_counter += len(images)
+                        refs = " ".join(f"![{i.ref}]({i.ref})" for i in images)
+                        if refs:
+                            image_only = not text
+                            text = f"{text}\n\n{refs}" if text else refs
                     elements.append(
                         {
                             "type": "paragraph",
                             "text": text,
                             "has_page_break": has_pb,
+                            "images": images,
+                            "image_only": image_only,
                         }
                     )
                 elif child.tag == qn("w:tbl"):
@@ -152,16 +182,25 @@ class DocxConverter(BaseConverter):
             # ------------------------------------------------------------------
             pages = []
             current_parts: list[str] = []
+            counted_parts = 0  # parts that count for pagination (not image-only)
+            current_images: list[PageImage] = []
             page_idx = 0
             element_count = 0
 
             def flush_page() -> None:
-                nonlocal page_idx
+                nonlocal page_idx, counted_parts
                 if not current_parts:
                     return
                 md = "\n\n".join(p for p in current_parts if p)
-                pages.append(self._make_page(index=page_idx, markdown=md))
+                # Image indexes restart at 0 on every page.
+                for position, image in enumerate(current_images):
+                    image.index = position
+                pages.append(
+                    self._make_page(index=page_idx, markdown=md, images=list(current_images))
+                )
                 current_parts.clear()
+                current_images.clear()
+                counted_parts = 0
                 page_idx += 1
 
             for elem in elements:
@@ -173,7 +212,10 @@ class DocxConverter(BaseConverter):
                         text = elem["text"]
                         if text:
                             current_parts.append(text)
-                        if len(current_parts) >= _PARAGRAPHS_PER_PAGE:
+                            current_images.extend(elem.get("images", ()))
+                            if not elem.get("image_only"):
+                                counted_parts += 1
+                        if counted_parts >= _PARAGRAPHS_PER_PAGE:
                             flush_page()
                     continue
 
@@ -181,7 +223,9 @@ class DocxConverter(BaseConverter):
                 text = elem["text"]
                 if text:
                     current_parts.append(text)
-                    element_count += 1
+                    current_images.extend(elem.get("images", ()))
+                    if not elem.get("image_only"):
+                        element_count += 1
 
                 if (
                     strategy == "paragraph_count"
@@ -209,6 +253,34 @@ class DocxConverter(BaseConverter):
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _inline_images(paragraph_element, doc, *, start: int) -> list[PageImage]:  # type: ignore[no-untyped-def]
+    """Lazy images of the inline pictures of one body paragraph.
+
+    Follows every ``a:blip/@r:embed`` of the paragraph to its image part.
+    The loader returns the part's blob, already in memory with the opened
+    document: no copy and no base64 until the image is described.
+    """
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+
+    images: list[PageImage] = []
+    related = doc.part.related_parts
+    for blip in paragraph_element.iter(qn("a:blip")):
+        rid = blip.get(qn("r:embed"))
+        part = related.get(rid) if rid else None
+        if part is None or not hasattr(part, "blob"):
+            continue
+        ref = f"docx-img-{start + len(images)}"
+        images.append(
+            PageImage.with_loader(
+                lambda part=part: part.blob,
+                index=len(images),
+                ref=ref,
+                media_type=getattr(part, "content_type", None) or "image/png",
+            )
+        )
+    return images
 
 
 def _has_page_break(paragraph) -> bool:  # type: ignore[no-untyped-def]

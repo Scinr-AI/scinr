@@ -144,6 +144,18 @@ Left unset (`None`) it means **"do not filter on this property"** — it does *n
 
 These values are populated by `run_pipeline(tenant_id=..., created_by_user_id=..., job_id=...)` at ingestion time. `DeletionResult` echoes back whichever selector and filters were used (`result.path`, `result.job_id`, `result.tenant_id`, `result.created_by_user_id`, exactly as passed — a string or a list); `result.path` is `None` for a `job_id`-selected deletion, and `result.tenant_id` echoes the value you passed (`None` for a deletion of public documents).
 
+## Which documents were deleted
+
+`result.documents` lists every `:Document` the call deleted — the matched ones and all their `IS_COMPOSED_OF*` descendants, descendants first — as `DeletedDocument(path, version, is_folder)`. Deleting a folder therefore lists the folder, its subfolders and its leaves. Use it to adjust anything you count per document outside the graph, instead of repeating the selection yourself:
+
+```python
+result = await delete_document("ModuloA", tenant_id="acme")
+leaves = [(d.path, d.version) for d in result.documents if not d.is_folder]
+my_usage_store.release(leaves)
+```
+
+The list is empty when `found` is `False`. A call that completes an interrupted deletion lists only what was still there.
+
 ---
 
 ## Understanding the Cascade
@@ -294,6 +306,9 @@ It returns an `OrphanCollectionResult` with `tenant_id` and the four `gc_*` coun
 | `gc_entity_model_instance_passes` | `int` | GC rounds run over `:Entity`/`:ModelInstance` candidates: `0` when there was none, one more each time a deleted node turned what it pointed at into candidates. |
 | `gc_labeled_entity_deleted` | `int` | `:LabeledEntity` nodes this deletion left orphaned, and deleted. |
 | `gc_labeled_entity_passes` | `int` | GC rounds run over `:LabeledEntity` candidates. |
+| `raw_files_deleted` | `int` | Original uploads deleted from the storage backend, for the `raw_file_id`s of the deleted documents. |
+| `converted_pages_deleted` | `int` | Converted pages deleted from the storage backend for the same `raw_file_id`s. |
+| `page_images_deleted` | `int` | Stored images and video frames deleted from the storage backend for the same `raw_file_id`s (deleted before the pages). Always `0` with a backend that stores no images. |
 
 When the call finished an interrupted delete or freeze, the `gc_*` counters are those of a sweep of the whole tenant (see [What it does not collect](#what-it-does-not-collect)).
 

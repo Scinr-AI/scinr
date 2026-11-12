@@ -756,7 +756,8 @@ class TestArtifactsReleasedPerStage:
         )
 
         class _Intermediate:
-            pass
+            def omissions(self):  # IntermediateDocument API read by the preprocess result
+                return {}
 
         class _Extracted:
             document_name = "doc1"

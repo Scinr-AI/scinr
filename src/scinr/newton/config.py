@@ -130,6 +130,9 @@ class ScinrConfig:
     mongodb_frozen_collection: str = "frozen_documents"
     mongodb_frozen_gridfs_bucket: str = "frozen_snapshots"
     custom_freeze_storage: Any = None  # FreezeRepository
+    # Page images (described embedded images and video frames)
+    mongodb_images_collection: str = "page_images"
+    mongodb_images_gridfs_bucket: str = "page_image_binaries"
     # Converters
     extra_converters: dict[str, type] = field(default_factory=dict)
     # PDF
@@ -141,6 +144,27 @@ class ScinrConfig:
     mistral_ocr_chunk_concurrency: int = 1  # reservado para paralelismo futuro, no usado aún
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] = "fail_fast"
     mistral_ocr_concurrency: int = 2  # PDFs en conversión OCR a la vez, por event loop
+    mistral_ocr_image_max_pages: int = 50  # páginas por chunk cuando se piden imágenes
+    # Multimodal (images, audio, video)
+    vision_llm: Any = None  # BaseChatModel multimodal — NO recurre a llm
+    transcriber: Any = None  # scinr.newton.media.Transcriber
+    describe_embedded_images: bool = True  # solo actúa con vision_llm
+    store_described_images: bool = True  # guarda el original descrito; solo con stores_images=True
+    store_video_frames: bool = True  # guarda cada fotograma descrito, con su instante
+    media_error_strategy: Literal["fail_fast", "best_effort"] = "best_effort"
+    strip_location: bool = True
+    image_max_side_px: int = 1568
+    image_min_side_px: int = 64
+    max_images_per_page: int = 10
+    image_decode_concurrency: int = 1  # imágenes leídas y decodificadas a la vez, por event loop
+    media_segment_seconds: int = 300
+    media_min_segment_seconds: int = 10  # duración mínima del último tramo
+    media_language: str | None = None
+    max_media_duration_seconds: int | None = 14400
+    video_frames_per_minute: float = 2.0
+    media_concurrency: int = 1  # audios y vídeos en conversión a la vez, por event loop
+    ffmpeg_path: str | None = None
+    ffprobe_path: str | None = None
     # Pipeline behaviour
     prompt_caching_enabled: bool = True
     full_docstring: bool = True
@@ -175,6 +199,16 @@ class ScinrConfig:
                 value = redact_uri(value)
             parts.append(f"{f.name}={value!r}")
         return f"{type(self).__name__}({', '.join(parts)})"
+
+
+class _Unset:
+    """Sentinel type: distinguishes "argument not passed" from an explicit ``None``."""
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET = _Unset()
 
 
 _SECRET_FIELDS = frozenset({"neo4j_password", "mistral_api_key"})
@@ -241,6 +275,9 @@ def configure(
     mongodb_frozen_collection: str | None = None,
     mongodb_frozen_gridfs_bucket: str | None = None,
     custom_freeze_storage: Any | None = None,
+    # Page images (described embedded images and video frames)
+    mongodb_images_collection: str | None = None,
+    mongodb_images_gridfs_bucket: str | None = None,
     # Converters
     extra_converters: dict[str, type] | None = None,
     # PDF
@@ -252,6 +289,27 @@ def configure(
     mistral_ocr_chunk_concurrency: int | None = None,
     mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
     mistral_ocr_concurrency: int | None = None,
+    mistral_ocr_image_max_pages: int | None = None,
+    # Multimodal (images, audio, video)
+    vision_llm: Any | None = None,
+    transcriber: Any | None = None,
+    describe_embedded_images: bool | None = None,
+    store_described_images: bool | None = None,
+    store_video_frames: bool | None = None,
+    media_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
+    strip_location: bool | None = None,
+    image_max_side_px: int | None = None,
+    image_min_side_px: int | None = None,
+    max_images_per_page: int | None = None,
+    image_decode_concurrency: int | None = None,
+    media_segment_seconds: int | None = None,
+    media_min_segment_seconds: int | None = None,
+    media_language: str | None = None,
+    max_media_duration_seconds: int | None | _Unset = _UNSET,
+    video_frames_per_minute: float | None = None,
+    media_concurrency: int | None = None,
+    ffmpeg_path: str | None = None,
+    ffprobe_path: str | None = None,
     # Pipeline behaviour
     prompt_caching_enabled: bool | None = None,
     full_docstring: bool | None = None,
@@ -314,6 +372,12 @@ def configure(
         mongodb_frozen_gridfs_bucket: GridFS bucket for snapshot files.
             Env: `MONGODB_FROZEN_GRIDFS_BUCKET`. Default: `'frozen_snapshots'`.
         custom_freeze_storage: A `FreezeRepository` instance when `freeze_backend='custom'`.
+        mongodb_images_collection: Collection for the metadata of the described
+            page images and video frames. Env: `MONGODB_IMAGES_COLLECTION`.
+            Default: `'page_images'`.
+        mongodb_images_gridfs_bucket: GridFS bucket for the original bytes of the
+            described page images and video frames. Env:
+            `MONGODB_IMAGES_GRIDFS_BUCKET`. Default: `'page_image_binaries'`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
         mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
@@ -346,6 +410,77 @@ def configure(
             event loop. Acota la memoria del OCR con independencia de
             `parallel_docs`: cada conversión mantiene como mucho un chunk y su
             respuesta. Env: `MISTRAL_OCR_CONCURRENCY`. Default: `2`.
+        mistral_ocr_image_max_pages: Páginas por chunk de PDF cuando se piden las
+            imágenes embebidas a Mistral OCR (solo con `describe_embedded_images` y un
+            `vision_llm`): la respuesta con imágenes pesa mucho más que la de solo
+            texto. Se aplica el menor entre este valor y `mistral_ocr_safe_max_pages`.
+            Env: `MISTRAL_OCR_IMAGE_MAX_PAGES`. Default: `50`.
+        vision_llm: LangChain `BaseChatModel` multimodal (acepta imágenes) para
+            describir imágenes embebidas, imágenes sueltas y fotogramas de vídeo. No
+            necesita `with_structured_output`. **No recurre a `llm`**: sin él no se
+            describe ninguna imagen embebida, y los ficheros de imagen fallan con un
+            error que explica cómo configurarlo. Default: `None`.
+        transcriber: Instancia de `scinr.newton.media.Transcriber` para audio y vídeo
+            (por ejemplo `OpenAICompatibleTranscriber` o `FasterWhisperTranscriber`).
+            Sin él, los ficheros de audio (y los vídeos con pista de audio) fallan con
+            un error que explica cómo configurarlo. Default: `None`.
+        describe_embedded_images: Describir las imágenes embebidas de PDF, DOCX y PPTX
+            e insertar la descripción en el markdown de su página. **Solo actúa si hay
+            un `vision_llm`**; sin él no se piden imágenes a Mistral ni se extraen
+            blobs. Env: `DESCRIBE_EMBEDDED_IMAGES`. Default: `True`.
+        store_described_images: Guarda el original de cada imagen incrustada que se
+            describe. Solo actúa con un backend de storage persistente cuyo
+            `stores_images` sea `True`. Env: `STORE_DESCRIBED_IMAGES`. Default: `True`.
+        store_video_frames: Guarda cada fotograma descrito, con su instante. En vídeos
+            largos ocupa unos `video_frames_per_minute × minutos` JPEG.
+            Env: `STORE_VIDEO_FRAMES`. Default: `True`.
+        media_error_strategy: Qué hacer cuando falla una imagen embebida, un tramo de
+            audio o vídeo o un fotograma: `'best_effort'` (default: se omite, se
+            registra en `missing_images` / `missing_segments` del documento y se
+            sigue) o `'fail_fast'` (falla el documento). Env: `MEDIA_ERROR_STRATEGY`.
+        strip_location: Con `True` (default) la ubicación GPS de las imágenes no se lee
+            ni se guarda. Env: `STRIP_LOCATION`.
+        image_max_side_px: Lado mayor, en píxeles, de las imágenes enviadas al
+            `vision_llm` (se reducen antes de enviarlas). Env: `IMAGE_MAX_SIDE_PX`.
+            Default: `1568`.
+        image_min_side_px: Las imágenes embebidas cuyo lado menor es inferior a este
+            valor se consideran triviales (iconos, separadores) y no se describen.
+            Env: `IMAGE_MIN_SIDE_PX`. Default: `64`.
+        max_images_per_page: Máximo de imágenes embebidas descritas por página; se
+            conservan las de mayor área. Env: `MAX_IMAGES_PER_PAGE`. Default: `10`.
+        image_decode_concurrency: Imágenes (embebidas, sueltas o fotogramas) que se
+            leen, decodifican y reducen a la vez, por event loop. Decodificar es lo
+            que cuesta memoria (una foto de 12 MP son unos 36 MB de píxeles): el pico
+            crece con este valor. Las llamadas al modelo siguen limitadas por
+            `llm_concurrency`, así que subirlo solo acelera cuando el modelo responde
+            más rápido de lo que se decodifica. Mínimo `1`. Env:
+            `IMAGE_DECODE_CONCURRENCY`. Default: `1`.
+        media_segment_seconds: Duración, en segundos, de cada tramo de audio o vídeo
+            (una página por tramo). Mínimo `10`. Env: `MEDIA_SEGMENT_SECONDS`.
+            Default: `300`.
+        media_min_segment_seconds: Duración mínima del último tramo. Si el resto final
+            es más corto, el corte anterior se adelanta (al segundo entero) para que
+            el último tramo dure al menos esto: 300,05 s con tramos de 300 s dan
+            290 s + 10,05 s. Evita tramos de milisegundos, que algunos proveedores
+            rechazan. `0` lo desactiva. No puede superar la mitad de
+            `media_segment_seconds` (si no se indica, se limita a ella). Env:
+            `MEDIA_MIN_SEGMENT_SECONDS`. Default: `10`.
+        media_language: Idioma del audio (código ISO 639-1, p.ej. `'es'`) o `None` para
+            que el transcriptor lo detecte. Env: `MEDIA_LANGUAGE`. Default: `None`.
+        max_media_duration_seconds: Duración máxima aceptada para un audio o vídeo;
+            superarla es un `ConversionError` antes de gastar nada. `None` = sin
+            límite. Env: `MAX_MEDIA_DURATION_SECONDS` (`none` = sin límite).
+            Default: `14400` (4 h).
+        video_frames_per_minute: Fotogramas por minuto que se describen en los vídeos
+            (muestreo uniforme). `0` = solo transcripción. Env:
+            `VIDEO_FRAMES_PER_MINUTE`. Default: `2.0`.
+        media_concurrency: Máximo de audios y vídeos en conversión a la vez, por event
+            loop, con independencia de `parallel_docs`. Env: `MEDIA_CONCURRENCY`.
+            Default: `1`.
+        ffmpeg_path, ffprobe_path: Rutas a los binarios `ffmpeg` / `ffprobe`
+            (requisitos del sistema para audio y vídeo; no se instalan con el
+            paquete). `None` = buscarlos en el `PATH`. Env: `FFMPEG_PATH`,
+            `FFPROBE_PATH`.
         prompt_caching_enabled: Enable prompt caching for supported LLM providers.
         full_docstring: Use the full class docstring (True, default) or only its first
             non-empty line (False) when building the model catalog description shown
@@ -567,6 +702,130 @@ def configure(
             f"Received: {resolved_mistral_ocr_concurrency!r}."
         )
 
+    resolved_mistral_ocr_image_max_pages = _resolve_int(
+        mistral_ocr_image_max_pages, "MISTRAL_OCR_IMAGE_MAX_PAGES", 50,
+        "mistral_ocr_image_max_pages", minimum=1,
+    )
+
+    # ── Multimodal (images, audio, video) ─────────────────────────────────────
+    if vision_llm is not None:
+        _validate_vision_llm(vision_llm)
+    if transcriber is not None:
+        from scinr.newton.media.transcriber import Transcriber
+
+        if not isinstance(transcriber, Transcriber):
+            raise ConfigurationError(
+                f"'transcriber' must be a scinr.newton.media.Transcriber instance. "
+                f"Received: {type(transcriber).__name__}.\n"
+                f"Example:\n"
+                f"  from scinr.newton.media.transcribers import OpenAICompatibleTranscriber\n"
+                f"  configure(transcriber=OpenAICompatibleTranscriber("
+                f"model='whisper-1', api_key=...))"
+            )
+    resolved_describe_embedded_images = _resolve_bool(
+        describe_embedded_images, "DESCRIBE_EMBEDDED_IMAGES", True
+    )
+    resolved_store_described_images = _resolve_bool(
+        store_described_images, "STORE_DESCRIBED_IMAGES", True
+    )
+    resolved_store_video_frames = _resolve_bool(
+        store_video_frames, "STORE_VIDEO_FRAMES", True
+    )
+    resolved_media_error_strategy = media_error_strategy or os.getenv(
+        "MEDIA_ERROR_STRATEGY", "best_effort"
+    )
+    if resolved_media_error_strategy not in ("fail_fast", "best_effort"):
+        raise ConfigurationError(
+            f"Unknown media_error_strategy: {resolved_media_error_strategy!r}. "
+            f"Valid values: 'fail_fast', 'best_effort'."
+        )
+    resolved_strip_location = _resolve_bool(strip_location, "STRIP_LOCATION", True)
+    resolved_image_max_side_px = _resolve_int(
+        image_max_side_px, "IMAGE_MAX_SIDE_PX", 1568, "image_max_side_px", minimum=64
+    )
+    resolved_image_min_side_px = _resolve_int(
+        image_min_side_px, "IMAGE_MIN_SIDE_PX", 64, "image_min_side_px", minimum=0
+    )
+    resolved_max_images_per_page = _resolve_int(
+        max_images_per_page, "MAX_IMAGES_PER_PAGE", 10, "max_images_per_page", minimum=1
+    )
+    resolved_image_decode_concurrency = _resolve_int(
+        image_decode_concurrency, "IMAGE_DECODE_CONCURRENCY", 1, "image_decode_concurrency",
+        minimum=1,
+    )
+    resolved_media_segment_seconds = _resolve_int(
+        media_segment_seconds, "MEDIA_SEGMENT_SECONDS", 300, "media_segment_seconds",
+        minimum=10,
+    )
+    _min_segment_explicit = (
+        media_min_segment_seconds is not None
+        or os.getenv("MEDIA_MIN_SEGMENT_SECONDS") is not None
+    )
+    resolved_media_min_segment_seconds = _resolve_int(
+        media_min_segment_seconds, "MEDIA_MIN_SEGMENT_SECONDS", 10,
+        "media_min_segment_seconds", minimum=0,
+    )
+    _half_segment = resolved_media_segment_seconds // 2
+    if resolved_media_min_segment_seconds > _half_segment:
+        if _min_segment_explicit:
+            raise ConfigurationError(
+                f"media_min_segment_seconds must be at most half of media_segment_seconds "
+                f"({resolved_media_segment_seconds} // 2 = {_half_segment}). "
+                f"Received: {resolved_media_min_segment_seconds!r}."
+            )
+        resolved_media_min_segment_seconds = _half_segment
+    resolved_media_language = media_language or os.getenv("MEDIA_LANGUAGE") or None
+    if resolved_media_language is not None:
+        resolved_media_language = resolved_media_language.strip().lower()
+        if not (len(resolved_media_language) == 2 and resolved_media_language.isalpha()):
+            raise ConfigurationError(
+                f"media_language must be an ISO 639-1 code (two letters, e.g. 'es') or "
+                f"None for automatic detection. Received: {media_language!r}."
+            )
+    if isinstance(max_media_duration_seconds, _Unset):
+        _env_max_duration = os.getenv("MAX_MEDIA_DURATION_SECONDS")
+        if _env_max_duration is None:
+            resolved_max_media_duration_seconds: int | None = 14400
+        elif _env_max_duration.strip().lower() in ("", "none"):
+            resolved_max_media_duration_seconds = None
+        else:
+            resolved_max_media_duration_seconds = _parse_int(
+                _env_max_duration, "MAX_MEDIA_DURATION_SECONDS"
+            )
+    else:
+        resolved_max_media_duration_seconds = max_media_duration_seconds
+    if resolved_max_media_duration_seconds is not None and resolved_max_media_duration_seconds < 1:
+        raise ConfigurationError(
+            f"max_media_duration_seconds must be >= 1 or None (no limit). "
+            f"Received: {resolved_max_media_duration_seconds!r}."
+        )
+    if video_frames_per_minute is not None:
+        resolved_video_frames_per_minute = float(video_frames_per_minute)
+    else:
+        _env_fpm = os.getenv("VIDEO_FRAMES_PER_MINUTE", "2.0")
+        try:
+            resolved_video_frames_per_minute = float(_env_fpm)
+        except ValueError:
+            raise ConfigurationError(
+                f"VIDEO_FRAMES_PER_MINUTE must be a number. Received: {_env_fpm!r}."
+            ) from None
+    if resolved_video_frames_per_minute < 0:
+        raise ConfigurationError(
+            f"video_frames_per_minute must be >= 0 (0 = transcription only). "
+            f"Received: {resolved_video_frames_per_minute!r}."
+        )
+    resolved_media_concurrency = _resolve_int(
+        media_concurrency, "MEDIA_CONCURRENCY", 1, "media_concurrency", minimum=1
+    )
+    resolved_ffmpeg_path = ffmpeg_path or os.getenv("FFMPEG_PATH") or None
+    resolved_ffprobe_path = ffprobe_path or os.getenv("FFPROBE_PATH") or None
+    if resolved_describe_embedded_images and vision_llm is None:
+        log.info(
+            "describe_embedded_images is enabled but no vision_llm is configured: "
+            "embedded images in PDF, DOCX and PPTX will not be described. "
+            "Pass configure(vision_llm=...) with a multimodal chat model to enable it."
+        )
+
     # ── Pipeline behaviour ────────────────────────────────────────────────────
     resolved_caching = (
         prompt_caching_enabled
@@ -701,6 +960,14 @@ def configure(
             or os.getenv("MONGODB_FROZEN_GRIDFS_BUCKET", "frozen_snapshots")
         ),
         custom_freeze_storage=custom_freeze_storage,
+        mongodb_images_collection=(
+            mongodb_images_collection
+            or os.getenv("MONGODB_IMAGES_COLLECTION", "page_images")
+        ),
+        mongodb_images_gridfs_bucket=(
+            mongodb_images_gridfs_bucket
+            or os.getenv("MONGODB_IMAGES_GRIDFS_BUCKET", "page_image_binaries")
+        ),
         extra_converters=extra_converters or {},
         mistral_api_key=mistral_api_key or os.getenv("MISTRAL_API_KEY"),
         mistral_ocr_safe_max_pages=resolved_mistral_ocr_safe_max_pages,
@@ -710,6 +977,26 @@ def configure(
         mistral_ocr_chunk_concurrency=resolved_mistral_ocr_chunk_concurrency,
         mistral_ocr_error_strategy=resolved_mistral_ocr_error_strategy,
         mistral_ocr_concurrency=resolved_mistral_ocr_concurrency,
+        mistral_ocr_image_max_pages=resolved_mistral_ocr_image_max_pages,
+        vision_llm=vision_llm,
+        transcriber=transcriber,
+        describe_embedded_images=resolved_describe_embedded_images,
+        store_described_images=resolved_store_described_images,
+        store_video_frames=resolved_store_video_frames,
+        media_error_strategy=resolved_media_error_strategy,
+        strip_location=resolved_strip_location,
+        image_max_side_px=resolved_image_max_side_px,
+        image_min_side_px=resolved_image_min_side_px,
+        max_images_per_page=resolved_max_images_per_page,
+        image_decode_concurrency=resolved_image_decode_concurrency,
+        media_segment_seconds=resolved_media_segment_seconds,
+        media_min_segment_seconds=resolved_media_min_segment_seconds,
+        media_language=resolved_media_language,
+        max_media_duration_seconds=resolved_max_media_duration_seconds,
+        video_frames_per_minute=resolved_video_frames_per_minute,
+        media_concurrency=resolved_media_concurrency,
+        ffmpeg_path=resolved_ffmpeg_path,
+        ffprobe_path=resolved_ffprobe_path,
         prompt_caching_enabled=resolved_caching,
         full_docstring=resolved_full_docstring,
         extraction_batch_size=resolved_batch_size,
@@ -772,6 +1059,57 @@ def configure(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_int(raw: str, name: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigurationError(f"{name} must be an integer. Received: {raw!r}.") from None
+
+
+def _resolve_int(value: int | None, env: str, default: int, name: str, *, minimum: int) -> int:
+    """Explicit argument > env variable > default, validated against *minimum*."""
+    if value is not None:
+        resolved = value
+    else:
+        raw = os.getenv(env)
+        resolved = default if raw is None else _parse_int(raw, env)
+    if resolved < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}. Received: {resolved!r}.")
+    return resolved
+
+
+def _resolve_bool(value: bool | None, env: str, default: bool) -> bool:
+    """Explicit argument > env variable (``true`` / ``false``) > default."""
+    if value is not None:
+        return bool(value)
+    raw = os.getenv(env)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+_VISION_LLM_EXAMPLE = (
+    "Example:\n"
+    "  from langchain_openai import ChatOpenAI\n"
+    "  configure(vision_llm=ChatOpenAI(model='gpt-4o-mini'))\n"
+    "  # or any multimodal chat model: ChatBedrockConverse, ChatOllama,\n"
+    "  # ChatOpenAI(base_url=...) against an OpenAI-compatible server…"
+)
+
+
+def _validate_vision_llm(vision_llm: Any) -> None:
+    """``vision_llm`` must be a LangChain chat model (no structured output needed)."""
+    try:
+        from langchain_core.language_models import BaseChatModel
+    except ImportError:  # pragma: no cover - langchain_core is a base dependency
+        return
+    if not isinstance(vision_llm, BaseChatModel):
+        raise ConfigurationError(
+            f"'vision_llm' must be a LangChain BaseChatModel instance that accepts "
+            f"images. Received: {type(vision_llm).__name__}.\n{_VISION_LLM_EXAMPLE}"
+        )
 
 
 def _validate_llm(llm: Any) -> None:
@@ -888,6 +1226,58 @@ def get_repair_llm(temperature: float = 0.0):
         return llm.bind(temperature=temperature)
     except Exception:
         return llm
+
+
+def get_vision_llm():
+    """Return the configured ``vision_llm``.
+
+    It never falls back to ``llm``: vision depends on a multimodal model
+    configured on purpose.
+
+    Raises:
+        ConfigurationError: If no ``vision_llm`` is configured.
+    """
+    cfg = get_config()
+    if cfg.vision_llm is None:
+        raise ConfigurationError(
+            "A vision model is required to describe images but none is configured "
+            "(vision_llm does not fall back to llm).\n" + _VISION_LLM_EXAMPLE
+        )
+    return cfg.vision_llm
+
+
+def get_transcriber():
+    """Return the configured ``transcriber``.
+
+    Raises:
+        ConfigurationError: If no ``transcriber`` is configured.
+    """
+    cfg = get_config()
+    if cfg.transcriber is None:
+        raise ConfigurationError(
+            "A transcriber is required to convert audio but none is configured.\n"
+            "Example:\n"
+            "  from scinr.newton.media.transcribers import OpenAICompatibleTranscriber\n"
+            "  configure(transcriber=OpenAICompatibleTranscriber(model='whisper-1', "
+            "api_key=...))\n"
+            "  # or OpenAICompatibleTranscriber(model=..., base_url='http://my-server/v1')"
+            " for a self-hosted OpenAI-compatible server,\n"
+            "  # or FasterWhisperTranscriber() for local inference "
+            "(pip install 'scinr[media]')."
+        )
+    return cfg.transcriber
+
+
+def embedded_images_enabled() -> bool:
+    """``True`` when embedded images must be described.
+
+    That is ``describe_embedded_images`` **and** a configured ``vision_llm``.
+    The only condition the PDF, DOCX and PPTX converters and the enrichment
+    step check. ``False`` when :func:`configure` has not been called.
+    """
+    if _config is None:
+        return False
+    return bool(_config.describe_embedded_images and _config.vision_llm is not None)
 
 
 def get_prompt_family() -> PromptFamily:

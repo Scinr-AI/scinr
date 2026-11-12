@@ -14,6 +14,7 @@ from scinr.newton.exceptions import (
     ExtractionError,
     FreezeError,
     GraphConnectionError,
+    ImageStorageError,
     IngestionError,
     ModelError,
     NavigationError,
@@ -25,12 +26,14 @@ from scinr.newton.exceptions import (
 from scinr.newton.ingest.deletion import collect_orphans, delete_document
 from scinr.newton.ingest.freeze import export_document_snapshot, freeze_document
 from scinr.newton.ingest.restore import restore_document
+from scinr.newton.media.transcriber import Transcriber, TranscriptSegment
+from scinr.newton.models.transcript import TranscriptCue
 from scinr.newton.navigation import (
     GraphNavigator,
     get_graph_navigator,
     graph_navigator,
 )
-from scinr.newton.pipeline import run_pipeline
+from scinr.newton.pipeline import discover_documents, run_pipeline
 from scinr.newton.progress import (
     AsyncProgressCallback,
     DocumentProgress,
@@ -40,12 +43,15 @@ from scinr.newton.progress import (
     ProgressTracker,
 )
 from scinr.newton.results import (
+    DeletedDocument,
     DeletionResult,
+    DiscoveredDocuments,
     DocumentResult,
     FreezeResult,
     OrphanCollectionResult,
     PipelineResult,
     RestoreResult,
+    SkippedFile,
     StageResult,
 )
 from scinr.newton.stages import (
@@ -58,7 +64,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 
 __all__ = [
     # Configuration
@@ -66,6 +72,10 @@ __all__ = [
     "get_config",
     "get_available_themes",
     "ThemePath",
+    # Media (audio / video transcription)
+    "Transcriber",
+    "TranscriptCue",
+    "TranscriptSegment",
     # Exceptions
     "ScinrError",
     "ConfigurationError",
@@ -74,6 +84,7 @@ __all__ = [
     "IngestionError",
     "ModelError",
     "StorageError",
+    "ImageStorageError",
     "ConversionError",
     "NavigationError",
     "GraphConnectionError",
@@ -84,11 +95,15 @@ __all__ = [
     "StageResult",
     "PipelineResult",
     "DeletionResult",
+    "DeletedDocument",
+    "DiscoveredDocuments",
+    "SkippedFile",
     "OrphanCollectionResult",
     "FreezeResult",
     "RestoreResult",
     # Unified pipeline
     "run_pipeline",
+    "discover_documents",
     # Progress reporting
     "ProgressEvent",
     "ProgressCallback",

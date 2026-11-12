@@ -143,6 +143,7 @@ Identity fields:
 | An unexpected error stopped the document (`UnitResult.fatal_error`) | `"failed"` (`error` = that error) |
 | The document stopped at a stage (`stopped_at` is set) | `"failed"` (`error` = the errors of that stage, joined with `"; "`) |
 | A file the pipeline cannot interpret: an extension with no converter that is not tabular (`"unsupported format: .xyz"`), or a tabular file that cannot be read or has no data rows — e.g. an AppleDouble `__MACOSX/._name.csv` (see [Tabular files](#tabular-files)) | `"skipped"` (`error` = the reason) |
+| An image, audio or video file whose requirement is missing (`vision_llm`, `transcriber`, `ffmpeg`): since 0.5.0 these files are not skipped, they are converted and fail at `preprocess` with an error that says what to configure | `"failed"` (`stopped_at="preprocess"`) |
 | Preprocess found nothing to convert | `"skipped"` |
 | Some stage had `nodes_failed > 0` but the document kept going (`on_partial_failure="continue"` / `"warn"`), or a tabular file wrote some tables but some sheets failed | `"partial"` |
 | Otherwise | `"success"` |

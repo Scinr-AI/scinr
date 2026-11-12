@@ -13,7 +13,8 @@ Welcome to the `scinr.newton` API reference. All API documentation is auto-gener
 - [Exceptions](exceptions.md): ``ScinrError`` hierarchy.
 - [Deletion](deletion.md): ``delete_document()`` — permanent document removal with cascade and garbage collection, always scoped to one tenant (``tenant_id`` is mandatory; ``None`` / ``"__public__"`` = public documents); ``collect_orphans()`` — maintenance sweep of every orphaned extraction node of a tenant.
 - [Freezing](freezing.md): ``freeze_document()``, ``restore_document()``, ``export_document_snapshot()`` — archive a document's subtree to a snapshot, reduce it to a stub and rebuild it later; same tenant-scoped selector as ``delete_document()``.
-- [Converters](converters.md): Document format converters.
+- [Converters](converters.md): Document format converters, including images, audio, video and the embedded-image enrichment.
+- [Media](media.md): ``Transcriber`` interface, ready-made transcribers (``OpenAICompatibleTranscriber``, ``FasterWhisperTranscriber``), ``ffmpeg`` helpers and ``FileMetadata``.
 - [Storage](storage.md): Storage backends.
 - [Navigation](navigation.md): Read-only, engine-abstracted graph traversal — documents, structure nodes, model instances, entities.
 - [Utilities](utilities.md): Theme registry, LLM factory, and utilities.

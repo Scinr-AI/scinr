@@ -52,4 +52,11 @@ node with its `page_ids`, and the status groups `not_found_structure_nodes`
 `not_found_page_ids` (missing or of another tenant). `get_document_original()` returns
 an `OriginalFile` (the `RawFileRecord` plus a single-use byte stream).
 
+Stored images and video frames: `include_images=True` on the three page functions
+fills `PageText.images` with `PageImageRef`s; `get_document_images()` lists them for a
+document; `get_page_image(image_id)` returns a `PageImageFile` (the `PageImageRecord`
+plus a single-use byte stream), reading storage with the call's full scope since there
+is no graph node to resolve. Audio and video pages also carry `PageText.transcript`
+(`TranscriptCue`s) and `PageText.find_in_transcript()`.
+
 ::: scinr.newton.navigation.pages

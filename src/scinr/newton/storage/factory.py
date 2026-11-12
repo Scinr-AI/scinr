@@ -91,6 +91,8 @@ def _ensure_mongodb_ready(cfg) -> None:
         cfg.mongodb_raw_files_collection,
         cfg.mongodb_pages_collection,
         cfg.mongodb_frozen_collection,
+        cfg.mongodb_images_collection,
+        cfg.mongodb_images_gridfs_bucket,
         cfg.mongodb_ensure_indexes,
     )
     if key in _mongodb_ready:

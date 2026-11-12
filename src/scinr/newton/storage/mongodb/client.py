@@ -113,59 +113,79 @@ def get_gridfs_bucket(bucket_name: str | None = None) -> AsyncIOMotorGridFSBucke
 
 # Single source of truth for the indexes of this backend, shared by the async
 # (Motor) and sync (pymongo) bootstraps.  Each entry is
-# ``(config attribute holding the collection name, keys, index name)``.
+# ``(config attribute holding the collection name, keys, index name, options)``,
+# where *options* carries the extra ``create_index`` keyword arguments
+# (e.g. ``{"unique": True}``) and may be empty.
 # Every index is prefixed by ``tenant_id`` so tenant-scoped reads are seeks.
-_INDEX_SPECS: tuple[tuple[str, list[tuple[str, int]], str], ...] = (
+_INDEX_SPECS: tuple[tuple[str, list[tuple[str, int]], str, dict], ...] = (
     # converted_pages: primary lookup by (tenant, raw_file_id) + page_index ordering
     (
         "mongodb_pages_collection",
         [("tenant_id", 1), ("raw_file_id", 1), ("page_index", 1)],
         "pages_by_tenant_raw_file_and_index",
+        {},
     ),
     # converted_pages: secondary lookup by filename + folder_path within a tenant
     (
         "mongodb_pages_collection",
         [("tenant_id", 1), ("filename", 1), ("folder_path", 1)],
         "pages_by_tenant_filename_folder",
+        {},
     ),
     # raw_files: integrity / duplicate checks by SHA-256 within a tenant
     (
         "mongodb_raw_files_collection",
         [("tenant_id", 1), ("checksum_sha256", 1)],
         "raw_files_by_tenant_checksum",
+        {},
     ),
     # raw_files: inventory / audit by provenance (list_raw_files)
     (
         "mongodb_raw_files_collection",
         [("tenant_id", 1), ("created_by_user_id", 1)],
         "raw_files_by_tenant_user",
+        {},
     ),
     (
         "mongodb_raw_files_collection",
         [("tenant_id", 1), ("job_id", 1)],
         "raw_files_by_tenant_job",
+        {},
     ),
     # frozen_documents: snapshot metadata by document / by ingestion run
     (
         "mongodb_frozen_collection",
         [("tenant_id", 1), ("path", 1), ("version", 1)],
         "frozen_by_tenant_path_version",
+        {},
     ),
     (
         "mongodb_frozen_collection",
         [("tenant_id", 1), ("job_id", 1)],
         "frozen_by_tenant_job",
+        {},
     ),
     # restore_document() without a frozen stub: snapshots holding a document
     (
         "mongodb_frozen_collection",
         [("tenant_id", 1), ("documents.path", 1), ("documents.version", 1), ("stored_at", -1)],
         "frozen_by_tenant_document",
+        {},
     ),
     (
         "mongodb_frozen_collection",
         [("tenant_id", 1), ("documents.job_id", 1), ("stored_at", -1)],
         "frozen_by_tenant_document_job",
+        {},
+    ),
+    # page_images: identity of a described image inside its raw file.  Unique
+    # on purpose — a duplicate (tenant, raw_file_id, page_index, image_index)
+    # is a bug and must surface as a write error, not as silent overwrites.
+    (
+        "mongodb_images_collection",
+        [("tenant_id", 1), ("raw_file_id", 1), ("page_index", 1), ("image_index", 1)],
+        "page_images_by_tenant_raw_file_page_image",
+        {"unique": True},
     ),
 )
 
@@ -195,8 +215,8 @@ async def ensure_indexes() -> None:
     db = get_db()
     for coll_attr, name in _OBSOLETE_INDEXES:
         await _drop_index_if_exists(db[getattr(cfg, coll_attr)], name)
-    for coll_attr, keys, name in _INDEX_SPECS:
-        await db[getattr(cfg, coll_attr)].create_index(keys, name=name)
+    for coll_attr, keys, name, options in _INDEX_SPECS:
+        await db[getattr(cfg, coll_attr)].create_index(keys, name=name, **options)
 
     logger.debug("MongoDB indexes ensured.")
 
@@ -234,8 +254,8 @@ def ensure_indexes_sync(cfg, client=None) -> None:
             if name in collection.index_information():
                 collection.drop_index(name)
                 logger.info("Dropped obsolete MongoDB index %s.%s", collection.name, name)
-        for coll_attr, keys, name in _INDEX_SPECS:
-            db[getattr(cfg, coll_attr)].create_index(keys, name=name)
+        for coll_attr, keys, name, options in _INDEX_SPECS:
+            db[getattr(cfg, coll_attr)].create_index(keys, name=name, **options)
     finally:
         if own_client:
             client.close()

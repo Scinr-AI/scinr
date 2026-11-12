@@ -20,6 +20,8 @@ It uses LLMs and Pydantic models to extract structured, domain-specific informat
 
 * **Multi-format ingestion** — Supports `.pdf`, `.docx`, `.xlsx`, `.xls`, and `.csv`. Support for `.pptx`, `.json`, `.xml`, `.html`, and `.txt` is planned in the roadmap.
 
+* **Images, audio and video** — Image files are transcribed and described by a configurable vision model, audio and video are transcribed segment by segment with time ranges (video frames described too), and the images embedded in PDF, DOCX and PPTX are described in place. Cloud or self-hosted providers, open interfaces. See [Multimodal Ingestion](user-guides/multimodal-ingestion.md).
+
 * **Pydantic extraction models** — Define structured schemas for domain entities such as compounds, clinical trials, and assays.
 
 * **Neo4j knowledge graphs** — Store extracted entities and relationships with document provenance.
@@ -42,7 +44,8 @@ Unstructured documents go through five stages:
 
 ```text
 Raw Documents
-(.pdf, .docx, .xlsx, .xls, .csv)
+(.pdf, .docx, .xlsx, .xls, .csv,
+ images, audio, video)
         │
         ▼
 1. Preprocess

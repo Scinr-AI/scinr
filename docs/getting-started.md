@@ -37,6 +37,9 @@ pip install "scinr[ollama]"
 # MongoDB storage (includes motor and pymongo)
 pip install "scinr[mongodb]"
 
+# Local transcription (faster-whisper) and HEIC/HEIF images
+pip install "scinr[media]"
+
 # Documentation tooling (mkdocs, mkdocstrings, griffe, ruff)
 pip install "scinr[docs]"
 
@@ -90,6 +93,8 @@ Before running the pipeline, ensure you have the following:
    Without MongoDB, `scinr` operates in memory-only mode (`storage_backend=none`), which is perfectly fine for most workflows.
 
 5. **Mistral API key** — Required to process **any** PDF. PDF conversion is done entirely through the Mistral OCR API; there is no non-Mistral path. Obtain a key from [Mistral AI](https://console.mistral.ai/). Not needed if you never ingest PDFs.
+
+6. **`ffmpeg` / `ffprobe`** — System binaries required only for audio and video files; they are not installed by `pip`. `brew install ffmpeg` (macOS) or `apt-get install ffmpeg` (Debian/Ubuntu). Images, audio and video also need a vision model and/or a transcriber configured in `configure()` — see [Multimodal Ingestion](user-guides/multimodal-ingestion.md).
 
 ---
 
@@ -164,6 +169,11 @@ Create a directory and place some documents in it. `scinr` supports the followin
 | Word | `.docx` | Full text + structure extraction |
 | Excel | `.xlsx`, `.xls` | Routed to tabular pipeline automatically |
 | CSV | `.csv` | Routed to tabular pipeline automatically |
+| Images | `.jpg`, `.jpeg`, `.png`, `.webp`, `.tif`, `.tiff`, `.heic`, `.heif` | Transcribed and described — requires a `vision_llm`; HEIC/HEIF also `pip install "scinr[media]"` |
+| Audio | `.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac` | Transcribed in segments — requires a `transcriber` and the `ffmpeg` / `ffprobe` system binaries |
+| Video | `.mp4`, `.mov`, `.mkv`, `.webm` | Transcription plus described frames — requires `ffmpeg`, a `transcriber` (if it has audio) and a `vision_llm` for the frames |
+
+Images, audio and video are always accepted: without their requirement they show up as failed documents with an error that says what to configure. See [Multimodal Ingestion](user-guides/multimodal-ingestion.md).
 
 ```bash
 mkdir -p raw_docs
@@ -239,7 +249,7 @@ You can run only specific stages by passing the `stages` parameter:
 # Run only annotation and entity extraction on a known document
 result = await run_pipeline(
     stages=["annotation", "entity_extraction"],
-    document_names=["MyDocument"],
+    document_names=["MyDocument.pdf"],
 )
 ```
 
@@ -355,7 +365,7 @@ PDF conversion runs entirely on the Mistral OCR API. Set `MISTRAL_API_KEY` in yo
 
 Check that:
 - The `input_raw` directory exists and contains supported file types.
-- Recognized file extensions are: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`.
+- Recognized file extensions are: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`, plus images (`.jpg`, `.jpeg`, `.png`, `.webp`, `.tif`, `.tiff`, `.heic`, `.heif`), audio (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac`) and video (`.mp4`, `.mov`, `.mkv`, `.webm`).
 - The path is correct (relative paths are resolved from the current working directory).
 
 ### LLM calls are slow or rate-limited

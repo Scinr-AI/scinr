@@ -4,13 +4,13 @@
 
 The architecture provides **two independent ingestion pipelines** that write to the same knowledge graph:
 
-* **Unstructured document pipeline** — A 5-stage pipeline (Stages 0–4) for supported document formats: PDF and DOCX. It handles preprocessing, structural extraction, graph ingestion, annotation, and domain entity extraction.
+* **Unstructured document pipeline** — A 5-stage pipeline (Stages 0–4) for supported document formats: PDF and DOCX, plus images, audio and video (turned into text at Stage 0, see [Multimodal Ingestion](user-guides/multimodal-ingestion.md)). It handles preprocessing, structural extraction, graph ingestion, annotation, and domain entity extraction.
 
 * **Tabular data pipeline** — A dedicated pipeline for CSV, XLSX, and XLS data. It bypasses the document pipeline and uses structural normalization, LLM-driven mapping, and entity extraction to write structured knowledge directly to the graph.
 
 Both pipelines produce compatible entities and relationships in the **same Neo4j knowledge graph**, sharing graph conventions, node labels, relationship types, and schema constraints.
 
-Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codebase but are not yet officially supported or tested. Only `.pdf`, `.docx`, `.xlsx`, `.xls`, and `.csv` are supported today.
+Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codebase but are not yet officially supported or tested. Supported today: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`, and (since 0.5.0) images, audio and video.
 
 ---
 
@@ -44,7 +44,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 ```
                     ┌──────────────────────────────────────────────────┐
                     │                  Raw Documents                   │
-                    │  .pdf .docx .xlsx .xls .csv                      │
+                    │  .pdf .docx .xlsx .xls .csv · images/audio/video │
                     └───────────────┬──────────────────────────────────┘
                                     │
           ┌─────────────────────────┼─────────────────────────┐
@@ -109,7 +109,7 @@ All stage functions are `async def` and return typed `StageResult` dataclasses.
 
 **Purpose:** Convert raw source files into a standardized intermediate JSON format.
 
-**Input:** Directory of raw files. Officially supported: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`. (Converters for `.pptx`, `.html`, `.json`, `.xml`, `.txt` exist but are not yet supported.)
+**Input:** Directory of raw files. Officially supported: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`, image files, audio and video. (Converters for `.pptx`, `.html`, `.json`, `.xml`, `.txt` exist but are not yet supported.) A document's name and `doc_path` keep the source file extension (`Modulo/informe.pdf`) since 0.5.0.
 
 **Output:**
 - `StageResult` with per-file success/failure counts
@@ -129,6 +129,13 @@ Each file format has a dedicated converter inheriting from `BaseConverter` (abst
 | `PptxConverter` | `converters/pptx.py` | `.pptx` | `python-pptx` | Registered, not yet supported |
 | `HtmlConverter` | `converters/html.py` | `.html`, `.htm` | — | Registered, not yet supported |
 | `TextConverter` | `converters/text.py` | `.txt`, `.md` | — | Registered, not yet supported |
+| `ImageConverter` | `converters/image.py` | `.jpg`, `.jpeg`, `.png`, `.webp`, `.tif`, `.tiff`, `.heic`, `.heif` | `vision_llm`; Pillow (`pillow-heif` for HEIC/HEIF, `scinr[media]`) | Supported |
+| `AudioConverter` | `converters/audio.py` | `.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac` | `transcriber`; `ffmpeg` / `ffprobe` system binaries | Supported |
+| `VideoConverter` | `converters/video.py` | `.mp4`, `.mov`, `.mkv`, `.webm` | `ffmpeg` / `ffprobe`; `transcriber` (with audio); `vision_llm` (frames) | Supported |
+
+The image, audio and video converters are always registered and import nothing heavy at load time: a missing requirement fails that document at conversion with a message that says how to configure it.
+
+**Embedded-image enrichment:** right after conversion, before the pages are stored and the JSON is written, `converters/main.py` describes the embedded images of every page with the `vision_llm` (`converters/enrichment.py`) and writes the description into the markdown as an `<image index="N">…</image>` block. It only runs when `describe_embedded_images` is on **and** a `vision_llm` is configured. The PDF converter does it chunk by chunk (requesting the images from Mistral OCR, in chunks of `mistral_ocr_image_max_pages`); DOCX and PPTX attach lazy images that are read only while described. Audio and video pages carry `start_ms` / `end_ms`.
 
 Converters are registered in `converters/registry.py` via a lazy-loaded extension-to-class map. Custom converters can be injected at runtime via `configure(extra_converters={...})` — the `apply_converter_overrides()` function handles both new extensions and built-in overrides.
 
@@ -136,7 +143,7 @@ Converters are registered in `converters/registry.py` via a lazy-loaded extensio
 
 Every PDF is converted through the Mistral OCR API (`POST https://api.mistral.ai/v1/ocr`); there is no non-Mistral path, so `MISTRAL_API_KEY` (or `configure(mistral_api_key=...)`) is mandatory for any PDF. PDFs larger than `mistral_ocr_safe_max_pages` (default 900) or `mistral_ocr_safe_max_bytes` (default 45 MiB) are split into chunks by `pdf_splitter.py` (using `pypdf`); each chunk is sent to the OCR endpoint and the pages are reassembled.
 
-Error strategy for Mistral OCR is configurable: `fail_fast` (default, aborts the entire document on any chunk failure) or `best_effort` (skips failed chunks and continues).
+Error strategy for Mistral OCR is configurable: `fail_fast` (default, aborts the entire document on any chunk failure) or `best_effort` (skips failed chunks and continues). With `best_effort` a document left with no text after skipping its failed parts fails anyway, for every converter (`converters/main.py::_require_content`).
 
 **Intermediate Document Format:**
 
@@ -155,6 +162,7 @@ The actual per-file conversion is dispatched via `_run_convert()`: synchronous c
 
 When `storage_backend` is configured (not `"none"`), Stage 0 stores:
 - Raw file binary via `RawFileRepository.store()` (GridFS for MongoDB)
+- Each described embedded image and video frame, right after its description, via `RawFileRepository.store_image()` / `store_image_file()` (`converters/image_store.py`; `store_described_images` / `store_video_frames`, only with a backend whose `stores_images` is `True`). A failed image write fails the document and deletes the images already stored
 - Converted pages via `PageRepository.store()` (MongoDB collection)
 
 The storage layer is abstracted behind `storage/factory.py` and supports three backends: `"none"`, `"mongodb"`, and `"custom"`.
@@ -662,7 +670,19 @@ scinr.newton/
 │   ├── docx.py                 # DocxConverter (python-docx)
 │   ├── xlsx.py                 # XlsxConverter (openpyxl + pandas)
 │   ├── csv.py                  # CsvConverter (pandas)
+│   ├── image.py                # ImageConverter (vision_llm, EXIF metadata)
+│   ├── audio.py                # AudioConverter (transcriber, one page per segment)
+│   ├── video.py                # VideoConverter (transcription + described frames)
+│   ├── media_common.py         # Segments, time headers, media_concurrency semaphore
+│   ├── vision.py               # prepare_image(), describe_image() with the vision_llm
+│   ├── vision_prompts.py       # embedded / standalone / frame prompts
+│   ├── enrichment.py           # enrich_pages() — embedded-image descriptions in place
 │   └── config.py               # Converter-specific configuration
+│
+├── media/                      # Speech-to-text and ffmpeg for audio / video
+│   ├── transcriber.py          # Transcriber ABC, TranscriptSegment
+│   ├── ffmpeg.py               # probe(), extract_audio_segment(), extract_frames()
+│   └── transcribers/           # OpenAICompatibleTranscriber, FasterWhisperTranscriber
 │
 ├── entity_extraction/          # Stage 4: entity extraction
 │   ├── agent.py                # run_entity_extraction_agent()
@@ -833,10 +853,10 @@ result = await run_pipeline(extraction_input_dir="data/json/", extraction_output
 result = await run_pipeline(ingestion_input_dir="data/extract/", stages=["ingestion"])
 
 # Stage 3 only (from Neo4j)
-result = await run_pipeline(document_names=["MyDocument"], stages=["annotation"])
+result = await run_pipeline(document_names=["MyDocument.pdf"], stages=["annotation"])
 
 # Stage 4 only (from Neo4j)
-result = await run_pipeline(document_names=["MyDocument"], stages=["entity_extraction"])
+result = await run_pipeline(document_names=["MyDocument.pdf"], stages=["entity_extraction"])
 
 # Tabular only
 result = await run_pipeline(input_raw="files/", stages=["tabular"])
@@ -912,14 +932,15 @@ The storage layer abstracts raw file and converted page persistence behind repos
 When `storage_backend="mongodb"`:
 - **GridFS bucket** (`mongodb_gridfs_bucket`, default: `"raw_binaries"`): Stores raw file binaries with metadata (filename, content_type, folder_path, tenant_id, created_by_user_id, job_id)
 - **`raw_files` collection** (`mongodb_raw_files_collection`): Raw file metadata records
-- **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, images, and dimensions
+- **`converted_pages` collection** (`mongodb_pages_collection`): Converted page records with markdown content, the time range and transcript cues of audio / video pages
+- **`page_images` collection** (`mongodb_images_collection`) and **`page_image_binaries` GridFS bucket** (`mongodb_images_gridfs_bucket`): the stored described images and video frames, one record per `(raw_file_id, page_index, image_index)`
 
 Every record carries the stored `tenant_id` (`"__public__"` for public uploads), `created_by_user_id` and `job_id` of the upload.
 
 ### Repository Interfaces
 
-- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`
-- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
+- **`RawFileRepository`** (ABC): `store(filename, content, content_type, folder_path, *, <owner>) -> str`, `get(raw_file_id, *, <scope>) -> RawFileRecord | None`, `open(raw_file_id, *, <scope>) -> AsyncIterator[bytes] | None`, `open_with_record(raw_file_id, *, <scope>) -> tuple[RawFileRecord, AsyncIterator[bytes]] | None`, `list_raw_files(*, <scope>, folder_path=None, filename=None)` and `delete(raw_file_id, *, <scope>) -> None`; optional (not abstract) image methods: `stores_images`, `store_image()`, `store_image_file()`, `list_images()`, `open_image()` and `delete_images()`
+- **`PageRepository`** (ABC): `store_page(raw_file_id, filename, folder_path, page_index, markdown, *, <owner>, start_ms=None, end_ms=None, transcript=None) -> str`, `get_pages(raw_file_id, *, <scope>) -> list[ConvertedPageRecord]`, `get_pages_by_ids(page_ids, *, <scope>) -> list[ConvertedPageRecord]`, and `delete_pages(raw_file_id, *, <scope>) -> int`
 
 `<owner>` is `tenant_id` / `created_by_user_id` / `job_id` (writes; `None` = public). `<scope>` is the navigation scope — `tenant_id` (`None` = all tenants), `include_public`, `created_by_user_id`, `job_id` — shared through `utils/scope.py`. Ingestion verifies that a document's `raw_file_id` belongs to its tenant (`ingest/raw_file_check.py`). See [Storage Backends — Multi-tenancy](user-guides/storage-backends.md#multi-tenancy).
 
@@ -1086,7 +1107,8 @@ PipelineResult
 ├── ingestion: StageResult | None
 ├── annotation: StageResult | None
 ├── entity_extraction: StageResult | None
-└── tabular: StageResult | None
+├── tabular: StageResult | None
+└── documents_with_omissions: list[DocumentResult]   (property)
 
 StageResult
 ├── stage: str
@@ -1101,7 +1123,10 @@ DocumentResult
 ├── document_name: str
 ├── nodes_processed: int
 ├── nodes_failed: int
-└── errors: list[str]
+├── errors: list[str]
+├── missing_page_ranges: list[tuple[int, int]] | None   (preprocess, best_effort)
+├── missing_segments: list[tuple[int, int]] | None      (preprocess, best_effort)
+└── missing_images: list[tuple[int, int]] | None        (preprocess, best_effort)
 
 DeletionResult
 ├── path: str | None
@@ -1121,7 +1146,8 @@ DeletionResult
 ├── gc_labeled_entity_deleted: int
 ├── gc_labeled_entity_passes: int
 ├── raw_files_deleted: int
-└── converted_pages_deleted: int
+├── converted_pages_deleted: int
+└── page_images_deleted: int
 
 OrphanCollectionResult                       (collect_orphans)
 ├── tenant_id: str | None

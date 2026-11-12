@@ -30,7 +30,6 @@ import base64
 import json
 import logging
 import os
-import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +45,7 @@ from scinr.newton.converters.base import (
     PageImage,
 )
 from scinr.newton.converters.pdf_splitter import iter_pdf_chunks, probe_pdf
+from scinr.newton.utils.loop_semaphore import LoopSemaphore
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,18 @@ _OCR_BODY_PREFIX = (
 ).encode("ascii")
 _OCR_BODY_SUFFIX = b'"}}'
 
+
+def _ocr_body_suffix(image_options: dict | None) -> bytes:
+    """Suffix of the body: closes the document and adds the image options, if any.
+
+    Without image options it is exactly :data:`_OCR_BODY_SUFFIX`, so the body is
+    byte for byte the one sent before images could be requested.
+    """
+    if not image_options:
+        return _OCR_BODY_SUFFIX
+    extra = "".join(f", {json.dumps(k)}: {json.dumps(v)}" for k, v in image_options.items())
+    return ('"}' + extra + "}").encode("ascii")
+
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 _BEST_EFFORT_HINT = (
@@ -96,6 +108,24 @@ class _OcrLimits:
     retry_backoff_seconds: float
     error_strategy: str
     concurrency: int
+    # Embedded images requested (describe_embedded_images + vision_llm).
+    include_images: bool = False
+    image_max_pages: int = 50
+    image_min_size: int = 0
+    max_images_per_page: int = 10
+
+    def image_options(self, page_count: int) -> dict | None:
+        """OCR request options that ask for the images of a *page_count*-page chunk."""
+        if not self.include_images:
+            return None
+        options: dict = {
+            "include_image_base64": True,
+            # Upper bound for the chunk; the per-page cap is applied locally.
+            "image_limit": self.max_images_per_page * max(1, page_count),
+        }
+        if self.image_min_size > 0:
+            options["image_min_size"] = self.image_min_size
+        return options
 
 
 class _OcrRequestBody:
@@ -107,8 +137,9 @@ class _OcrRequestBody:
     retry streams it again from the start.
     """
 
-    def __init__(self, document: Path | bytes) -> None:
+    def __init__(self, document: Path | bytes, image_options: dict | None = None) -> None:
         self._document = document
+        self._suffix = _ocr_body_suffix(image_options)
         if isinstance(document, Path):
             try:
                 self._size = document.stat().st_size
@@ -117,7 +148,7 @@ class _OcrRequestBody:
         else:
             self._size = len(document)
         self.content_length = (
-            len(_OCR_BODY_PREFIX) + 4 * ((self._size + 2) // 3) + len(_OCR_BODY_SUFFIX)
+            len(_OCR_BODY_PREFIX) + 4 * ((self._size + 2) // 3) + len(self._suffix)
         )
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -129,7 +160,7 @@ class _OcrRequestBody:
             view = memoryview(self._document)
             for start in range(0, self._size, _BASE64_BLOCK_BYTES):
                 yield base64.b64encode(view[start : start + _BASE64_BLOCK_BYTES])
-        yield _OCR_BODY_SUFFIX
+        yield self._suffix
 
     async def _file_blocks(self, path: Path) -> AsyncIterator[bytes]:
         # Reads exactly the size measured for Content-Length: a file that changed in
@@ -151,11 +182,8 @@ class _OcrRequestBody:
             )
 
 
-# One semaphore per event loop: an asyncio.Semaphore is bound to the loop that first
-# waits on it, and callers such as Celery workers run asyncio.run() once per task.
-_ocr_semaphores: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]
-] = weakref.WeakKeyDictionary()
+# One semaphore per event loop (see utils/loop_semaphore.py).
+_ocr_semaphores = LoopSemaphore()
 
 
 def _get_ocr_semaphore(limit: int) -> asyncio.Semaphore:
@@ -164,12 +192,42 @@ def _get_ocr_semaphore(limit: int) -> asyncio.Semaphore:
     A different *limit* (``configure(mistral_ocr_concurrency=N)`` between runs)
     replaces it for the conversions that start afterwards.
     """
-    loop = asyncio.get_running_loop()
-    entry = _ocr_semaphores.get(loop)
-    if entry is None or entry[0] != limit:
-        entry = (limit, asyncio.Semaphore(limit))
-        _ocr_semaphores[loop] = entry
-    return entry[1]
+    return _ocr_semaphores.get(limit)
+
+
+def _split_data_url(value: str) -> tuple[str, str]:
+    """``data:image/jpeg;base64,XXXX`` → ``("image/jpeg", "XXXX")``; plain base64 → PNG."""
+    if value.startswith("data:"):
+        header, sep, payload = value.partition(",")
+        if sep:
+            media_type = header[5:].split(";", 1)[0] or "image/png"
+            return media_type, payload
+    return "image/png", value
+
+
+def _bbox_side(img: dict, start_key: str, end_key: str) -> int | None:
+    """Side of the image bounding box (rendered page pixels), when the response has it."""
+    start, end = img.get(start_key), img.get(end_key)
+    if isinstance(start, int | float) and isinstance(end, int | float) and end > start:
+        return int(end - start)
+    return None
+
+
+class _EnrichmentRun:
+    """Embedded-image enrichment across the chunks of one PDF."""
+
+    def __init__(self) -> None:
+        from scinr.newton.converters.enrichment import EnrichmentState
+
+        self._state = EnrichmentState()
+        self.missing: list[tuple[int, int]] | None = None
+
+    async def enrich(self, pages: list[IntermediatePage]) -> None:
+        from scinr.newton.converters.enrichment import enrich_pages
+
+        missing = await enrich_pages(pages, self._state)
+        if missing:
+            self.missing = (self.missing or []) + missing
 
 
 class PdfConverter(BaseConverter):
@@ -323,17 +381,30 @@ class PdfConverter(BaseConverter):
         # Only the size and the page index are read here — never the whole file.
         size_bytes, total_pages_original = probe_pdf(source)
 
-        must_split = (
-            size_bytes > limits.safe_max_bytes or total_pages_original > limits.safe_max_pages
+        # With images the response is far heavier than text only: smaller chunks.
+        max_pages = (
+            min(limits.safe_max_pages, limits.image_max_pages)
+            if limits.include_images
+            else limits.safe_max_pages
         )
+        must_split = size_bytes > limits.safe_max_bytes or total_pages_original > max_pages
+
+        # One state for the whole document: an image repeated across chunks
+        # (a logo on every page) is described once.
+        enrichment = _EnrichmentRun() if limits.include_images else None
 
         if not must_split:
             # Within the API limits (<= safe_max_bytes): streamed from disk as is.
             pages = await self._convert_chunk(
-                source, api_key, source.name, page_offset=0, limits=limits
+                source, api_key, source.name, page_offset=0, limits=limits,
+                page_count=total_pages_original,
             )
+            if enrichment is not None:
+                await enrichment.enrich(pages)
             logger.info("Converted %d page(s) from %s", len(pages), source.name)
-            return IntermediateDocument(pages=pages)
+            return IntermediateDocument(
+                pages=pages, missing_images=enrichment.missing if enrichment else None
+            )
 
         logger.info(
             "PDF %s excede los límites seguros (%d páginas, %d bytes); se procesará por "
@@ -349,9 +420,7 @@ class PdfConverter(BaseConverter):
         # PdfSplitError (ya es una ConversionError) se deja propagar tal cual desde
         # el generador; puede aparecer tras haber enviado chunks anteriores.
         for i, chunk in enumerate(
-            iter_pdf_chunks(
-                source, limits.safe_max_pages, limits.safe_max_bytes, source_name=source.name
-            ),
+            iter_pdf_chunks(source, max_pages, limits.safe_max_bytes, source_name=source.name),
             start=1,
         ):
             start_page, end_page = chunk.start_page, chunk.end_page
@@ -373,6 +442,7 @@ class PdfConverter(BaseConverter):
                     page_offset=start_page,
                     limits=limits,
                     error_label=etiqueta,
+                    page_count=chunk.page_count,
                 )
             except ConversionError as exc:
                 if limits.error_strategy == "best_effort":
@@ -392,11 +462,17 @@ class PdfConverter(BaseConverter):
             finally:
                 # Drop the chunk before the generator serialises the next one.
                 del chunk
+            # Outside the try: an image failure (fail_fast) is not a chunk failure.
+            # The chunk's images are described and released before the next chunk.
+            if enrichment is not None:
+                await enrichment.enrich(paginas_chunk)
             all_pages.extend(paginas_chunk)
+            del paginas_chunk
 
+        missing_images = enrichment.missing if enrichment else None
         if not missing_page_ranges:
             logger.info("Converted %d page(s) from %s", len(all_pages), source.name)
-            return IntermediateDocument(pages=all_pages)
+            return IntermediateDocument(pages=all_pages, missing_images=missing_images)
 
         missing_count = sum(end - start for start, end in missing_page_ranges)
         logger.warning(
@@ -406,7 +482,11 @@ class PdfConverter(BaseConverter):
             len(missing_page_ranges),
             missing_page_ranges,
         )
-        return IntermediateDocument(pages=all_pages, missing_page_ranges=missing_page_ranges)
+        return IntermediateDocument(
+            pages=all_pages,
+            missing_page_ranges=missing_page_ranges,
+            missing_images=missing_images,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -478,6 +558,9 @@ class PdfConverter(BaseConverter):
                 f"Valores válidos: 'fail_fast', 'best_effort'."
             )
 
+        from scinr.newton.config import embedded_images_enabled
+
+        include_images = embedded_images_enabled()
         return _OcrLimits(
             safe_max_pages=safe_max_pages,
             safe_max_bytes=safe_max_bytes,
@@ -485,6 +568,10 @@ class PdfConverter(BaseConverter):
             retry_backoff_seconds=retry_backoff_seconds,
             error_strategy=error_strategy,
             concurrency=concurrency,
+            include_images=include_images,
+            image_max_pages=getattr(cfg, "mistral_ocr_image_max_pages", 50),
+            image_min_size=getattr(cfg, "image_min_side_px", 0),
+            max_images_per_page=getattr(cfg, "max_images_per_page", 10),
         )
 
     async def _convert_chunk(
@@ -495,6 +582,7 @@ class PdfConverter(BaseConverter):
         page_offset: int,
         limits: _OcrLimits,
         error_label: str | None = None,
+        page_count: int = 1,
     ) -> list[IntermediatePage]:
         """Envía un chunk de PDF a Mistral OCR y mapea su respuesta.
 
@@ -521,12 +609,14 @@ class PdfConverter(BaseConverter):
             funcionalidad: ``"Mistral OCR API returned HTTP {status}: {text}"``.
             Cuando se pasa (caso con split), el mensaje incluye la
             etiqueta del chunk para trazabilidad.
+        page_count:
+            Páginas del chunk; acota ``image_limit`` cuando se piden imágenes.
 
         Returns
         -------
         list[IntermediatePage]
         """
-        body = _OcrRequestBody(document)
+        body = _OcrRequestBody(document, limits.image_options(page_count))
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -540,14 +630,52 @@ class PdfConverter(BaseConverter):
             body, headers, limits, chunk_label, error_label=error_label
         )
 
+        if isinstance(data, bytes | bytearray):
+            # Parsed page by page from the raw body: neither the decoded text nor
+            # the whole parsed tree of a response with images is ever built.
+            pages = self._map_pages_streamed(data, page_offset)
+            del data
+            return pages
+
         if "pages" not in data:
             raise ConversionError(
                 f"Unexpected Mistral OCR API response (no 'pages' key): {data}"
             )
 
-        return [
+        pages = [
             self._map_page(page_data, index_offset=page_offset) for page_data in data["pages"]
         ]
+        # The response (with its images) is not kept beyond the mapping.
+        del data
+        return pages
+
+    def _map_pages_streamed(self, body: bytes, page_offset: int) -> list[IntermediatePage]:
+        """Map the ``pages`` of a raw OCR response body one page at a time (ijson)."""
+        import io
+
+        import ijson
+
+        pages: list[IntermediatePage] = []
+        try:
+            for page_data in ijson.items(io.BytesIO(body), "pages.item", use_float=True):
+                pages.append(self._map_page(page_data, index_offset=page_offset))
+        except ijson.JSONError as exc:
+            raise ConversionError(
+                f"Cannot parse Mistral OCR API response as JSON: {exc}"
+            ) from exc
+        if not pages:
+            # Small body: an empty page list or an unexpected shape.
+            try:
+                parsed = json.loads(body)
+            except ValueError as exc:
+                raise ConversionError(
+                    f"Cannot parse Mistral OCR API response as JSON: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict) or "pages" not in parsed:
+                raise ConversionError(
+                    f"Unexpected Mistral OCR API response (no 'pages' key): {parsed}"
+                )
+        return pages
 
     async def _post_to_mistral_with_retry(
         self,
@@ -556,7 +684,7 @@ class PdfConverter(BaseConverter):
         limits: _OcrLimits,
         chunk_label: str,
         error_label: str | None = None,
-    ) -> dict:
+    ) -> bytes | dict:
         """Ejecuta el POST a Mistral OCR con reintento/backoff exponencial
         ante errores de red o códigos HTTP reintentables.
 
@@ -578,8 +706,10 @@ class PdfConverter(BaseConverter):
 
         Returns
         -------
-        dict
-            Cuerpo JSON de la respuesta exitosa.
+        bytes | dict
+            Cuerpo de la respuesta exitosa: los bytes tal cual (se parsean página a
+            página en :meth:`_map_pages_streamed`) o, si la respuesta no los expone,
+            el JSON ya parseado.
 
         Raises
         ------
@@ -652,6 +782,10 @@ class PdfConverter(BaseConverter):
                     f"Mistral OCR API returned HTTP {response.status_code}: {response.text}"
                 )
 
+            content = getattr(response, "content", None)
+            if isinstance(content, bytes | bytearray):
+                # Raw body; parsed page by page by the caller.
+                return content
             try:
                 return response.json()
             except Exception as exc:
@@ -687,13 +821,16 @@ class PdfConverter(BaseConverter):
 
         # Map images
         images: list[PageImage] = []
-        for img_idx, img in enumerate(page_data.get("images", [])):
-            raw_b64 = img.get("image_base64") or ""
+        for img_idx, img in enumerate(page_data.get("images") or []):
+            media_type, raw_b64 = _split_data_url(img.get("image_base64") or "")
             images.append(
                 PageImage(
                     index=img_idx,
                     base64=raw_b64,
-                    media_type="image/png",
+                    media_type=media_type,
+                    ref=img.get("id") or None,
+                    width=_bbox_side(img, "top_left_x", "bottom_right_x"),
+                    height=_bbox_side(img, "top_left_y", "bottom_right_y"),
                 )
             )
 

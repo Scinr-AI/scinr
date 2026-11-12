@@ -14,6 +14,7 @@ from _navigation_fakes import make_fake_llm  # noqa: E402
 
 from scinr.newton.config import configure  # noqa: E402
 from scinr.newton.exceptions import StorageError  # noqa: E402
+from scinr.newton.models.transcript import TranscriptCue  # noqa: E402
 from scinr.newton.navigation.models import DocumentRef, StructureNodeRef  # noqa: E402
 from scinr.newton.navigation.pages import get_structure_nodes_source_pages  # noqa: E402
 from scinr.newton.storage.models import ConvertedPageRecord  # noqa: E402
@@ -49,6 +50,17 @@ def _page(pid: str, idx: int) -> ConvertedPageRecord:
     return ConvertedPageRecord(
         id=pid, raw_file_id="rf", filename="f", folder_path="a/b", page_index=idx,
         markdown=f"# page {idx}", converted_at=datetime.now(UTC),
+    )
+
+
+def _page_with_transcript(pid: str, idx: int) -> ConvertedPageRecord:
+    return ConvertedPageRecord(
+        id=pid, raw_file_id="rf", filename="f", folder_path="a/b", page_index=idx,
+        markdown=f"# page {idx}", converted_at=datetime.now(UTC),
+        transcript=[
+            TranscriptCue(start_ms=0, end_ms=5_000, text="Hello World from Audio"),
+            TranscriptCue(start_ms=5_000, end_ms=10_000, text="Second   Sentence Here"),
+        ],
     )
 
 
@@ -421,3 +433,279 @@ async def test_describe_node_reads_source_text_from_the_resolved_node(
     assert [p.page_id for p in desc.source_text] == ["p1"]
     assert len(lookups) == 1
     repo.get_pages_by_ids.assert_awaited_once_with(["p1"], tenant_id="acme")
+
+
+# ---------------------------------------------------------------------------
+# WP6: transcript cues arrive in PageText and find_in_transcript
+# ---------------------------------------------------------------------------
+
+
+def test_page_text_carries_the_transcript() -> None:
+    from scinr.newton.navigation.pages import _page_text
+
+    page = _page_text(_page_with_transcript("p1", 0))
+    assert page.transcript is not None
+    assert [(c.start_ms, c.end_ms, c.text) for c in page.transcript] == [
+        (0, 5_000, "Hello World from Audio"),
+        (5_000, 10_000, "Second   Sentence Here"),
+    ]
+
+
+def test_page_text_transcript_none_when_absent() -> None:
+    from scinr.newton.navigation.pages import _page_text
+
+    page = _page_text(_page("p1", 0))
+    assert page.transcript is None
+
+
+def test_find_in_transcript_matches_case_and_whitespace() -> None:
+    from scinr.newton.navigation.pages import _page_text
+
+    page = _page_text(_page_with_transcript("p1", 0))
+    assert page.transcript is not None
+    assert page.find_in_transcript("hello world") == [page.transcript[0]]
+    assert page.find_in_transcript("SECOND SENTENCE") == [page.transcript[1]]
+    assert page.find_in_transcript("from audio") == [page.transcript[0]]
+    assert page.find_in_transcript("not here") == []
+    assert page.find_in_transcript("") == []
+
+
+def test_find_in_transcript_none_when_no_transcript() -> None:
+    from scinr.newton.navigation.pages import _page_text
+
+    page = _page_text(_page("p1", 0))
+    assert page.find_in_transcript("hello") == []
+
+
+# ---------------------------------------------------------------------------
+# WP8 (0.5.0): stored images — include_images, get_document_images, get_page_image
+# ---------------------------------------------------------------------------
+
+
+def _image_record(raw_file_id: str, page_index: int, image_index: int, kind: str = "embedded"):
+    from scinr.newton.storage.models import PageImageRecord
+
+    return PageImageRecord(
+        id=f"img-{raw_file_id}-{page_index}-{image_index}", raw_file_id=raw_file_id,
+        page_index=page_index, image_index=image_index, kind=kind,
+        content_type="image/png", size_bytes=3, checksum_sha256="x",
+        time_ms=1_000 if kind == "frame" else None,
+        description=f"desc {page_index}.{image_index}", filename="f",
+        folder_path=None, stored_at=datetime.now(UTC), tenant_id="acme",
+    )
+
+
+class _ImageRepo:
+    """Raw-file repository with stored images: records every image call."""
+
+    def __init__(self, records=()) -> None:
+        self.records = list(records)
+        self.calls: list[tuple] = []
+
+    async def list_images(self, raw_file_id, *, page_indexes=None, kind=None, **scope):
+        self.calls.append(("list_images", raw_file_id, page_indexes, kind, scope))
+        return sorted(
+            (
+                r for r in self.records
+                if r.raw_file_id == raw_file_id
+                and (page_indexes is None or r.page_index in page_indexes)
+                and (kind is None or r.kind == kind)
+            ),
+            key=lambda r: (r.page_index, r.image_index),
+        )
+
+    async def open_image(self, image_id, **scope):
+        self.calls.append(("open_image", image_id, scope))
+        record = next((r for r in self.records if r.id == image_id), None)
+        if record is None or scope.get("tenant_id") not in (None, record.tenant_id):
+            return None
+
+        async def _chunks():
+            yield b"pn"
+            yield b"g"
+
+        return record, _chunks()
+
+
+def _page_of(pid: str, idx: int, raw_file_id: str) -> ConvertedPageRecord:
+    return ConvertedPageRecord(
+        id=pid, raw_file_id=raw_file_id, filename="f", folder_path=None, page_index=idx,
+        markdown=f"# page {idx}", converted_at=datetime.now(UTC),
+    )
+
+
+async def test_include_images_reads_once_per_tenant_and_raw_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages of two uploads of the same tenant: one list_images per
+    (tenant, raw_file_id), only for the page indexes read, in the node's tenant."""
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    page_repo = AsyncMock()
+    page_repo.get_pages_by_ids = AsyncMock(
+        return_value=[_page_of("p1", 0, "rfA"), _page_of("p2", 3, "rfA"), _page_of("q1", 1, "rfB")]
+    )
+    images = _ImageRepo(
+        [_image_record("rfA", 0, 1), _image_record("rfA", 0, 0), _image_record("rfB", 1, 0)]
+    )
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, page_repo))
+
+    out = await get_structure_nodes_source_pages(
+        _Nav(_node(["p1", "p2", "q1"])), ["i"], include_images=True
+    )
+
+    assert [ref.image_index for ref in out.pages["p1"].images] == [0, 1]
+    assert out.pages["p1"].images[0].description == "desc 0.0"
+    assert out.pages["p2"].images == []  # requested, none stored
+    assert [ref.image_id for ref in out.pages["q1"].images] == ["img-rfB-1-0"]
+    calls = sorted(images.calls, key=lambda c: c[1])
+    assert calls == [
+        ("list_images", "rfA", [0, 3], None, {"tenant_id": "acme"}),
+        ("list_images", "rfB", [1], None, {"tenant_id": "acme"}),
+    ]
+
+
+async def test_include_images_false_never_touches_image_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    page_repo = AsyncMock()
+    page_repo.get_pages_by_ids = AsyncMock(return_value=[_page_of("p1", 0, "rfA")])
+    images = _ImageRepo([_image_record("rfA", 0, 0)])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, page_repo))
+
+    out = await get_structure_nodes_source_pages(_Nav(_node(["p1"])), ["i"])
+
+    assert out.pages["p1"].images is None
+    assert images.calls == []
+
+
+async def test_document_source_text_include_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scinr.newton.navigation.pages import get_document_source_text
+
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    page_repo = AsyncMock()
+    page_repo.get_pages = AsyncMock(return_value=[_page_of("p2", 1, "rf"), _page_of("p1", 0, "rf")])
+    images = _ImageRepo([_image_record("rf", 1, 0, kind="frame")])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, page_repo))
+
+    out = await get_document_source_text(_DocNav(_doc_ref("acme")), "d", include_images=True)
+
+    assert [p.page_id for p in out] == ["p1", "p2"]
+    assert out[0].images == []
+    assert out[1].images[0].kind == "frame" and out[1].images[0].time_ms == 1_000
+    assert images.calls == [("list_images", "rf", [0, 1], None, {"tenant_id": "acme"})]
+
+
+async def test_info_unit_source_text_include_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    page_repo = AsyncMock()
+    page_repo.get_pages_by_ids = AsyncMock(return_value=[_page_of("p1", 0, "rf")])
+    images = _ImageRepo([_image_record("rf", 0, 0)])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, page_repo))
+    nav = _RecordingNav(_node(["p1"]), None)
+
+    out = await nav.get_info_unit_source_text("u", include_images=True, tenant_id="acme")
+
+    assert [ref.image_id for ref in out[0].images] == ["img-rf-0-0"]
+
+
+async def test_get_document_images_reads_in_the_documents_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scinr.newton.navigation import PageImageRef
+    from scinr.newton.navigation.pages import get_document_images
+
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    images = _ImageRepo(
+        [_image_record("rf", 2, 0), _image_record("rf", 0, 0, kind="frame")]
+    )
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, AsyncMock()))
+    nav = _DocNav(_doc_ref("acme"))
+
+    refs = await get_document_images(nav, "d", tenant_id="acme", include_public=True)
+
+    assert all(isinstance(r, PageImageRef) for r in refs)
+    assert [(r.page_index, r.kind) for r in refs] == [(0, "frame"), (2, "embedded")]
+    assert images.calls[-1] == ("list_images", "rf", None, None, {"tenant_id": "acme"})
+
+    frames = await get_document_images(nav, "d", kind="frame", page_indexes=[0])
+    assert [r.image_id for r in frames] == ["img-rf-0-0"]
+    assert images.calls[-1] == ("list_images", "rf", [0], "frame", {"tenant_id": "acme"})
+
+
+async def test_get_document_images_out_of_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not found in the scope (or no raw_file_id) → []; a DocumentRef of
+    another tenant → NavigationError, as for the page functions."""
+    from scinr.newton.exceptions import NavigationError
+    from scinr.newton.navigation.pages import get_document_images
+
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    images = _ImageRepo([_image_record("rf", 0, 0)])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, AsyncMock()))
+
+    assert await get_document_images(_DocNav(None), "d", tenant_id="acme") == []
+    assert await get_document_images(_DocNav(_doc_ref("acme", raw_file_id="")), "d") == []
+    assert images.calls == []
+    with pytest.raises(NavigationError):
+        await get_document_images(_DocNav(_doc_ref("globex")), _doc_ref("globex"), tenant_id="acme")
+
+
+async def test_get_page_image_applies_the_full_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scinr.newton.navigation import PageImageFile
+    from scinr.newton.navigation.pages import get_page_image
+
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    images = _ImageRepo([_image_record("rf", 0, 0)])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, AsyncMock()))
+
+    image = await get_page_image(
+        object(), "img-rf-0-0", tenant_id="acme", include_public=True,
+        created_by_user_id="u1", job_id=["j1", "j2"],
+    )
+
+    assert isinstance(image, PageImageFile)
+    assert image.image_id == "img-rf-0-0" and image.content_type == "image/png"
+    assert await image.read() == b"png"
+    assert images.calls == [(
+        "open_image", "img-rf-0-0",
+        {"tenant_id": "acme", "include_public": True, "created_by_user_id": "u1",
+         "job_id": ["j1", "j2"]},
+    )]
+    # another tenant (or a missing id) is None, not told apart
+    assert await get_page_image(object(), "img-rf-0-0", tenant_id="globex") is None
+    assert await get_page_image(object(), "nope", tenant_id="acme") is None
+
+
+async def test_scoped_navigator_fixes_the_scope_of_get_page_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scinr.newton.navigation import ScopedNavigator
+
+    configure(storage_backend="mongodb", mongodb_uri="mongodb://x", **_NEO)
+    images = _ImageRepo([_image_record("rf", 0, 0)])
+    monkeypatch.setattr("scinr.newton.storage.factory.get_storage", lambda: (images, AsyncMock()))
+
+    class _Inner(_RecordingNav):
+        from scinr.newton.navigation.base import GraphNavigator as _GN
+
+        get_page_image = _GN.get_page_image
+        get_document_images = _GN.get_document_images
+
+    acme = ScopedNavigator(_Inner(None, _doc_ref("acme")), tenant_id="acme", job_id="j1")
+
+    assert await acme.get_page_image("img-rf-0-0") is not None
+    assert images.calls[-1][2] == {
+        "tenant_id": "acme", "include_public": False, "created_by_user_id": None, "job_id": "j1",
+    }
+    await acme.get_document_images("d")
+    assert images.calls[-1] == ("list_images", "rf", None, None, {"tenant_id": "acme"})
+
+
+async def test_image_functions_need_storage() -> None:
+    from scinr.newton.navigation.pages import get_document_images, get_page_image
+
+    configure(storage_backend="none", **_NEO)
+    with pytest.raises(StorageError):
+        await get_page_image(object(), "img")
+    with pytest.raises(StorageError):
+        await get_document_images(_DocNav(_doc_ref("acme")), "d")

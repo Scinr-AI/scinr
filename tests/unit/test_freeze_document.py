@@ -335,6 +335,12 @@ class TestExportSnapshot:
         assert mi["labels"] == ["ModelInstance", "Product"]
         assert not any(n["labels"][0] == "CatalogModel" for n in nodes)
 
+    async def test_file_metadata_properties_travel_in_the_snapshot(self, env):
+        env(_graph(file_duration_ms=60_000, file_container="mp3", file_width=None))
+        snap = await export_document_snapshot("a.pdf", 1, tenant_id="acme")
+        props = snap["documents"][0]["document"]
+        assert props["file_duration_ms"] == 60_000 and props["file_container"] == "mp3"
+
     async def test_links_to_other_documents_are_kept(self, env):
         driver = _graph(job_id="j1", created_by_user_id="u1")
         folder = _node(["Document"], path="folder", version=1, tenant_id="acme")

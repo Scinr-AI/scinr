@@ -14,13 +14,99 @@ from pathlib import Path
 
 from scinr.newton.exceptions import StorageError
 from scinr.newton.storage.base import PageRepository, RawFileRepository
-from scinr.newton.storage.models import ConvertedPageRecord, RawFileRecord
+from scinr.newton.storage.models import ConvertedPageRecord, PageImageRecord, RawFileRecord
 from scinr.newton.utils.scope import make_scope
 from scinr.newton.utils.tenancy import tenant_key
 
 
 class NullRawFileRepository(RawFileRepository):
     """No-op implementation. All writes are silently discarded."""
+
+    @property
+    def stores_images(self) -> bool:
+        return False  # nothing is ever stored
+
+    async def store_image(
+        self,
+        raw_file_id: str,
+        page_index: int,
+        image_index: int,
+        content: bytes,
+        *,
+        kind: str,
+        content_type: str,
+        description: str,
+        filename: str,
+        folder_path: str | None,
+        width: int | None = None,
+        height: int | None = None,
+        time_ms: int | None = None,
+        tenant_id: str | None = None,
+        created_by_user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> str:
+        tenant_key(tenant_id)
+        return ""  # image_id empty string — documented no-storage sentinel
+
+    async def store_image_file(
+        self,
+        path: Path,
+        raw_file_id: str,
+        page_index: int,
+        image_index: int,
+        *,
+        kind: str,
+        content_type: str,
+        description: str,
+        filename: str,
+        folder_path: str | None,
+        width: int | None = None,
+        height: int | None = None,
+        time_ms: int | None = None,
+        tenant_id: str | None = None,
+        created_by_user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> str:
+        tenant_key(tenant_id)
+        return ""  # same sentinel as store_image(); never opens *path*
+
+    async def list_images(
+        self,
+        raw_file_id: str,
+        *,
+        page_indexes: Sequence[int] | None = None,
+        kind: str | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[PageImageRecord]:
+        make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        return []  # nothing is ever stored
+
+    async def open_image(
+        self,
+        image_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> tuple[PageImageRecord, AsyncIterator[bytes]] | None:
+        make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        return None  # nothing is ever stored
+
+    async def delete_images(
+        self,
+        raw_file_id: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> int:
+        make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        return 0  # no-op: nothing is ever stored, so nothing to delete
 
     async def store(
         self,
@@ -135,6 +221,9 @@ class NullPageRepository(PageRepository):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        transcript: list[dict] | None = None,
     ) -> str:
         tenant_key(tenant_id)
         return ""

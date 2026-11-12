@@ -17,6 +17,7 @@ from scinr.newton.progress import _NULL_EMITTER, _ProgressEmitter
 from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.tabular.agent import decide_content_type
 from scinr.newton.tabular.reader import SheetScan, scan_tabular_file
+from scinr.newton.utils.naming import source_document_name, tabular_doc_path
 from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
@@ -133,14 +134,7 @@ async def run_tabular_pipeline(
     )
 
     def _file_to_doc_path(f: Path) -> tuple[str, str]:
-        doc_name = f.stem
-        try:
-            rel = f.relative_to(input_path)
-            folder = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else ""
-        except ValueError:
-            folder = ""
-        doc_path = f"{folder}/{doc_name}" if folder else doc_name
-        return doc_name, doc_path
+        return source_document_name(f), tabular_doc_path(f, input_path)
 
     file_infos = [_file_to_doc_path(f) for f in tabular_files]
     all_doc_paths = list({dp for _, dp in file_infos})

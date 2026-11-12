@@ -2,13 +2,13 @@
 converters/pptx.py — Microsoft PowerPoint PPTX to Markdown converter.
 
 Each slide is rendered as a separate page.  Text frames are converted to
-Markdown (titles get a ``#`` prefix).  Images are extracted as base64-encoded
-``PageImage`` objects.  Tables are rendered as GFM Markdown tables.
+Markdown (titles get a ``#`` prefix).  Pictures become lazy ``PageImage``
+objects only when embedded images are described (``describe_embedded_images``
+with a ``vision_llm``).  Tables are rendered as GFM Markdown tables.
 """
 
 from __future__ import annotations
 
-import base64
 import io
 import logging
 from pathlib import Path
@@ -38,12 +38,12 @@ class PptxConverter(BaseConverter):
     """Convert ``.pptx`` files to the intermediate format.
 
     Each slide becomes a separate ``IntermediatePage``.  Text is extracted
-    from all text frames (title shapes get a ``#`` prefix).  Images are
-    base64-encoded and stored as ``PageImage`` objects.  Tables are
-    converted to GFM Markdown tables.
+    from all text frames (title shapes get a ``#`` prefix).  Pictures are
+    attached as lazy ``PageImage`` objects (no base64 until described) only
+    when embedded-image description is enabled; otherwise no image blob is
+    read.  Tables are converted to GFM Markdown tables.
 
-    Requires ``python-pptx`` and optionally ``Pillow`` for media-type
-    detection (falls back to ``image/png`` if Pillow is unavailable).
+    Requires ``python-pptx``.
     """
 
     supported_extensions: frozenset[str] = frozenset({"pptx"})
@@ -184,8 +184,34 @@ def _extract_slide_markdown(slide) -> str:  # type: ignore[no-untyped-def]
     return "\n\n".join(p for p in parts if p)
 
 
+def _iter_shapes(shapes):  # type: ignore[no-untyped-def]
+    """Yield *shapes* in order, descending into group shapes (at any depth)."""
+    for shape in shapes:
+        group_shapes = getattr(shape, "shapes", None) if _is_group(shape) else None
+        if group_shapes is not None:
+            yield from _iter_shapes(group_shapes)
+        else:
+            yield shape
+
+
+def _is_group(shape) -> bool:  # type: ignore[no-untyped-def]
+    try:
+        from pptx.enum.shapes import MSO_SHAPE_TYPE  # type: ignore[import-untyped]
+
+        return shape.shape_type == MSO_SHAPE_TYPE.GROUP
+    except (ImportError, AttributeError, NotImplementedError):
+        return False
+
+
 def _extract_slide_images(slide) -> list[PageImage]:  # type: ignore[no-untyped-def]
-    """Extract all images from a slide as ``PageImage`` objects.
+    """Extract the pictures of a slide as lazy ``PageImage`` objects.
+
+    Only when :func:`~scinr.newton.config.embedded_images_enabled` is ``True``
+    (``describe_embedded_images`` with a ``vision_llm``); otherwise no blob is
+    touched and the slide has no images. Each image keeps a loader over the
+    blob python-pptx already holds, so no base64 copy exists until the image
+    is described. No ``ref``: the description block goes at the end of the
+    slide.
 
     Parameters
     ----------
@@ -195,12 +221,17 @@ def _extract_slide_images(slide) -> list[PageImage]:  # type: ignore[no-untyped-
     Returns
     -------
     list[PageImage]
-        List of base64-encoded images extracted from the slide.
+        The slide's pictures, in shape order; the pictures inside a group
+        shape (at any depth) come at the group's position.
     """
+    from scinr.newton.config import embedded_images_enabled
+
+    if not embedded_images_enabled():
+        return []
     images: list[PageImage] = []
     img_idx = 0
 
-    for shape in slide.shapes:
+    for shape in _iter_shapes(slide.shapes):
         # Primary detection: check shape_type against MSO_SHAPE_TYPE.PICTURE
         is_picture = False
         try:
@@ -218,21 +249,19 @@ def _extract_slide_images(slide) -> list[PageImage]:  # type: ignore[no-untyped-
             continue
 
         try:
-            image_blob: bytes = shape.image.blob
-        except AttributeError:
+            image = shape.image
+        except (AttributeError, ValueError):
             logger.debug(
                 "Shape %r has no accessible image blob — skipping.", shape.name
             )
             continue
 
-        media_type = _detect_media_type(image_blob)
-        b64 = base64.b64encode(image_blob).decode("utf-8")
+        media_type = getattr(image, "content_type", None) or "image/png"
         images.append(
-            PageImage(
+            PageImage.with_loader(
+                lambda image=image: image.blob,
                 index=img_idx,
-                base64=b64,
                 media_type=media_type,
-                description="",
             )
         )
         img_idx += 1

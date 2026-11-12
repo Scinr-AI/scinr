@@ -18,7 +18,7 @@ class DocumentResult:
     """Result of processing a single document through a pipeline stage.
 
     Attributes:
-        document_name: The Neo4j document_name (or filename stem) of the processed document.
+        document_name: The Neo4j document_name of the processed document (the source file name with its extension, e.g. ``informe.pdf``, or the JSON file stem when the stage started from JSON files).
         nodes_processed: Number of nodes (or files) successfully processed within this document.
             For stages 0-2, this is 1 for success, 0 for failure.
             For stages 3-4, this is the number of StructureNodes processed.
@@ -26,12 +26,33 @@ class DocumentResult:
         nodes_failed: Number of nodes (or files) that failed processing within this document.
             For the tabular stage, the number of sheets with errors.
         errors: List of error messages for this document. Empty on full success.
+        missing_page_ranges: Preprocess only. Page ranges ``[start, end)`` of a PDF
+            skipped in best-effort mode (``mistral_ocr_error_strategy``). None when
+            nothing was skipped.
+        missing_segments: Preprocess only. Time ranges ``[start_ms, end_ms)`` of an
+            audio or video whose transcription was skipped in best-effort mode
+            (``media_error_strategy``). None when nothing was skipped.
+        missing_images: Preprocess only. Images ``(page_index, image_index)`` (embedded
+            images, video frames) that could not be described and were skipped in
+            best-effort mode. None when nothing was skipped.
+
+    A document with any of the three is ingested from the parts that were
+    converted: it counts as processed, not failed. See :attr:`has_omissions`
+    and :attr:`PipelineResult.documents_with_omissions`.
     """
 
     document_name: str
     nodes_processed: int
     nodes_failed: int
     errors: list[str] = field(default_factory=list)
+    missing_page_ranges: list[tuple[int, int]] | None = None
+    missing_segments: list[tuple[int, int]] | None = None
+    missing_images: list[tuple[int, int]] | None = None
+
+    @property
+    def has_omissions(self) -> bool:
+        """True when part of the document was skipped in best-effort mode."""
+        return bool(self.missing_page_ranges or self.missing_segments or self.missing_images)
 
     def __post_init__(self) -> None:
         # Error strings are built from driver exceptions and returned to API
@@ -82,6 +103,9 @@ class PipelineResult:
         annotation: StageResult for Stage 3, or None if the stage was not executed.
         entity_extraction: StageResult for Stage 4, or None if the stage was not executed.
         tabular: StageResult for the tabular pipeline, or None if not executed.
+
+    Documents converted only in part (best-effort mode) are listed by
+    :attr:`documents_with_omissions`; ``success`` does not change for them.
     """
 
     success: bool
@@ -93,6 +117,67 @@ class PipelineResult:
     annotation: StageResult | None = None
     entity_extraction: StageResult | None = None
     tabular: StageResult | None = None
+
+    @property
+    def documents_with_omissions(self) -> list[DocumentResult]:
+        """Preprocess results of the documents with parts skipped in best-effort mode."""
+        if self.preprocess is None:
+            return []
+        return [d for d in self.preprocess.documents if d.has_omissions]
+
+
+@dataclass
+class SkippedFile:
+    """A file under ``input_raw`` that the pipeline cannot interpret.
+
+    Attributes:
+        path: The file path.
+        reason: Why it is skipped, e.g. ``"unsupported format: .xyz"``.
+    """
+
+    path: str
+    reason: str
+
+
+@dataclass
+class DiscoveredDocuments:
+    """What run_pipeline() would do with every file under an ``input_raw``
+    folder, without converting or reading anything (see discover_documents()).
+
+    Attributes:
+        tabular: The ``doc_path`` each tabular file will get.
+        documents: The ``doc_path`` each convertible file will get.
+        skipped: The files the pipeline cannot interpret; they create nothing.
+    """
+
+    tabular: list[str]
+    documents: list[str]
+    skipped: list[SkippedFile]
+
+    @property
+    def count(self) -> int:
+        """The leaf :Document nodes the run can create, at most.
+
+        An upper bound: an unreadable or empty tabular file and a file that
+        fails before ingestion create no :Document. With ``update_mode=False``
+        a file whose ``doc_path`` already exists creates a new version.
+        """
+        return len(self.tabular) + len(self.documents)
+
+
+@dataclass
+class DeletedDocument:
+    """One :Document node deleted by delete_document().
+
+    Attributes:
+        path: The Document ``path`` (its ``doc_path``).
+        version: The Document version.
+        is_folder: True for a folder document, False for a leaf document.
+    """
+
+    path: str
+    version: int
+    is_folder: bool
 
 
 @dataclass
@@ -137,6 +222,16 @@ class DeletionResult:
             includes ids that were already absent, since delete() returns None either way.
         converted_pages_deleted: Number of ConvertedPageRecord (converted Markdown
             pages) deleted from the storage layer for the same raw_file_ids.
+        page_images_deleted: Number of PageImageRecord (stored images: embedded
+            images, video frames) deleted from the storage layer for the same
+            raw_file_ids. A backend that stores no images always reports 0.
+        documents: The :Document nodes the deletion worked on — the matched ones
+            and their ``IS_COMPOSED_OF*`` descendants, descendants first (the
+            order they are deleted in) — with their path, version and
+            ``is_folder``. Empty when found is False. A call that completes an
+            interrupted deletion only lists what was still there. Lets a caller
+            that keeps per-document counters outside the graph adjust them
+            without repeating the selection.
     """
 
     path: str | None
@@ -159,6 +254,8 @@ class DeletionResult:
     job_id: str | list[str] | tuple[str, ...] | None = None
     tenant_id: str | None = None
     created_by_user_id: str | list[str] | tuple[str, ...] | None = None
+    page_images_deleted: int = 0
+    documents: list[DeletedDocument] = field(default_factory=list)
 
 
 @dataclass

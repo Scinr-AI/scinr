@@ -337,7 +337,7 @@ You can skip stages by providing input from a later point in the pipeline:
 # Run only annotation and entity extraction on an already-ingested document
 result = await run_pipeline(
     stages=["annotation", "entity_extraction"],
-    document_names=["MyDocument"],
+    document_names=["MyDocument.pdf"],
 )
 ```
 
@@ -347,7 +347,7 @@ result = await run_pipeline(
 # Only process files matching a specific name pattern
 result = await run_pipeline(
     input_raw="./raw_docs",
-    document_names=["ClinicalTrialReport"],
+    document_names=["ClinicalTrialReport.pdf"],
 )
 ```
 

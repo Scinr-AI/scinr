@@ -61,6 +61,8 @@ Use the tabular pipeline when:
 
 ### 2.1 LangGraph StateGraph
 
+> **Names.** A tabular file's `:Document` name and `doc_path` keep the extension (`sub/ventas.csv`, `ventas.xlsx`), and each sheet's stored page is named `{file name}_{sheet}` (`ventas.xlsx_Hoja1`). Documents ingested before 0.5.0 keep their extension-less names.
+
 The tabular pipeline uses a LangGraph `StateGraph` that processes one file at a time, iterating over its sheets (CSV files have one sheet; XLSX files can have multiple):
 
 ```
