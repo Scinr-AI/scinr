@@ -109,6 +109,8 @@ def _page_text(record: Any) -> PageText:
         raw_file_id=record.raw_file_id,
         filename=record.filename,
         folder_path=record.folder_path,
+        start_ms=getattr(record, "start_ms", None),
+        end_ms=getattr(record, "end_ms", None),
     )
 
 
@@ -207,7 +209,7 @@ async def get_structure_nodes_source_pages(
     Example::
 
         result = await nav.get_structure_nodes_source_pages(
-            ["acme::report::v1::sec-1", "acme::report::v1::tbl-3"], tenant_id="acme"
+            ["acme::report.pdf::v1::sec-1", "acme::report.pdf::v1::tbl-3"], tenant_id="acme"
         )
         for entry in result.nodes:
             text = "\\n\\n".join(result.pages[p].markdown for p in entry.page_ids)
@@ -321,7 +323,7 @@ async def get_document_original(
     Example::
 
         original = await nav.get_document_original(
-            "folder/report", tenant_id="acme", include_public=True
+            "folder/report.pdf", tenant_id="acme", include_public=True
         )
         if original is not None:
             async for chunk in original.stream:

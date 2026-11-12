@@ -507,7 +507,14 @@ class Subgraph(_Base):
 
 
 class PageText(_Base):
-    """One converted source page, verbatim markdown."""
+    """One converted source page, verbatim markdown.
+
+    ``start_ms`` / ``end_ms`` are the time range ``[start_ms, end_ms)`` of the
+    page in the source medium for audio and video (one page per segment), so
+    a caller can play that segment from ``get_document_original``. ``None``
+    for documents without a time axis (PDF, DOCX, …) and for pages stored
+    before 0.5.0.
+    """
 
     page_id: str
     index: int | None = None
@@ -515,6 +522,8 @@ class PageText(_Base):
     raw_file_id: str | None = None
     filename: str | None = None
     folder_path: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
 
 
 class StructureNodeSourcePages(_Base):

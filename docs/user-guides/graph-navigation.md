@@ -575,11 +575,18 @@ other method they take the four scope filters.
 ```python
 result = await nav.get_structure_nodes_source_pages([id_a, id_b])  # StructureNodesSourcePages
 pages  = await nav.get_info_unit_source_text(uid)                  # list[PageText]
-pages  = await nav.get_document_source_text("Reports/annual", version=2)
+pages  = await nav.get_document_source_text("Reports/annual.pdf", version=2)
 ```
 
 A `PageText` carries `page_id`, `index`, `markdown`, and the `raw_file_id`,
-`filename` and `folder_path` of the upload it comes from. The functions are
+`filename` and `folder_path` of the upload it comes from. For audio and video
+(one page per segment) it also carries `start_ms` / `end_ms`, the time range
+`[start_ms, end_ms)` of the segment in the original file, so a caller can play
+it from `get_document_original()` (see
+[Multimodal Ingestion — Playing a segment](multimodal-ingestion.md#playing-a-segment));
+both are `None` for documents without a time axis and for pages stored before
+0.5.0. The `file_*` properties of an image, audio or video document (duration,
+codecs, size, capture time…) are in `DocumentRef.raw`. The functions are
 also available in `scinr.newton.navigation.pages`, taking the navigator as
 first argument (`get_structure_nodes_source_pages(nav, [id_a, id_b], ...)`).
 A node's page ids need no storage: read `source_page_ids` from
@@ -621,7 +628,7 @@ returns an `OriginalFile` — the stored `RawFileRecord` (`filename`,
 
 ```python
 acme = nav.scoped(tenant_id="acme", include_public=True)
-original = await acme.get_document_original("Reports/annual")
+original = await acme.get_document_original("Reports/annual.pdf")
 if original is not None:
     async for chunk in original.stream:                   # constant memory
         response.write(chunk)

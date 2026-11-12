@@ -25,6 +25,7 @@ from scinr.newton.exceptions import (
 from scinr.newton.ingest.deletion import collect_orphans, delete_document
 from scinr.newton.ingest.freeze import export_document_snapshot, freeze_document
 from scinr.newton.ingest.restore import restore_document
+from scinr.newton.media.transcriber import Transcriber, TranscriptSegment
 from scinr.newton.navigation import (
     GraphNavigator,
     get_graph_navigator,
@@ -58,7 +59,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 
 __all__ = [
     # Configuration
@@ -66,6 +67,9 @@ __all__ = [
     "get_config",
     "get_available_themes",
     "ThemePath",
+    # Media (audio / video transcription)
+    "Transcriber",
+    "TranscriptSegment",
     # Exceptions
     "ScinrError",
     "ConfigurationError",

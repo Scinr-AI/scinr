@@ -42,7 +42,14 @@ from scinr.newton.models.document_structure import (
     NodeRole,
     StructureNode,
 )
+from scinr.newton.models.file_metadata import FILE_METADATA_KEYS, FileMetadata
 from scinr.newton.utils.tenancy import tenant_key
+
+# ``d.file_<key> = $file_<key>`` for every FileMetadata key, built from the
+# constant (never from data).
+_FILE_METADATA_SET = ",\n".join(
+    f"            d.file_{key} = $file_{key}" for key in FILE_METADATA_KEYS
+) + "\n"
 
 logger = logging.getLogger(__name__)
 
@@ -206,17 +213,20 @@ def insert_document(
     tenant_id: str,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
+    file_metadata: FileMetadata | None = None,
 ) -> None:
     """MERGE a :Document node keyed by (tenant_id, path, version).
 
     Sets name, path, version, load_date, latest, is_folder,
-    context_instructions, tenant_id, created_by_user_id, and job_id.
+    context_instructions, tenant_id, created_by_user_id, job_id and one
+    ``file_<key>`` property per key of
+    :data:`~scinr.newton.models.file_metadata.FILE_METADATA_KEYS`.
     The 'latest' flag management (setting old version to latest=False and
     creating HAS_NEWER_VERSION) is handled separately by handle_versioning().
 
     Args:
         tx: An open Neo4j transaction.
-        document_name: Display name for the document (file stem or folder name).
+        document_name: Display name for the document (source file name with extension, or folder name).
         doc_path: Relative path from the pipeline input root (unique per document location).
         version: Integer version number.
         is_folder: True for folder-parent documents; False for leaf documents.
@@ -227,9 +237,15 @@ def insert_document(
             ingestion. Always written (stored as null when None).
         job_id: Optional caller-supplied ingestion job/run id. Always written
             (stored as null when None).
+        file_metadata: Metadata of the source file (images, audio, video). Every
+            ``file_*`` key is written on every ingestion, ``null`` included, so
+            ``update_mode`` never leaves stale values; the property names come
+            from the constant, never from data.
     """
     from datetime import datetime
     load_date = datetime.now(UTC).isoformat()
+    file_values = file_metadata.model_dump() if file_metadata is not None else {}
+    file_params = {f"file_{key}": file_values.get(key) for key in FILE_METADATA_KEYS}
 
     tx.run(
         """
@@ -241,8 +257,9 @@ def insert_document(
             d.context_instructions = $context_instructions,
             d.created_by_user_id   = $created_by_user_id,
             d.job_id               = $job_id,
-            d.latest               = true
-        """,
+            d.latest               = true,
+        """
+        + _FILE_METADATA_SET,
         path=doc_path,
         version=version,
         name=document_name,
@@ -253,6 +270,7 @@ def insert_document(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
         job_id=job_id,
+        **file_params,
     )
     logger.debug(
         "Merged Document node: tenant=%s path=%s version=%s", tenant_id, doc_path, version
@@ -707,6 +725,7 @@ def insert_document_graph(
         tenant_id=tenant,
         created_by_user_id=doc.created_by_user_id,
         job_id=doc.job_id,
+        file_metadata=doc.file_metadata,
     )
 
     # 4. Handle versioning (only for normal loads, not updates)

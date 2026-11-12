@@ -70,6 +70,7 @@ from scinr.newton.progress import (
     _validate_callbacks,
 )
 from scinr.newton.results import DocumentResult, PipelineResult, StageResult
+from scinr.newton.utils.naming import source_doc_path, source_document_name
 
 if TYPE_CHECKING:
     from scinr.newton.converters.base import IntermediateDocument
@@ -568,12 +569,14 @@ async def _run_pipeline_impl(
 
     def _build_result(success: bool) -> PipelineResult:
         total_dur = time.monotonic() - pipeline_t0
-        return PipelineResult(
+        result = PipelineResult(
             success=success,
             total_duration_seconds=total_dur,
             stages_executed=[sr.stage for sr in stage_results],
             **{k: v for k, v in pipeline_result_kwargs.items()},
         )
+        _log_omissions(result)
+        return result
 
     from scinr.newton.pipeline_units import _discover_raw_inputs
 
@@ -633,15 +636,14 @@ async def _run_pipeline_impl(
         input_root = Path(input_raw)
         for j, (skipped_file, reason) in enumerate(raw_inputs.skipped):
             relative_dir = skipped_file.parent.relative_to(input_root)
-            doc_path = (
-                f"{relative_dir}/{skipped_file.stem}"
-                if relative_dir != Path(".")
-                else skipped_file.stem
+            doc_path = source_doc_path(
+                skipped_file,
+                relative_dir.as_posix() if relative_dir != Path(".") else None,
             )
             skipped_fields = dict(
                 document_index=n_tabular + n_units + j,
                 doc_path=doc_path,
-                document_name=skipped_file.stem,
+                document_name=source_document_name(skipped_file),
                 source_path=str(skipped_file),
                 tenant_id=tenant_id,
             )
@@ -936,6 +938,24 @@ def _document_status(result: UnitResult) -> tuple[str, str | None]:
     return "success", None
 
 
+def _log_omissions(result: PipelineResult) -> None:
+    """One closing warning per document converted only in part (best-effort mode)."""
+    for doc in result.documents_with_omissions:
+        parts = []
+        if doc.missing_page_ranges:
+            parts.append(f"page ranges {doc.missing_page_ranges}")
+        if doc.missing_segments:
+            parts.append(f"time ranges (ms) {doc.missing_segments}")
+        if doc.missing_images:
+            parts.append(f"images (page, image) {doc.missing_images}")
+        logger.warning(
+            "%s was ingested without some parts that failed (best_effort): %s. "
+            "See PipelineResult.documents_with_omissions.",
+            doc.document_name,
+            "; ".join(parts),
+        )
+
+
 def _combine_stage_documents(current_name: str, documents: list[DocumentResult]) -> DocumentResult:
     """Flatten a ``StageResult.documents`` list into a single ``DocumentResult``
     for one document-unit's ``stage_results`` entry.
@@ -1201,7 +1221,9 @@ async def _process_document_unit(
                     return _finish(UnitResult(current_name, stage_results, None, None))
                 intermediate_doc = written[0][2]
                 del written  # only intermediate_doc is needed from here on
-                stage_results["preprocess"] = DocumentResult(unit.document_name_hint, 1, 0, [])
+                stage_results["preprocess"] = DocumentResult(
+                    unit.document_name_hint, 1, 0, [], **intermediate_doc.omissions()
+                )
                 _complete_stage(stage_results["preprocess"])
 
             # ── Stage: extraction ──────────────────────────────────────

@@ -1,6 +1,6 @@
 [project]
 name = "scinr"
-version = "0.4.6"
+version = "0.5.0"
 description = "AI-powered document knowledge library for life sciences — scinr.newton document ingestion engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,6 +33,9 @@ bedrock = ["langchain-aws>=0.2", "boto3>=1.34"]
 openai = ["langchain-openai>=0.2"]
 ollama = ["langchain-ollama>=0.1"]
 mongodb = ["motor>=3.3", "pymongo>=4.6"]
+# Local transcription (faster-whisper) and HEIC/HEIF images. ffmpeg / ffprobe are
+# system binaries required for audio and video; they are not installed by pip.
+media = ["faster-whisper>=1.0", "pillow-heif>=0.16"]
 docs = [
     "mkdocs-material==9.5.30",
     "mkdocstrings[python]==1.0.6",

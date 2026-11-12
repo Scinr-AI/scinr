@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Literal
 
 from scinr.newton.results import DocumentResult
+from scinr.newton.utils.naming import source_doc_path, source_document_name
 from scinr.newton.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -92,8 +93,9 @@ class DocumentUnit:
             the annotation / entity extraction stages use.
         relative_dir: Directory of *source_path* relative to the input root. ``Path(".")``
             for ``pre_ingested`` units (no filesystem source).
-        document_name_hint: Human-readable document name (typically a filename stem, without any
-            directory prefix).
+        document_name_hint: Human-readable document name, without any directory prefix: the
+            source file name with its extension for ``raw_file`` units (``informe.pdf``),
+            the JSON file stem for JSON units.
     """
 
     kind: Literal["raw_file", "extraction_json", "ingestion_json", "pre_ingested"]
@@ -243,7 +245,7 @@ def _discover_raw_inputs(
         # See stages/extraction.py::_process_file(): doc_path is folder_path
         # joined with the document's name once it reaches the extraction
         # stage — predicted here ahead of time for a not-yet-converted file.
-        doc_path = f"{folder_path_str}/{entry.stem}" if folder_path_str else entry.stem
+        doc_path = source_doc_path(entry, folder_path_str)
 
         units.append(
             DocumentUnit(
@@ -251,7 +253,7 @@ def _discover_raw_inputs(
                 source_path=entry,
                 doc_path=doc_path,
                 relative_dir=relative_dir,
-                document_name_hint=entry.stem,
+                document_name_hint=source_document_name(entry),
             )
         )
     return RawInputs(tabular=tabular, units=units, skipped=skipped)

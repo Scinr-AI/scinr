@@ -73,6 +73,28 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` | Maximum concurrent OCR chunk processing. |
 | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` | Error handling: `fail_fast` (abort on first error) or `best_effort` (continue and collect what is possible). |
 | `MISTRAL_OCR_CONCURRENCY` | `2` | Maximum PDFs in OCR conversion at the same time per event loop, whatever `parallel_docs` is. Bounds the memory of OCR. |
+| `MISTRAL_OCR_IMAGE_MAX_PAGES` | `50` | Pages per OCR chunk when the embedded images are requested (only with `describe_embedded_images` and a `vision_llm`): a response with images is far heavier than text only. The smaller of this and `MISTRAL_OCR_SAFE_MAX_PAGES` applies. |
+
+### Multimodal (images, audio, video)
+
+See [Multimodal Ingestion](user-guides/multimodal-ingestion.md). `vision_llm` and `transcriber` are objects, so they are set with `configure()` only.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `DESCRIBE_EMBEDDED_IMAGES` | `true` | Describe the embedded images of PDF, DOCX and PPTX. **Only acts with a `vision_llm` configured**; without one, nothing is requested from Mistral and no image blob is read. |
+| `MEDIA_ERROR_STRATEGY` | `best_effort` | A failed embedded image, audio/video segment or frame: `best_effort` skips it and records it in `missing_images` / `missing_segments`; `fail_fast` fails the document. |
+| `STRIP_LOCATION` | `true` | With `true` the GPS location of images is not read nor stored. |
+| `IMAGE_MAX_SIDE_PX` | `1568` | Longer side, in pixels, of the images sent to the `vision_llm` (downscaled before sending). |
+| `IMAGE_MIN_SIDE_PX` | `64` | Embedded images whose shorter side is below this are trivial (icons, separators) and are not described. |
+| `MAX_IMAGES_PER_PAGE` | `10` | Embedded images described per page; the largest are kept. |
+| `IMAGE_DECODE_CONCURRENCY` | `1` | Images read and decoded at once per event loop. The memory peak grows with it (a 12 MP photo is ~36 MB of pixels). Minimum `1`. |
+| `MEDIA_SEGMENT_SECONDS` | `300` | Length of each audio / video segment (one page per segment). Minimum `10`. |
+| `MEDIA_MIN_SEGMENT_SECONDS` | `10` | Minimum length of the last segment: a shorter tail moves the previous cut earlier. `0` disables it; at most half of `MEDIA_SEGMENT_SECONDS`. |
+| `MEDIA_LANGUAGE` | *(unset: auto-detect)* | Audio language, ISO 639-1 (`es`, `en`…). |
+| `MAX_MEDIA_DURATION_SECONDS` | `14400` (4 h) | Longest audio / video accepted; longer is a `ConversionError` before anything is spent. `none` = no limit. |
+| `VIDEO_FRAMES_PER_MINUTE` | `2.0` | Frames per minute described in videos (uniform sampling). `0` = transcription only. |
+| `MEDIA_CONCURRENCY` | `1` | Audio and video files in conversion at the same time per event loop, whatever `parallel_docs` is. |
+| `FFMPEG_PATH`, `FFPROBE_PATH` | *(unset: `PATH`)* | Paths to the `ffmpeg` / `ffprobe` system binaries, required for audio and video. |
 
 ### Pipeline
 
@@ -160,6 +182,33 @@ The same settings as the [PDF / Mistral OCR environment variables](#pdf-mistral-
 | `mistral_ocr_retry_backoff_seconds` | `float \| None` | Base backoff between retries (exponential, capped at 5 min). Default `2.0`. |
 | `mistral_ocr_chunk_concurrency` | `int \| None` | Concurrent OCR chunk tasks. Default `1`. |
 | `mistral_ocr_error_strategy` | `Literal["fail_fast", "best_effort"] \| None` | OCR error handling. Default `"fail_fast"`. |
+| `mistral_ocr_concurrency` | `int \| None` | PDFs in OCR conversion at the same time per event loop. Default `2`. |
+| `mistral_ocr_image_max_pages` | `int \| None` | Pages per chunk when the embedded images are requested. Default `50`. |
+
+### Multimodal Parameters
+
+The same settings as the [multimodal environment variables](#multimodal-images-audio-video), plus the two model objects. See [Multimodal Ingestion](user-guides/multimodal-ingestion.md).
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `vision_llm` | `BaseChatModel \| None` | Multimodal chat model (accepts images) that describes embedded images, image files and video frames. No `with_structured_output` needed. **Does not fall back to `llm`.** Default `None`. |
+| `transcriber` | `Transcriber \| None` | Speech-to-text for audio and video (`OpenAICompatibleTranscriber`, `FasterWhisperTranscriber` or your own). Default `None`. |
+| `describe_embedded_images` | `bool \| None` | Default `True` (acts only with `vision_llm`). |
+| `media_error_strategy` | `Literal["fail_fast", "best_effort"] \| None` | Default `"best_effort"`. |
+| `strip_location` | `bool \| None` | Default `True`. |
+| `image_max_side_px` | `int \| None` | Default `1568` (minimum `64`). |
+| `image_min_side_px` | `int \| None` | Default `64`. |
+| `max_images_per_page` | `int \| None` | Default `10`. |
+| `image_decode_concurrency` | `int \| None` | Default `1` (minimum `1`). |
+| `media_segment_seconds` | `int \| None` | Default `300` (minimum `10`). |
+| `media_min_segment_seconds` | `int \| None` | Default `10`, capped to half a segment when not given; `0` disables it. |
+| `media_language` | `str \| None` | ISO 639-1 code, or `None` to auto-detect. |
+| `max_media_duration_seconds` | `int \| None` | Default `14400`; pass `None` explicitly for no limit. |
+| `video_frames_per_minute` | `float \| None` | Default `2.0`; `0` = transcription only. |
+| `media_concurrency` | `int \| None` | Default `1`. |
+| `ffmpeg_path`, `ffprobe_path` | `str \| None` | Default: looked up in the `PATH`. |
+
+`configure()` does not check cross requirements: image, audio and video files are always accepted, and a missing `vision_llm`, `transcriber` or `ffmpeg` fails that document at conversion, with an error that says how to configure it. With `describe_embedded_images=True` and no `vision_llm`, `configure()` logs one `INFO` line saying embedded images will not be described.
 
 ### Pipeline Parameters
 
@@ -425,6 +474,24 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **OCR Backoff** | `mistral_ocr_retry_backoff_seconds` | `MISTRAL_OCR_RETRY_BACKOFF_SECONDS` | `2.0` |
 | **OCR Concurrency** | `mistral_ocr_chunk_concurrency` | `MISTRAL_OCR_CHUNK_CONCURRENCY` | `1` |
 | **OCR Error Strategy** | `mistral_ocr_error_strategy` | `MISTRAL_OCR_ERROR_STRATEGY` | `fail_fast` |
+| **OCR PDFs in Flight** | `mistral_ocr_concurrency` | `MISTRAL_OCR_CONCURRENCY` | `2` |
+| **OCR Pages per Chunk with Images** | `mistral_ocr_image_max_pages` | `MISTRAL_OCR_IMAGE_MAX_PAGES` | `50` |
+| **Vision LLM** | `vision_llm` | *(none)* | `None` (no fallback to `llm`) |
+| **Transcriber** | `transcriber` | *(none)* | `None` |
+| **Describe Embedded Images** | `describe_embedded_images` | `DESCRIBE_EMBEDDED_IMAGES` | `true` (only with `vision_llm`) |
+| **Media Error Strategy** | `media_error_strategy` | `MEDIA_ERROR_STRATEGY` | `best_effort` |
+| **Strip Location** | `strip_location` | `STRIP_LOCATION` | `true` |
+| **Image Max Side** | `image_max_side_px` | `IMAGE_MAX_SIDE_PX` | `1568` |
+| **Image Min Side** | `image_min_side_px` | `IMAGE_MIN_SIDE_PX` | `64` |
+| **Max Images per Page** | `max_images_per_page` | `MAX_IMAGES_PER_PAGE` | `10` |
+| **Image Decode Concurrency** | `image_decode_concurrency` | `IMAGE_DECODE_CONCURRENCY` | `1` |
+| **Media Segment** | `media_segment_seconds` | `MEDIA_SEGMENT_SECONDS` | `300` |
+| **Media Min Segment** | `media_min_segment_seconds` | `MEDIA_MIN_SEGMENT_SECONDS` | `10` |
+| **Media Language** | `media_language` | `MEDIA_LANGUAGE` | `None` (auto-detect) |
+| **Max Media Duration** | `max_media_duration_seconds` | `MAX_MEDIA_DURATION_SECONDS` | `14400` |
+| **Video Frames per Minute** | `video_frames_per_minute` | `VIDEO_FRAMES_PER_MINUTE` | `2.0` |
+| **Media Concurrency** | `media_concurrency` | `MEDIA_CONCURRENCY` | `1` |
+| **ffmpeg / ffprobe** | `ffmpeg_path`, `ffprobe_path` | `FFMPEG_PATH`, `FFPROBE_PATH` | `PATH` lookup |
 | **Prompt Caching** | `prompt_caching_enabled` | `PROMPT_CACHING_ENABLED` | `true` |
 | **Full Docstring** | `full_docstring` | `FULL_DOCSTRING` | `true` |
 | **Extraction Batch** | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | `1` |

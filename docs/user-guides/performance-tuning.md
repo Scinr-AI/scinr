@@ -436,7 +436,7 @@ Controls error handling during OCR processing.
 | Value | Behavior |
 | :--- | :--- |
 | `"fail_fast"` | Stops processing the document on first OCR error |
-| `"best_effort"` | Continues processing and collects whatever OCR results are available |
+| `"best_effort"` | Continues processing and collects whatever OCR results are available. If every chunk fails, the document still fails. The skipped ranges are reported in `PipelineResult.documents_with_omissions`. |
 
 For production pipelines processing many documents, `"best_effort"` is recommended to avoid a single OCR failure blocking the entire batch.
 
@@ -447,6 +447,42 @@ For production pipelines processing many documents, `"best_effort"` is recommend
 Maximum number of PDFs being converted by Mistral OCR at the same time, per event loop, from the moment a PDF is read until the response for its last chunk arrives. It applies on top of `parallel_docs`: with `parallel_docs=5` and the default `2`, at most two PDFs are in OCR while the other documents keep running their later stages.
 
 Each conversion holds at most one chunk (up to `mistral_ocr_safe_max_bytes`) and Mistral's response for it; the request body itself is streamed, so it needs a few MB whatever the size of the PDF. Lower it to `1` on memory-constrained workers; raise it when many small PDFs make OCR the bottleneck.
+
+### `mistral_ocr_image_max_pages`
+
+**Default:** `50`  **Env var:** `MISTRAL_OCR_IMAGE_MAX_PAGES`
+
+Pages per OCR chunk when the embedded images are requested (`describe_embedded_images` with a `vision_llm`). A response with images weighs far more than a text-only one (about 17 MiB for 50 pages with one ~250 KB image each). The response is parsed page by page, and each chunk's images are described and released before the next chunk is sent, so the extra peak is about one chunk's images. Lower it on memory-constrained workers or for image-heavy PDFs.
+
+---
+
+## Multimodal Ingestion
+
+See [Multimodal Ingestion](multimodal-ingestion.md). The peak depends on the size of one unit (an image, a segment, a chunk), never on the length of a medium or the number of images:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `media_concurrency` (`MEDIA_CONCURRENCY`) | `1` | Audio / video files in conversion at once per event loop, on top of `parallel_docs`. Each holds one temporary segment on disk; raise it when the transcriber or vision server has spare capacity. |
+| `llm_concurrency` | `4` | Also bounds the images and frames being described at once (same semaphore as the other LLM calls). Reading and decoding an image is not multiplied by it: decoding has its own limit (next row), and only the downscaled copies wait for the model. |
+| `image_decode_concurrency` | `1` | Images read and decoded at once per event loop. The peak grows with it: one 12 MP photo is about 36 MB of pixels while it is decoded. With a real model it does not change the speed, because decoding (~80 ms for a 6 MP PNG) overlaps the calls. Measured with 10 images of 6 MP on one page and `llm_concurrency=4`: 1 lane and 4 lanes both take 1.7 s at 0.5 s per call and 9.2 s at 3 s per call. Only a model that answers instantly makes 1 lane slower (0.8 s against 0.4 s). Raise it on machines with memory to spare and a fast local model. |
+| `image_max_side_px` | `1568` | Size of what is sent to the `vision_llm`: smaller is cheaper and lighter, larger keeps small text legible. |
+| `max_images_per_page`, `image_min_side_px` | `10`, `64` | How many embedded images are described: the main cost lever for image-heavy documents. |
+| `media_segment_seconds` | `300` | Page size of audio / video. Cloud transcription APIs cap the request size (~25 MB); a 5-minute mono 16 kHz FLAC stays well below it. |
+| `media_min_segment_seconds` | `10` | Minimum length of the last segment, so a medium never ends in a segment of a few milliseconds, which some providers reject. 300.05 s in 300 s segments gives 290 s + 10.05 s. |
+| `video_frames_per_minute` | `2.0` | Vision calls per minute of video; `0` for transcription only. |
+
+Measured with `scripts/memory_bench/bench_media.py` (tracemalloc, library only, simulated providers):
+
+| Case | Peak |
+| --- | --- |
+| 300-page PDF, text only / with one image per page described | 1.9 / 23.9 MiB |
+| DOCX with 20 / 100 images, extra cost of describing them | +3.0 / +4.1 MiB |
+| PPTX with 20 / 100 images, extra cost of describing them | +3.7 / +3.7 MiB |
+| Audio of 30 min / 2 h | 1.5 / 1.5 MiB |
+| Video of 7.8 MB / 363 MB | 5.2 / 5.7 MiB |
+| 8 audios with `parallel_docs=4` | 1.4 MiB, one conversion in flight |
+
+Run inference out of the workers for bulk ingestion: a shared GPU server (Ollama, vLLM, a self-hosted Whisper server) or a cloud API. A local vision model needs gigabytes of RAM and is slow on CPU.
 
 ---
 

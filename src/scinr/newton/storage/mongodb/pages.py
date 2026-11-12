@@ -41,6 +41,9 @@ def _to_record(doc: dict) -> ConvertedPageRecord:
         tenant_id=doc.get("tenant_id"),
         created_by_user_id=doc.get("created_by_user_id"),
         job_id=doc.get("job_id"),
+        # Records written before 0.5.0 have neither field.
+        start_ms=doc.get("start_ms"),
+        end_ms=doc.get("end_ms"),
     )
 
 
@@ -63,6 +66,8 @@ class MongoDBPageRepository(PageRepository):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> str:
         """Persist a single converted page in MongoDB.
 
@@ -71,7 +76,7 @@ class MongoDBPageRepository(PageRepository):
         raw_file_id:
             ID of the parent :class:`~storage.models.RawFileRecord`.
         filename:
-            Stem of the source file without extension, e.g. ``"3.2.P.1"``.
+            Name of the source file with its extension, e.g. ``"3.2.P.1.pdf"``.
         folder_path:
             Relative path of the containing folder, or ``None``.
         page_index:
@@ -83,6 +88,9 @@ class MongoDBPageRepository(PageRepository):
             :func:`~scinr.newton.utils.tenancy.tenant_key`.
         created_by_user_id, job_id:
             Provenance of the upload, stored verbatim.
+        start_ms, end_ms:
+            Time range ``[start_ms, end_ms)`` of the page in the source medium
+            (audio / video segments), or ``None``.
 
         Returns
         -------
@@ -102,6 +110,8 @@ class MongoDBPageRepository(PageRepository):
             "tenant_id": tenant_key(tenant_id),
             "created_by_user_id": created_by_user_id,
             "job_id": job_id,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
         }
         result = await db[cfg.mongodb_pages_collection].insert_one(doc)
         page_id = str(result.inserted_id)

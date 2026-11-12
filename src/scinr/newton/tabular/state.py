@@ -31,7 +31,7 @@ class TabularState(TypedDict):
 
     # Input (set once before graph runs)
     file_path: str                  # absolute path to the source CSV/XLSX file
-    document_name: str              # display name (file stem)
+    document_name: str              # display name (file name with extension)
     doc_path: str                   # relative path for Neo4j Document key
     tenant_id: str                  # stored tenant key (utils.tenancy.tenant_key applied) — part of the Document key
     created_by_user_id: str | None  # provenance of the upload (stored raw file / pages); None when omitted

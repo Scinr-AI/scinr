@@ -44,9 +44,11 @@ from scinr.newton.converters.base import (
     BaseConverter,
     ConversionError,
     IntermediateDocument,
+    IntermediatePage,
     UnsupportedFormatError,
 )
 from scinr.newton.converters.registry import get_converter
+from scinr.newton.utils.naming import source_document_name
 from scinr.newton.utils.redaction import redact_uri
 
 # ---------------------------------------------------------------------------
@@ -67,7 +69,8 @@ def _guess_content_type(path: Path) -> str:
 
 
 async def _run_convert(converter: BaseConverter, source: Path) -> IntermediateDocument:
-    """Run converter.convert(source) respecting its sync/async contract.
+    """Run converter.convert(source) respecting its sync/async contract, then
+    describe its embedded images (see :func:`_enrich_document`).
 
     Async converters (converter.is_async is True, e.g. PdfConverter) are
     awaited directly on the event loop — their blocking work is genuine
@@ -78,8 +81,94 @@ async def _run_convert(converter: BaseConverter, source: Path) -> IntermediateDo
     concurrently.
     """
     if getattr(converter, "is_async", False):
-        return await converter.convert(source)
-    return await asyncio.to_thread(converter.convert, source)
+        doc = await converter.convert(source)
+    else:
+        doc = await asyncio.to_thread(converter.convert, source)
+    # Embedded-image enrichment runs right after conversion, before the pages
+    # are stored and the JSON written, on every conversion path.
+    await _enrich_document(doc)
+    _require_content(doc, source)
+    return doc
+
+
+def _require_content(doc: IntermediateDocument, source: Path) -> None:
+    """Fail a document whose every part was skipped in best-effort mode.
+
+    ``best_effort`` (``mistral_ocr_error_strategy``, ``media_error_strategy``)
+    skips the parts that fail and keeps the rest. When nothing is left — no
+    page with text — and something was skipped, the document is not a partial
+    success but a failure (typically a provider that rejects every request:
+    a wrong API key, a model that does not exist), and it must be reported as
+    one instead of producing no ``:Document`` without an error.
+
+    A document that is simply empty (a silent audio, a blank page) and had no
+    failures is not affected.
+    """
+    if any(page.markdown.strip() for page in doc.pages):
+        return
+    skipped = doc.omissions()
+    if not skipped:
+        return
+    detail = "; ".join(f"{name}={value}" for name, value in skipped.items())
+    raise ConversionError(
+        f"Nothing could be converted from {source.name}: every part failed and was "
+        f"skipped in best-effort mode ({detail}). See the warnings logged for each part."
+    )
+
+
+async def _enrich_document(doc: IntermediateDocument) -> None:
+    """Describe the document's embedded images (``describe_embedded_images``).
+
+    No-op unless :func:`~scinr.newton.config.embedded_images_enabled` is
+    ``True``: without a ``vision_llm`` the images of any converter (an
+    external one included) stay as they come. The PDF converter already
+    enriches chunk by chunk, so for PDFs this finds nothing left to do.
+    """
+    from scinr.newton.config import embedded_images_enabled
+
+    if not embedded_images_enabled():
+        return
+    from scinr.newton.converters.enrichment import EnrichmentState, enrich_pages
+
+    missing = await enrich_pages(doc.pages, EnrichmentState())
+    if missing:
+        doc.missing_images = sorted(set(doc.missing_images or []) | set(missing))
+
+
+async def _store_page(
+    page_repo: PageRepository,
+    page: IntermediatePage,
+    *,
+    raw_file_id: str,
+    filename: str,
+    folder_path: str | None,
+    tenant_id: str | None,
+    created_by_user_id: str | None,
+    job_id: str | None,
+) -> str:
+    """Store one converted page and return its ``page_id``.
+
+    ``start_ms`` / ``end_ms`` are passed only when the page has them (audio
+    and video), so a custom :class:`~storage.base.PageRepository` written
+    against the pre-0.5.0 signature keeps receiving valid calls for every
+    other format.
+    """
+    time_range: dict[str, int] = {}
+    if page.start_ms is not None:
+        time_range["start_ms"] = page.start_ms
+    if page.end_ms is not None:
+        time_range["end_ms"] = page.end_ms
+    return await page_repo.store_page(
+        raw_file_id=raw_file_id,
+        filename=filename,
+        folder_path=folder_path,
+        page_index=page.index,
+        markdown=page.markdown,
+        tenant_id=tenant_id,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
+        **time_range,
+    )
 
 
 def _load_document_name(config_path: Path) -> str:
@@ -296,7 +385,7 @@ async def convert_one(
     output_path: Path | None = None
     if output_dir is not None:
         file_output_dir = output_dir / _relative_prefix if _relative_prefix else output_dir
-        output_path = file_output_dir / f"{entry.stem}.json"
+        output_path = file_output_dir / f"{source_document_name(entry)}.json"
 
     if dry_run:
         logger.info(
@@ -328,7 +417,7 @@ async def convert_one(
         doc.folder_path = folder_path_str
         doc.raw_file_id = raw_file_id  # None when no repo
         doc.context_instructions = context_instructions
-        doc.document_name = entry.stem  # stem of the original source file
+        doc.document_name = source_document_name(entry)  # source file name, with extension
         doc.tenant_id = tenant_id
         doc.created_by_user_id = created_by_user_id
         doc.job_id = job_id
@@ -336,12 +425,12 @@ async def convert_one(
         # 3. Store converted pages in MongoDB (if repos provided)
         if page_repo is not None and raw_file_id is not None:
             for page in doc.pages:
-                page.page_id = await page_repo.store_page(
+                page.page_id = await _store_page(
+                    page_repo,
+                    page,
                     raw_file_id=raw_file_id,
-                    filename=entry.stem,
+                    filename=source_document_name(entry),
                     folder_path=folder_path_str,
-                    page_index=page.index,
-                    markdown=page.markdown,
                     tenant_id=tenant_id,
                     created_by_user_id=created_by_user_id,
                     job_id=job_id,
@@ -580,7 +669,7 @@ async def convert_single_file(
         If *path* does not exist.
     """
     converter = get_converter(path)
-    output_path = output_dir / f"{path.stem}.json"
+    output_path = output_dir / f"{source_document_name(path)}.json"
 
     if dry_run:
         logger.info("DRY-RUN: would convert %s → %s", path, output_path)
@@ -612,7 +701,7 @@ async def convert_single_file(
         except Exception as exc:
             raise ConversionError(f"Failed to convert {path}: {exc}") from exc
         doc.context_instructions = context_instructions
-        doc.document_name = path.stem
+        doc.document_name = source_document_name(path)
         doc.tenant_id = tenant_id
         doc.created_by_user_id = created_by_user_id
         doc.job_id = job_id
@@ -638,7 +727,7 @@ async def convert_single_file(
     doc = await _run_convert(converter, path)
     doc.raw_file_id = raw_file_id
     doc.context_instructions = context_instructions
-    doc.document_name = path.stem
+    doc.document_name = source_document_name(path)
     doc.tenant_id = tenant_id
     doc.created_by_user_id = created_by_user_id
     doc.job_id = job_id
@@ -646,12 +735,12 @@ async def convert_single_file(
     # 3. Store converted pages
     if page_repo is not None:
         for page in doc.pages:
-            page.page_id = await page_repo.store_page(
+            page.page_id = await _store_page(
+                page_repo,
+                page,
                 raw_file_id=raw_file_id,
-                filename=path.stem,
+                filename=source_document_name(path),
                 folder_path=None,
-                page_index=page.index,
-                markdown=page.markdown,
                 tenant_id=tenant_id,
                 created_by_user_id=created_by_user_id,
                 job_id=job_id,

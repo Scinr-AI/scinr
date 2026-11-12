@@ -135,6 +135,8 @@ class NullPageRepository(PageRepository):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> str:
         tenant_key(tenant_id)
         return ""

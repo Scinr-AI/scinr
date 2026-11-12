@@ -66,7 +66,8 @@ class ConvertedPageRecord(BaseModel):
     raw_file_id:
         Reference to the parent :attr:`RawFileRecord.id`.
     filename:
-        Stem of the source file without extension, e.g. ``"3.2.P.1"``.
+        Name of the source file with its extension, e.g. ``"3.2.P.1.pdf"``
+        (records written before 0.5.0 hold the name without extension).
     folder_path:
         Relative path of the containing folder, or ``None``.
     page_index:
@@ -78,6 +79,10 @@ class ConvertedPageRecord(BaseModel):
         UTC timestamp when this page was persisted.
     tenant_id, created_by_user_id, job_id:
         Same as in :class:`RawFileRecord` (copied from the upload).
+    start_ms, end_ms:
+        Time range ``[start_ms, end_ms)`` of the page in the source medium
+        (audio / video segments). ``None`` for documents without a time axis
+        and for records written before 0.5.0.
     """
 
     id: str
@@ -90,3 +95,5 @@ class ConvertedPageRecord(BaseModel):
     tenant_id: str | None = None
     created_by_user_id: str | None = None
     job_id: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None

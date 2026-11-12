@@ -19,8 +19,8 @@ Represents the original input file or folder that was ingested into the system. 
 
 ```
 (:Document {
-  name: "clinical_trial_report",
-  path: "/path/to/clinical_trial_report",
+  name: "clinical_trial_report.pdf",
+  path: "/path/to/clinical_trial_report.pdf",
   version: 1,
   load_date: 2024-01-15T10:30:00,
   latest: true,
@@ -33,8 +33,8 @@ Represents the original input file or folder that was ingested into the system. 
 
 | Property | Type | Description |
 |---|---|---|
-| `name` | String | Name of the file or folder as provided at ingestion time. Without extension. |
-| `path` | String | Full path identifier for this document within the ingestion hierarchy. Without extension. |
+| `name` | String | Name of the file (with its extension, case preserved, e.g. `informe.pdf`) or folder. Documents ingested before 0.5.0 keep their extension-less name. |
+| `path` | String | Full path identifier for this document within the ingestion hierarchy, with the file extension (`Modulo/informe.pdf`), so two files that only differ by extension are two documents. Documents ingested before 0.5.0 keep their extension-less path. |
 | `version` | Integer | Version number. Starts at 1; increments on replacement or update. Numbered per tenant: another tenant's document at the same path does not affect it. |
 | `load_date` | DateTime | Timestamp when the document was first ingested. |
 | `latest` | Boolean | Indicates if this is the latest version of the document. |
@@ -49,7 +49,16 @@ Represents the original input file or folder that was ingested into the system. 
 | `frozen_keep_structure_nodes`, `frozen_keep_annotations`, `frozen_keep_extraction_results` | Boolean | The `keep_*` flags the document was frozen with. Only on a frozen stub. |
 | `frozen_cleanup_pending` | Boolean | `true` from the moment the stub is marked until its subtree has been deleted and garbage-collected. Still there afterwards only if the freeze was interrupted. |
 | `last_backup_blob_id`, `last_backup_at` | String | Snapshot and ISO-8601 timestamp of the last `freeze_document(delete_after_export=False)`. |
+| `file_captured_at` | String \| null | Capture time of an image, ISO 8601 (EXIF `DateTimeOriginal`, no time zone conversion). |
+| `file_device_make`, `file_device_model` | String \| null | Camera / device make and model (EXIF). |
+| `file_gps_latitude`, `file_gps_longitude` | Float \| null | Location in decimal degrees (EXIF GPS). Always `null` with `strip_location=True` (the default): the GPS is not even read. |
+| `file_width`, `file_height` | Integer \| null | Size in pixels (images and video). |
+| `file_duration_ms` | Integer \| null | Duration in milliseconds (audio and video). |
+| `file_container`, `file_audio_codec`, `file_video_codec` | String \| null | Container format and codecs reported by `ffprobe`. |
+| `file_frame_rate` | Float \| null | Frames per second (video). |
 | `deletion_pending` | Boolean | Set by `delete_document()` before it deletes anything. A `:Document` that still carries it belongs to an interrupted deletion: call `delete_document()` again. |
+
+The `file_*` properties come from the source file of an image, audio or video (see [Multimodal Ingestion](multimodal-ingestion.md#file-metadata)). They are written on every ingestion of a leaf document, `null` included (`null` means "not available"), so `update_mode` never leaves a stale value behind. Folder-parent nodes do not carry them. They travel in freeze snapshots like any other property, and the navigation API exposes them in `DocumentRef.raw`.
 
 ---
 

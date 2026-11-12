@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.storage.factory import get_storage
+from scinr.newton.utils.naming import source_document_name
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +114,17 @@ async def run_preprocess(
         intermediate_docs.append(doc)
         doc_results.append(
             DocumentResult(
-                document_name=doc.document_name or raw_path.stem,
+                document_name=doc.document_name or source_document_name(raw_path),
                 nodes_processed=1,
                 nodes_failed=0,
+                **doc.omissions(),
             )
         )
 
     for entry_path, error_msg in failures:
         doc_results.append(
             DocumentResult(
-                document_name=entry_path.stem,
+                document_name=source_document_name(entry_path),
                 nodes_processed=0,
                 nodes_failed=1,
                 errors=[error_msg],

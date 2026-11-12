@@ -202,14 +202,16 @@ One document per converted page, linked to its parent raw file.
 {
   "_id": "ObjectId('67a3b2c1d4e5f6a7b8c9d0e3')",
   "raw_file_id": "67a3b2c1d4e5f6a7b8c9d0e1",
-  "filename": "clinical_trial_report",
+  "filename": "clinical_trial_report.pdf",
   "folder_path": "ModuleA/Section3",
   "page_index": 0,
   "markdown": "# 3. Clinical Trial Results\n\nThe primary endpoint was...",
   "converted_at": "2025-01-15T10:30:05Z",
   "tenant_id": "acme",
   "created_by_user_id": "user-42",
-  "job_id": "job-2025-01-15-001"
+  "job_id": "job-2025-01-15-001",
+  "start_ms": null,
+  "end_ms": null
 }
 ```
 
@@ -217,12 +219,13 @@ One document per converted page, linked to its parent raw file.
 |---|---|---|
 | `_id` | ObjectId | Unique identifier for the page record. |
 | `raw_file_id` | String | Reference to the parent `raw_files._id`. |
-| `filename` | String | Stem of the source file without extension. |
+| `filename` | String | Name of the source file with its extension (`clinical_trial_report.pdf`). Pages stored before 0.5.0 hold the name without extension. |
 | `folder_path` | String or null | Relative path from the ingestion root, or `null`. |
 | `page_index` | Integer | Zero-based page index. Matches the converter's page ordering. |
 | `markdown` | String | Full Markdown text of the page as produced by the converter. |
 | `converted_at` | DateTime | UTC timestamp when the page was persisted. |
 | `tenant_id`, `created_by_user_id`, `job_id` | String | Same values as the parent `raw_files` record. |
+| `start_ms`, `end_ms` | Integer or null | Time range `[start_ms, end_ms)` of the page in the source medium: one page per audio / video segment. `null` for documents without a time axis; absent on pages stored before 0.5.0 (read as `null`). See [Multimodal Ingestion](multimodal-ingestion.md#playing-a-segment). |
 
 #### `raw_binaries` — GridFS Bucket
 
@@ -305,7 +308,7 @@ db.converted_pages
 
 ```javascript
 db.converted_pages
-  .find({ filename: "clinical_trial_report" })
+  .find({ filename: "clinical_trial_report.pdf" })
   .sort({ page_index: 1 });
 ```
 
@@ -522,8 +525,9 @@ class RawFileRepository(ABC):
 
 class PageRepository(ABC):
     @abstractmethod
-    async def store_page(self, raw_file_id, filename, folder_path, page_index, markdown, OWNER) -> str:
-        """Store a converted page with its owner and return its ID."""
+    async def store_page(self, raw_file_id, filename, folder_path, page_index, markdown, OWNER,
+                         *, start_ms=None, end_ms=None) -> str:
+        """Store a converted page with its owner (and time range, for audio / video)."""
 
     @abstractmethod
     async def get_pages(self, raw_file_id, SCOPE) -> list[ConvertedPageRecord]:
@@ -625,6 +629,8 @@ class DynamoDBPageRepository(PageRepository):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,  # audio / video segments (0.5.0)
+        end_ms: int | None = None,
     ) -> str:
         import uuid
         page_id = str(uuid.uuid4())
@@ -709,6 +715,7 @@ configure(
 - Implement **every** abstract method: `store` + `get` + `open` + `open_with_record` + `list_raw_files` + `delete` (raw files) and `store_page` + `get_pages` + `get_pages_by_ids` + `delete_pages` (pages). The S3/DynamoDB sketch above omits several of them for brevity — a real implementation must add them, all honouring the scope filters.
 - Store the owner on every record and filter every read / delete by the scope (see [Multi-tenancy](#multi-tenancy)).
 - The `store()` and `store_page()` methods return a string identifier. The pipeline uses these IDs to link pages to their parent raw file.
+- **Audio and video need `start_ms` / `end_ms` in `store_page()`** (keyword-only, `int | None`), stored and returned on `ConvertedPageRecord`. The converter passes them only when a page has them, so a repository written against the pre-0.5.0 signature keeps working for every other format; ingesting an audio or video with it fails with a `TypeError` on `store_page()`.
 - `get_pages()` and `get_pages_by_ids()` return `ConvertedPageRecord` Pydantic models ordered by `page_index` ascending. `get_pages_by_ids()` must fetch only the requested pages (it backs the source text of a single structure node) and skip ids that do not exist, lie outside the scope or are invalid for the backend.
 - If `storage_backend="custom"` but `custom_storage` is not provided, the pipeline raises a `ConfigurationError` at `get_storage()` time.
 
@@ -796,12 +803,14 @@ class InMemoryPageRepository(PageRepository):
         self._pages: dict[str, list[ConvertedPageRecord]] = {}
 
     async def store_page(self, raw_file_id, filename, folder_path, page_index, markdown, *,
-                         tenant_id=None, created_by_user_id=None, job_id=None) -> str:
+                         tenant_id=None, created_by_user_id=None, job_id=None,
+                         start_ms=None, end_ms=None) -> str:
         record = ConvertedPageRecord(
             id=str(uuid.uuid4()), raw_file_id=raw_file_id, filename=filename,
             folder_path=folder_path, page_index=page_index, markdown=markdown,
             converted_at=datetime.now(UTC), tenant_id=tenant_key(tenant_id),
             created_by_user_id=created_by_user_id, job_id=job_id,
+            start_ms=start_ms, end_ms=end_ms,
         )
         self._pages.setdefault(raw_file_id, []).append(record)
         return record.id

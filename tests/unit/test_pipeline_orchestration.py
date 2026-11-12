@@ -783,11 +783,11 @@ class TestStage0Baseline:
         assert len(stage_result.documents) == 2
 
         documents_by_name = {doc.document_name: doc for doc in stage_result.documents}
-        assert documents_by_name["good"].nodes_failed == 0
-        assert documents_by_name["good"].errors == []
-        assert documents_by_name["bad"].nodes_failed == 1
-        assert documents_by_name["bad"].nodes_processed == 0
-        assert len(documents_by_name["bad"].errors) == 1
+        assert documents_by_name["good.txt"].nodes_failed == 0
+        assert documents_by_name["good.txt"].errors == []
+        assert documents_by_name["bad.csv"].nodes_failed == 1
+        assert documents_by_name["bad.csv"].nodes_processed == 0
+        assert len(documents_by_name["bad.csv"].errors) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1404,14 +1404,14 @@ class TestProgressCallbacks:
         assert unit_indices == [2, 3]
         assert {
             e.doc_path for e in events if e.kind == "document_started" and e.document_index in (2, 3)
-        } == {"doc1", "sub/doc2"}
+        } == {"doc1.txt", "sub/doc2.txt"}
         skipped = [e for e in events if e.document_index == 4]
         assert [(e.kind, e.status) for e in skipped] == [
             ("document_started", None),
             ("document_finished", "skipped"),
         ]
         assert skipped[0].planned_stages == ()
-        assert skipped[0].doc_path == "sub/blob"
+        assert skipped[0].doc_path == "sub/blob.xyz"
         assert skipped[1].error == "unsupported format: .xyz"
         assert tracker.snapshot().documents[4].status == "skipped"
 

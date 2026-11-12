@@ -266,6 +266,8 @@ class PageRepository(ABC):
         tenant_id: str | None = None,
         created_by_user_id: str | None = None,
         job_id: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> str:
         """Persiste una página y devuelve su page_id (str).
 
@@ -275,7 +277,7 @@ class PageRepository(ABC):
             ID del :class:`~storage.models.RawFileRecord` al que pertenece
             esta página.
         filename:
-            Stem del fichero sin extensión (p.ej. ``"3.2.P.1"``).
+            Nombre del fichero fuente con su extensión (p.ej. ``"3.2.P.1.pdf"``).
         folder_path:
             Ruta relativa de la carpeta contenedora, o ``None``.
         page_index:
@@ -286,6 +288,12 @@ class PageRepository(ABC):
         tenant_id, created_by_user_id, job_id:
             Igual que en :meth:`RawFileRepository.store` (deben coincidir con
             los del fichero original).
+        start_ms, end_ms:
+            Rango ``[start_ms, end_ms)`` de la página en el medio original
+            (tramos de audio y vídeo), o ``None``. El conversor solo los pasa
+            cuando no son ``None``: un repositorio propio con la firma
+            anterior a 0.5.0 sigue funcionando para todo lo que no sea audio
+            o vídeo, pero para ingerir audio y vídeo debe aceptarlos.
 
         Returns
         -------

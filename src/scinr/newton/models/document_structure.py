@@ -6,6 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scinr.newton.models.file_metadata import FileMetadata
+
 # ============================================================
 # BASE
 # ============================================================
@@ -238,8 +240,8 @@ class Document(StrictModel):
         default=None,
         description=(
             "Relative path of this document from the pipeline input root. "
-            "For leaf documents: e.g. 'ModuloA/SubModulo/doc_a'. "
-            "For root documents (no subfolder): just the document stem. "
+            "For leaf documents: e.g. 'ModuloA/SubModulo/doc_a.pdf'. "
+            "For root documents (no subfolder): just the document name (with its extension). "
             "Set by the pipeline orchestrator during Stage 1 extraction. "
             "Never populated by the LLM."
         ),
@@ -287,6 +289,14 @@ class Document(StrictModel):
         description=(
             "Ingestion job/run id this document belongs to, supplied by the caller and "
             "persisted verbatim on the :Document node. Used as a bulk-delete selector. "
+            "Never populated by the LLM."
+        ),
+    )
+    file_metadata: FileMetadata | None = Field(
+        default=None,
+        description=(
+            "Metadata of the source file (images, audio, video), copied from the "
+            "intermediate document. Written on the Document node as file_* properties. "
             "Never populated by the LLM."
         ),
     )

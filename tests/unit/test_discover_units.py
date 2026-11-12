@@ -61,13 +61,13 @@ def test_discover_raw_file_units_nested_two_levels(tmp_path):
 
     root_unit = by_path[root_file]
     assert root_unit.kind == "raw_file"
-    assert root_unit.doc_path == "root_doc"  # no folder prefix at root level
-    assert root_unit.document_name_hint == "root_doc"
+    assert root_unit.doc_path == "root_doc.txt"  # no folder prefix at root level
+    assert root_unit.document_name_hint == "root_doc.txt"
 
     nested_unit = by_path[nested_file]
     assert nested_unit.kind == "raw_file"
-    assert nested_unit.doc_path == "ModuloA/SubModulo/nested_doc"
-    assert nested_unit.document_name_hint == "nested_doc"
+    assert nested_unit.doc_path == "ModuloA/SubModulo/nested_doc.txt"
+    assert nested_unit.document_name_hint == "nested_doc.txt"
 
 
 def test_discover_raw_file_units_excludes_tabular_extensions(tmp_path):
@@ -77,7 +77,7 @@ def test_discover_raw_file_units_excludes_tabular_extensions(tmp_path):
     units = _discover_raw_file_units(str(tmp_path), tabular_extensions={".csv"})
 
     assert len(units) == 1
-    assert units[0].document_name_hint == "doc"
+    assert units[0].document_name_hint == "doc.txt"
 
 
 def test_discover_raw_file_units_skips_unsupported_format(tmp_path):
@@ -87,7 +87,7 @@ def test_discover_raw_file_units_skips_unsupported_format(tmp_path):
     units = _discover_raw_file_units(str(tmp_path), tabular_extensions=None)
 
     assert len(units) == 1
-    assert units[0].document_name_hint == "doc"
+    assert units[0].document_name_hint == "doc.txt"
 
 
 def test_discover_raw_file_units_missing_root_raises(tmp_path):
@@ -110,7 +110,7 @@ def test_discover_raw_inputs_sorts_tabular_units_and_skipped(tmp_path):
     # No name/path filters: the AppleDouble ._data.csv is tabular by extension
     # (it is rejected later, by content, in run_tabular_pipeline()).
     assert inputs.tabular == [tmp_path / "__MACOSX" / "._data.csv", tmp_path / "data.csv"]
-    assert [u.document_name_hint for u in inputs.units] == ["doc"]
+    assert [u.document_name_hint for u in inputs.units] == ["doc.txt"]
     assert inputs.skipped == [
         (tmp_path / ".DS_Store", "unsupported format: (no extension)"),
         (tmp_path / "blob.xyz", "unsupported format: .xyz"),
@@ -123,7 +123,7 @@ def test_discover_raw_inputs_without_tabular_extensions_has_no_tabular(tmp_path)
     inputs = _discover_raw_inputs(str(tmp_path), tabular_extensions=None)
 
     assert inputs.tabular == []
-    assert [u.document_name_hint for u in inputs.units] == ["doc"]
+    assert [u.document_name_hint for u in inputs.units] == ["doc.txt"]
 
 
 def test_discover_raw_file_units_matches_discover_raw_inputs_units(tmp_path):

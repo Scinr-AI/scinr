@@ -5,6 +5,167 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-11
+
+Multimodal ingestion: image files, audio and video are turned into text at
+Stage 0 and follow the usual pipeline, and the images embedded in PDF, DOCX
+and PPTX are described in place. Providers are configurable and based on open
+interfaces (any LangChain chat model for vision, an OpenAI-compatible
+transcription endpoint or a `Transcriber` of your own). Document names and
+`doc_path` now keep the file extension. See the new
+[Multimodal Ingestion](docs/user-guides/multimodal-ingestion.md) guide.
+
+### Breaking
+- **Document name and `doc_path` keep the source file extension.**
+  `Modulo/informe.pdf` used to be `doc_path = "Modulo/informe"`, `name = "informe"`;
+  it is now `"Modulo/informe.pdf"` / `"informe.pdf"` (case preserved), for every
+  converter and the tabular pipeline. For upgraders:
+  - Re-ingesting a file already ingested creates a new `:Document`
+    (`informe.pdf`) instead of a new version of the existing one (`informe`).
+  - `doc_path`s kept by the caller (deletion, freezing, navigation,
+    `document_names`) still point to the old documents; the new ones carry the
+    extension. `replaces=` and `document_names=` take document names: pass the
+    name with its extension for documents ingested from 0.5.0 on.
+  - Intermediate and extraction JSON files are written as `informe.pdf.json`
+    and `extract-informe.pdf.json`. JSON files written by earlier versions are
+    still ingestible and keep their extension-less name.
+  - `ConvertedPageRecord.filename` (`converted_pages.filename`) carries the
+    extension, and the tabular pipeline's page name becomes `ventas.xlsx_Hoja1`.
+  - No migration of existing documents is included. `convert_api()` is
+    unchanged (its name comes from the config file).
+- **The PPTX intermediate JSON no longer carries the base64 of its images**
+  when embedded-image description is off (nothing read it). With description
+  on, images are described and released; no intermediate JSON carries image
+  bytes.
+- **A custom `PageRepository` must accept `start_ms` / `end_ms`** (keyword-only,
+  `int | None`) in `store_page()` to ingest audio and video. They are passed
+  only when a page has them, so a repository with the old signature keeps
+  working for every other format.
+- **`PageImage.base64` is no longer required** (default `""`): an image may be
+  lazy or already released. Custom converters that read it must not assume it
+  is set; use `PageImage.load_bytes()` / `has_content`.
+
+### Changed
+- **Image, audio and video files in a folder are no longer skipped.** They are
+  converted or, without their requirement (`vision_llm`, `transcriber`,
+  `ffmpeg`), they become failed documents (Stage 0, `stage_failed` /
+  `document_finished(status="failed")`) whose error says what to configure.
+  They count for `on_partial_failure`.
+- `vision_llm` does **not** fall back to `llm`: vision needs a multimodal model
+  configured on purpose.
+- `ffmpeg` / `ffprobe` are system requirements for audio and video (not
+  installed by pip).
+- PDF OCR responses are parsed page by page from the raw body (`ijson`)
+  instead of `response.json()`: the decoded text and the full parsed tree of a
+  response are never built.
+- **A document whose every part failed in best-effort mode now fails**, for
+  every converter. Before, a PDF whose every chunk failed with
+  `mistral_ocr_error_strategy="best_effort"` was converted with no pages: it
+  counted as processed, no `:Document` was created, and nothing reported an
+  error. Now the document fails at Stage 0, and the error lists the skipped
+  ranges. The same applies to an audio, video or image-only document with
+  `media_error_strategy="best_effort"`, for example after a wrong API key. A
+  document that is merely empty, with no failure, is not affected.
+
+### Added
+- **Image files** (`.jpg`, `.jpeg`, `.png`, `.webp`, `.tif`, `.tiff`, `.heic`,
+  `.heif`, `ImageConverter`): one page with the visible text transcribed and a
+  description, made by the `vision_llm`.
+- **Audio** (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac`, `AudioConverter`): one page
+  per `media_segment_seconds` segment, with a `[HH:MM:SS – HH:MM:SS]` header.
+- **Video** (`.mp4`, `.mov`, `.mkv`, `.webm`, `VideoConverter`): transcription
+  plus frames sampled at `video_frames_per_minute` and described as
+  `<image index="N" time="HH:MM:SS">` blocks. When ffmpeg cannot extract a
+  segment's frames, `best_effort` records them in `missing_images` and keeps
+  the rest of the video.
+- **Embedded-image description** for PDF (Mistral OCR images), DOCX (pictures
+  of body paragraphs) and PPTX (pictures, including those inside group
+  shapes): an `<image index="N">…</image>` block replaces the image
+  reference, or goes at the end of the page. Trivial (small), repeated and
+  over-the-cap images are skipped. Images are read and decoded one at a time
+  per event loop, whatever `llm_concurrency` and `parallel_docs` are. Only
+  their downscaled copies wait for the model. Measured: 8 PNG of 3000×2000 on
+  one page peak at 65 MiB RSS, against 632 MiB when decoded all at once.
+  `image_decode_concurrency` (`IMAGE_DECODE_CONCURRENCY`, default `1`) raises
+  the number of images decoded at once on machines with memory to spare. With
+  a real model, 1 lane is as fast as 4: decoding overlaps the calls.
+  Native Word / PowerPoint charts and images in DOCX table cells, headers and
+  footers are not covered.
+- **`Transcriber`** and **`TranscriptSegment`** (exported from `scinr.newton`),
+  **`OpenAICompatibleTranscriber`** (any `/audio/transcriptions` endpoint,
+  cloud or self-hosted, optional `api_key`, streamed multipart, falls back from
+  `verbose_json` to `json` when timestamps are rejected) and
+  **`FasterWhisperTranscriber`** (local, model loaded once per process; the
+  audio is decoded with the configured `ffmpeg`, not with faster-whisper's
+  PyAV decoder, which breaks with some PyAV releases), in
+  `scinr.newton.media.transcribers`.
+- **`start_ms` / `end_ms`** on `IntermediatePage`, `ConvertedPageRecord`
+  (`converted_pages`, `null` for older pages) and `PageText`, to play a segment
+  from `get_document_original()`.
+- **`file_*` properties on the `:Document` node** (`FileMetadata`):
+  `file_captured_at`, `file_device_make`, `file_device_model`,
+  `file_gps_latitude`, `file_gps_longitude`, `file_width`, `file_height`,
+  `file_duration_ms`, `file_container`, `file_audio_codec`, `file_video_codec`,
+  `file_frame_rate`. All are written on every ingestion (`null` erases a stale
+  value).
+- `IntermediateDocument.file_metadata`, `missing_images` (`(page_index,
+  image_index)`) and `missing_segments` (`[start_ms, end_ms)`).
+- **Partial documents are reported at the end of the run.** The preprocess
+  `DocumentResult` carries `missing_page_ranges`, `missing_segments` and
+  `missing_images`, plus a `has_omissions` property.
+  `PipelineResult.documents_with_omissions` lists the affected documents, and
+  `run_pipeline` logs one closing warning per partial document. A partial
+  document still counts as processed: `success` does not change.
+- **Silence filters on by default.** `FasterWhisperTranscriber(vad_filter=True,
+  vad_parameters=None)` runs faster-whisper's voice-activity detector, which
+  faster-whisper itself leaves off by default.
+  `OpenAICompatibleTranscriber(no_speech_threshold=0.6)` drops the segments
+  the model marks as silence (Whisper's rule). Both keep Whisper from
+  inventing text on silent or music-only audio.
+- Extra **`scinr[media]`**: `faster-whisper`, `pillow-heif`.
+- `configure()` parameters (argument / env / default):
+  - `vision_llm` — multimodal `BaseChatModel` / — / `None`.
+  - `transcriber` — `Transcriber` instance / — / `None`.
+  - `describe_embedded_images` / `DESCRIBE_EMBEDDED_IMAGES` / `True`. **On by
+    default, but it only acts with a `vision_llm`**; without one, nothing is
+    requested from Mistral and no blob is read.
+  - `media_error_strategy` / `MEDIA_ERROR_STRATEGY` / `"best_effort"`. **A
+    failed embedded image, segment or frame is skipped without failing the
+    document** and recorded in `missing_images` / `missing_segments`;
+    `"fail_fast"` fails the document.
+  - `strip_location` / `STRIP_LOCATION` / `True`. **The GPS of images is not
+    read nor stored** unless set to `False`.
+  - `image_max_side_px` / `IMAGE_MAX_SIDE_PX` / `1568`.
+  - `image_min_side_px` / `IMAGE_MIN_SIDE_PX` / `64`.
+  - `max_images_per_page` / `MAX_IMAGES_PER_PAGE` / `10`.
+  - `media_segment_seconds` / `MEDIA_SEGMENT_SECONDS` / `300` (minimum `10`).
+  - `media_min_segment_seconds` / `MEDIA_MIN_SEGMENT_SECONDS` / `10`: minimum
+    length of the last segment. A shorter tail moves the previous cut earlier
+    (300.05 s → 290 s + 10.05 s), so no medium ends in a segment of a few
+    milliseconds, which providers reject. `0` disables it. It is at most half
+    of `media_segment_seconds` (capped when not given).
+  - `image_decode_concurrency` / `IMAGE_DECODE_CONCURRENCY` / `1` (see above).
+  - `media_language` / `MEDIA_LANGUAGE` / `None` (auto-detect).
+  - `max_media_duration_seconds` / `MAX_MEDIA_DURATION_SECONDS` / `14400`
+    (`None` = no limit); longer media fail before anything is spent.
+  - `video_frames_per_minute` / `VIDEO_FRAMES_PER_MINUTE` / `2.0` (`0` =
+    transcription only).
+  - `media_concurrency` / `MEDIA_CONCURRENCY` / `1`: audio and video files in
+    conversion at once per event loop, whatever `parallel_docs` is.
+  - `mistral_ocr_image_max_pages` / `MISTRAL_OCR_IMAGE_MAX_PAGES` / `50`: pages
+    per OCR chunk when images are requested.
+  - `ffmpeg_path`, `ffprobe_path` / `FFMPEG_PATH`, `FFPROBE_PATH` / `PATH` lookup.
+- `scripts/memory_bench/bench_media.py` (tracemalloc, simulated providers).
+  Measured peaks: 300-page PDF 1.9 MiB text only / 23.9 MiB with one image per
+  page described (one 50-page response with images is 17 MiB); DOCX / PPTX
+  with 20 → 100 images add +3.0 → +4.1 / +3.7 → +3.7 MiB over the libraries'
+  own load; audio 30 min and 2 h 1.5 MiB; video 7.8 MB and 363 MB 5.2 / 5.7 MiB;
+  8 audios with `parallel_docs=4` 1.4 MiB, one conversion in flight.
+
+### Fixed
+- The docstring of `PageImage.description`: it is filled by the embedded-image
+  enrichment of Stage 0, not by Stage 1.
+
 ## [0.4.6] - 2026-10-29
 
 PDF conversion through Mistral OCR no longer holds several copies of the PDF in

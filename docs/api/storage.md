@@ -10,6 +10,13 @@ Document storage backends for raw file and page content archival.
 
 ::: scinr.newton.storage.base
 
+## Records
+
+`RawFileRecord` and `ConvertedPageRecord` (with `start_ms` / `end_ms` for audio and
+video segments since 0.5.0).
+
+::: scinr.newton.storage.models
+
 ## Scope Filters
 
 The read / delete scope is shared with the navigation API

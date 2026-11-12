@@ -23,12 +23,19 @@ def _build_registry() -> dict[str, type[BaseConverter]]:
     """Import all converters and build the extension map."""
     # Local imports so that missing optional dependencies raise only
     # when the specific converter is actually requested.
+    # The image, audio and video converters are always registered: they import
+    # nothing heavy at load time (faster_whisper / pillow_heif only when used),
+    # and a missing requirement (vision_llm, transcriber, ffmpeg) fails that
+    # document at conversion with a message that says how to configure it.
+    from scinr.newton.converters.audio import AudioConverter
     from scinr.newton.converters.csv import CsvConverter
     from scinr.newton.converters.docx import DocxConverter
     from scinr.newton.converters.html import HtmlConverter
+    from scinr.newton.converters.image import ImageConverter
     from scinr.newton.converters.pdf import PdfConverter
     from scinr.newton.converters.pptx import PptxConverter
     from scinr.newton.converters.text import TextConverter
+    from scinr.newton.converters.video import VideoConverter
     from scinr.newton.converters.xlsx import XlsxConverter
 
     registry: dict[str, type[BaseConverter]] = {}
@@ -40,6 +47,9 @@ def _build_registry() -> dict[str, type[BaseConverter]]:
         DocxConverter,
         XlsxConverter,
         PptxConverter,
+        ImageConverter,
+        AudioConverter,
+        VideoConverter,
     ):
         for ext in cls.supported_extensions:
             registry[ext] = cls

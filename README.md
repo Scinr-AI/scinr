@@ -1,6 +1,6 @@
 # scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.4.6)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.5.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
@@ -10,7 +10,7 @@
 
 📖 **[Documentation Site](https://scinr-ai.github.io/scinr/)** &nbsp;|&nbsp; 🤖 **[llms.txt for Agents](https://scinr-ai.github.io/scinr/llms.txt)** ([Full Context](https://scinr-ai.github.io/scinr/llms-full.txt))
 
-Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a complete 5-stage LLM pipeline that converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML) into structured Neo4j knowledge graphs.
+Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a complete 5-stage LLM pipeline that converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML), images, audio and video into structured Neo4j knowledge graphs.
 
 ---
 
@@ -42,6 +42,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 ## Features
 
 - **Multi-format ingestion** — PDF (Mistral OCR), DOCX, XLSX, PPTX, CSV, HTML, TXT, MD, XML/SOAP APIs, JSON APIs — all normalized to the same intermediate format
+- **Images, audio and video** — image files transcribed and described by a configurable vision model; audio and video transcribed segment by segment with time ranges (video frames described too); images embedded in PDF, DOCX and PPTX described in place. Cloud or self-hosted providers (OpenAI-compatible endpoints, Bedrock, Ollama, faster-whisper)
 - **Provider-agnostic** — OpenAI, AWS Bedrock, Ollama, Anthropic, or any LangChain-compatible model
 - **LLM-powered extraction** — sliding-window 2-phase extraction with an automatic repair loop; crash-safe intermediate writes after every chunk
 - **Knowledge graph output** — idempotent Neo4j writes (MERGE throughout); safe to re-run at any stage
@@ -67,13 +68,13 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 
 ```
  Raw Files
- (PDF, DOCX, XLSX, PPTX, CSV, HTML, XML, TXT …)
+ (PDF, DOCX, XLSX, PPTX, CSV, HTML, XML, TXT, images, audio, video …)
         │
         ▼
 ┌──────────────────────┐
 │  Stage 0             │  converters/
-│  PREPROCESS          │  Mistral OCR (PDF) · python-docx · openpyxl · …
-│                      │  → data/json/{filename}.json
+│  PREPROCESS          │  Mistral OCR (PDF) · python-docx · openpyxl · vision_llm · transcriber + ffmpeg · …
+│                      │  → data/json/{filename.ext}.json
 └─────────┬────────────┘
           │  {"pages": [{"index": N, "markdown": "…"}]}
           │
@@ -115,7 +116,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 
 ## Installation
 
-**Requirements:** Python 3.11+, a running Neo4j instance (5.x+)
+**Requirements:** Python 3.11+, a running Neo4j instance (5.x+); for audio and video, the `ffmpeg` / `ffprobe` system binaries
 
 ```bash
 pip install scinr
@@ -128,6 +129,7 @@ pip install 'scinr[openai]'    # OpenAI / Azure OpenAI
 pip install 'scinr[bedrock]'   # AWS Bedrock (Claude)
 pip install 'scinr[ollama]'    # Ollama (local models)
 pip install 'scinr[mongodb]'   # Optional MongoDB storage layer
+pip install 'scinr[media]'     # Local transcription (faster-whisper) and HEIC/HEIF images
 ```
 
 For development:

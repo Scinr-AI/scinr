@@ -227,6 +227,7 @@ async def extract_one_intermediate(
             created_by_user_id if created_by_user_id is not None else doc.created_by_user_id
         ),
         job_id=job_id if job_id is not None else doc.job_id,
+        file_metadata=doc.file_metadata,
     )
     llm = get_llm()
 
@@ -339,6 +340,7 @@ async def extract_one_file(
             created_by_user_id if created_by_user_id is not None else raw.get("created_by_user_id")
         ),
         job_id=job_id if job_id is not None else raw.get("job_id"),
+        file_metadata=raw.get("file_metadata"),
     )
     llm = get_llm()
 

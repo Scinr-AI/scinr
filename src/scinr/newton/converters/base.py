@@ -8,13 +8,17 @@ must implement.
 
 from __future__ import annotations
 
+import base64
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from scinr.newton.exceptions import ScinrError
+from scinr.newton.models.file_metadata import FileMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +61,60 @@ class PageImage(BaseModel):
     index:
         Zero-based position of the image within the page.
     base64:
-        Base64-encoded image bytes.
+        Base64-encoded image bytes. Empty when the image is loaded lazily
+        (see :meth:`load_bytes`) or once it has been released after the
+        embedded-image enrichment of Stage 0.
     media_type:
         MIME type of the image (e.g. ``"image/png"``).
     description:
-        Optional textual description. Left empty by converters;
-        filled by Stage 1 using LLM vision.
+        Textual description. Left empty by converters; filled by the
+        embedded-image enrichment of Stage 0 (``describe_embedded_images``,
+        only with a ``vision_llm`` configured).
+    ref:
+        Text that references the image in the page markdown as
+        ``![ref](ref)``. When present, the enrichment replaces that reference
+        with the description block; otherwise the block goes at the end of
+        the page.
+    width, height:
+        Size in pixels, when the converter knows it without decoding.
+
+    A converter may attach a private loader instead of filling ``base64``
+    (``PageImage(...)._loader = callable``, see :meth:`with_loader`) so the
+    bytes are only read while the image is described. The loader is never
+    serialised: an intermediate JSON never carries lazy blobs.
     """
 
     index: int
-    base64: str
+    base64: str = ""
     media_type: str = "image/png"
     description: str = ""
+    ref: str | None = None
+    width: int | None = None
+    height: int | None = None
+    _loader: Callable[[], bytes] | None = PrivateAttr(default=None)
+
+    @classmethod
+    def with_loader(cls, loader: Callable[[], bytes], **fields: Any) -> PageImage:
+        """Build an image whose bytes are read lazily by *loader*."""
+        image = cls(**fields)
+        image._loader = loader
+        return image
+
+    @property
+    def has_content(self) -> bool:
+        """``True`` while the image still holds bytes (base64 or a loader)."""
+        return bool(self.base64) or self._loader is not None
+
+    def load_bytes(self) -> bytes:
+        """Return the image bytes: from the loader if set, else decoded from ``base64``."""
+        if self._loader is not None:
+            return self._loader()
+        return base64.b64decode(self.base64)
+
+    def release(self) -> None:
+        """Drop the image bytes (``base64`` and loader) once they are no longer needed."""
+        self.base64 = ""
+        self._loader = None
 
 
 class IntermediatePage(BaseModel):
@@ -87,6 +133,10 @@ class IntermediatePage(BaseModel):
     footer: str | None = None
     confidence_scores: None = None
     page_id: str | None = None  # MongoDB ObjectId of the ConvertedPageRecord stored by Stage 0
+    # Time range [start_ms, end_ms) of the page in the source medium (audio /
+    # video segments). None for documents without a time axis.
+    start_ms: int | None = None
+    end_ms: int | None = None
 
 
 class IntermediateDocument(BaseModel):
@@ -100,7 +150,7 @@ class IntermediateDocument(BaseModel):
     folder_path: str | None = None  # relative path of parent folder from input root (None for root files)
     raw_file_id: str | None = None  # MongoDB ObjectId of the RawFileRecord stored by Stage 0
     context_instructions: str | None = None  # Free-text user-provided ingestion context. Set via ``context_instructions=``.
-    document_name: str | None = None  # Stem of the original source file. Injected by convert_folder() / convert_single_file().
+    document_name: str | None = None  # Name of the original source file, extension included (``informe.pdf``). Injected by convert_folder() / convert_single_file().
     # Owner of the upload, stamped by convert_one() / convert_single_file() and
     # written on the stored raw file and pages. Public-API form: None = public.
     tenant_id: str | None = None
@@ -110,6 +160,23 @@ class IntermediateDocument(BaseModel):
     # Rangos [start, end) de páginas del documento ORIGINAL que no pudieron
     # convertirse y fueron omitidas en modo best-effort (mistral_ocr_error_strategy).
     # None cuando la conversión fue completa o no aplica (converters no-PDF).
+    file_metadata: FileMetadata | None = None
+    # Metadatos del fichero fuente (imagen, audio, vídeo); llegan al nodo Document.
+    missing_segments: list[tuple[int, int]] | None = None
+    # Tramos [start_ms, end_ms) de audio o vídeo omitidos en best_effort
+    # (media_error_strategy). None cuando no se omitió ninguno.
+    missing_images: list[tuple[int, int]] | None = None
+    # Imágenes (page_index, image_index) que no pudieron describirse y se
+    # omitieron en best_effort. None cuando no se omitió ninguna.
+
+    def omissions(self) -> dict[str, list[tuple[int, int]]]:
+        """The non-empty ``missing_*`` fields, by name (empty when nothing was skipped)."""
+        fields = {
+            "missing_page_ranges": self.missing_page_ranges,
+            "missing_segments": self.missing_segments,
+            "missing_images": self.missing_images,
+        }
+        return {name: list(value) for name, value in fields.items() if value}
 
     def to_json(self, indent: int = 2) -> str:
         """Serialise to JSON string.
@@ -188,9 +255,10 @@ class BaseConverter(ABC):
     def convert_and_write(self, source: Path, output_dir: Path) -> Path:
         """Convert *source* and write the result to *output_dir*.
 
-        The output file is named ``{source.stem}.json``. If a file with
-        that name already exists, a numeric suffix is appended to avoid
-        silent overwriting (e.g. ``doc_1.json``).
+        The output file is named ``{source.name}.json`` (the source file name
+        with its extension, e.g. ``doc.pdf.json``). If a file with that name
+        already exists, a numeric suffix is appended to avoid silent
+        overwriting (e.g. ``doc.pdf_1.json``).
 
         Parameters
         ----------
@@ -279,7 +347,7 @@ class BaseConverter(ABC):
         Parameters
         ----------
         source:
-            The source file whose stem is used for the output name.
+            The source file whose name (with extension) is used for the output name.
         output_dir:
             Target directory.
 
@@ -288,12 +356,12 @@ class BaseConverter(ABC):
         Path
             A path inside *output_dir* that does not yet exist.
         """
-        candidate = output_dir / f"{source.stem}.json"
+        candidate = output_dir / f"{source.name}.json"
         if not candidate.exists():
             return candidate
         counter = 1
         while True:
-            candidate = output_dir / f"{source.stem}_{counter}.json"
+            candidate = output_dir / f"{source.name}_{counter}.json"
             if not candidate.exists():
                 logger.warning(
                     "Output collision: renamed to %s", candidate.name

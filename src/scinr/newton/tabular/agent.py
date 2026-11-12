@@ -40,7 +40,7 @@ async def run_tabular_agent(
     Parameters
     ----------
     file_path : Path to the source file (absolute).
-    document_name : Display name (file stem).
+    document_name : Display name (source file name with extension, e.g. ``ventas.xlsx``).
     doc_path : Relative path used as Neo4j Document key.
     driver : Open Neo4j driver (caller-owned).
     resolved_version : Pre-computed batch version.
