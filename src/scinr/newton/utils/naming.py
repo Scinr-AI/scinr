@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__all__ = ["source_document_name", "source_doc_path"]
+__all__ = ["source_document_name", "source_doc_path", "tabular_doc_path"]
 
 
 def source_document_name(path: Path) -> str:
@@ -36,3 +36,17 @@ def source_doc_path(path: Path, folder_path: str | None) -> str:
     """
     name = source_document_name(path)
     return f"{folder_path}/{name}" if folder_path else name
+
+
+def tabular_doc_path(path: Path, input_root: Path) -> str:
+    """Return the ``doc_path`` of the tabular file *path* found under *input_root*.
+
+    The POSIX-style folder relative to *input_root* joined with the file name;
+    just the name for a file at the root or outside *input_root*.
+    """
+    try:
+        rel = path.relative_to(input_root)
+        folder = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else ""
+    except ValueError:
+        folder = ""
+    return source_doc_path(path, folder)

@@ -200,6 +200,19 @@ transcription endpoint or a `Transcriber` of your own). Document names and
   8 audios with `parallel_docs=4` 1.4 MiB, one conversion in flight.
   Storing the described images adds +0.2 MiB (DOCX with 100 images, 300-page
   PDF) and +0.5 MiB (video): `*_stored` cases.
+- **`DeletionResult.documents`**: the `:Document` nodes a `delete_document()`
+  call deleted — the matched ones and every `IS_COMPOSED_OF*` descendant,
+  descendants first — as `DeletedDocument(path, version, is_folder)`. A caller
+  that keeps per-document counters outside the graph (quotas, usage) can
+  adjust them without repeating the selection. Empty when nothing matched.
+  `documents_deleted` is unchanged.
+- **`discover_documents(input_raw, tabular_extensions=None)`**: what
+  `run_pipeline()` will do with every file under a folder, without converting
+  or reading anything — the same discovery `run_pipeline()` uses. Returns
+  `DiscoveredDocuments` with the `doc_path` of each tabular and convertible
+  file, the `skipped` files (`SkippedFile(path, reason)`) and `count`, an upper
+  bound of the leaf `:Document` nodes the run can create. Lets a caller decide
+  before ingesting whether a batch fits.
 
 ### Fixed
 - The docstring of `PageImage.description`: it is filled by the embedded-image

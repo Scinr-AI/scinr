@@ -127,6 +127,60 @@ class PipelineResult:
 
 
 @dataclass
+class SkippedFile:
+    """A file under ``input_raw`` that the pipeline cannot interpret.
+
+    Attributes:
+        path: The file path.
+        reason: Why it is skipped, e.g. ``"unsupported format: .xyz"``.
+    """
+
+    path: str
+    reason: str
+
+
+@dataclass
+class DiscoveredDocuments:
+    """What run_pipeline() would do with every file under an ``input_raw``
+    folder, without converting or reading anything (see discover_documents()).
+
+    Attributes:
+        tabular: The ``doc_path`` each tabular file will get.
+        documents: The ``doc_path`` each convertible file will get.
+        skipped: The files the pipeline cannot interpret; they create nothing.
+    """
+
+    tabular: list[str]
+    documents: list[str]
+    skipped: list[SkippedFile]
+
+    @property
+    def count(self) -> int:
+        """The leaf :Document nodes the run can create, at most.
+
+        An upper bound: an unreadable or empty tabular file and a file that
+        fails before ingestion create no :Document. With ``update_mode=False``
+        a file whose ``doc_path`` already exists creates a new version.
+        """
+        return len(self.tabular) + len(self.documents)
+
+
+@dataclass
+class DeletedDocument:
+    """One :Document node deleted by delete_document().
+
+    Attributes:
+        path: The Document ``path`` (its ``doc_path``).
+        version: The Document version.
+        is_folder: True for a folder document, False for a leaf document.
+    """
+
+    path: str
+    version: int
+    is_folder: bool
+
+
+@dataclass
 class DeletionResult:
     """Result of a delete_document() call — full Document + cascade + GC deletion.
 
@@ -171,6 +225,13 @@ class DeletionResult:
         page_images_deleted: Number of PageImageRecord (stored images: embedded
             images, video frames) deleted from the storage layer for the same
             raw_file_ids. A backend that stores no images always reports 0.
+        documents: The :Document nodes the deletion worked on — the matched ones
+            and their ``IS_COMPOSED_OF*`` descendants, descendants first (the
+            order they are deleted in) — with their path, version and
+            ``is_folder``. Empty when found is False. A call that completes an
+            interrupted deletion only lists what was still there. Lets a caller
+            that keeps per-document counters outside the graph adjust them
+            without repeating the selection.
     """
 
     path: str | None
@@ -194,6 +255,7 @@ class DeletionResult:
     tenant_id: str | None = None
     created_by_user_id: str | list[str] | tuple[str, ...] | None = None
     page_images_deleted: int = 0
+    documents: list[DeletedDocument] = field(default_factory=list)
 
 
 @dataclass

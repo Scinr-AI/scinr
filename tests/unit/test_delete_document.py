@@ -17,7 +17,7 @@ import pytest
 
 from scinr.newton.ingest import _cascade, _gc, deletion
 from scinr.newton.ingest.deletion import GC_MAX_PASSES, collect_orphans, delete_document
-from scinr.newton.results import DeletionResult, OrphanCollectionResult
+from scinr.newton.results import DeletedDocument, DeletionResult, OrphanCollectionResult
 from scinr.newton.storage.base import RawFileRepository
 
 # ---------------------------------------------------------------------------
@@ -183,13 +183,17 @@ class _FakeDriver:
 
     def document_rows_for(self, params: dict) -> list[dict]:
         if self.document_rows is not None:
-            return [{"interrupted": self.interrupted, **row} for row in self.document_rows]
+            return [
+                {"interrupted": self.interrupted, "is_folder": False, **row}
+                for row in self.document_rows
+            ]
         return [
             {
                 "path": params.get("path", f"job-doc-{index}"),
                 "version": row["version"],
                 "tenant_id": params["tenant_id"],
                 "is_seed": True,
+                "is_folder": False,
                 "interrupted": self.interrupted,
             }
             for index, row in enumerate(self.existence_rows)
@@ -442,6 +446,7 @@ class TestDeleteDocumentNotFound:
         assert result.found is False
         assert result.versions_deleted == []
         assert result.documents_deleted == 0
+        assert result.documents == []
         assert result.structure_nodes_deleted == 0
         assert result.info_units_deleted == 0
         assert result.model_decisions_deleted == 0
@@ -605,6 +610,79 @@ class TestDeleteDocumentCascade:
         step_indices = [i for i, (_, query, _) in enumerate(fake_driver.calls) if query in _STEP_COUNTERS]
         assert max(step_indices) < delete_index
         assert result.documents_deleted == 3
+
+    async def test_result_lists_the_deleted_documents_descendants_first(self, patch_driver):
+        """A folder deletion reports every Document it deleted — the folder,
+        its subfolders and its leaves — with version and is_folder, in the
+        order they were deleted."""
+        patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 2}],
+                document_rows=[
+                    {
+                        "path": "folder",
+                        "version": 2,
+                        "tenant_id": "acme",
+                        "is_seed": True,
+                        "is_folder": True,
+                    },
+                    {
+                        "path": "folder/sub",
+                        "version": 2,
+                        "tenant_id": "acme",
+                        "is_seed": False,
+                        "is_folder": True,
+                    },
+                    {
+                        "path": "folder/sub/a.pdf",
+                        "version": 2,
+                        "tenant_id": "acme",
+                        "is_seed": False,
+                    },
+                    {"path": "folder/b.csv", "version": 2, "tenant_id": "acme", "is_seed": False},
+                ],
+            )
+        )
+
+        result = await delete_document("folder", tenant_id="acme")
+
+        assert result.documents == [
+            DeletedDocument(path="folder/sub", version=2, is_folder=True),
+            DeletedDocument(path="folder/sub/a.pdf", version=2, is_folder=False),
+            DeletedDocument(path="folder/b.csv", version=2, is_folder=False),
+            DeletedDocument(path="folder", version=2, is_folder=True),
+        ]
+        assert len(result.documents) == result.documents_deleted
+
+    async def test_result_lists_a_single_file(self, patch_driver):
+        patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                document_rows=[
+                    {"path": "docs/a.pdf", "version": 1, "tenant_id": "acme", "is_seed": True},
+                ],
+            )
+        )
+
+        result = await delete_document("docs/a.pdf", tenant_id="acme")
+
+        assert result.documents == [DeletedDocument(path="docs/a.pdf", version=1, is_folder=False)]
+
+    async def test_result_leaves_out_documents_that_cannot_be_addressed(self, patch_driver):
+        patch_driver(
+            _FakeDriver(
+                existence_rows=[{"version": 1}],
+                document_rows=[
+                    {"path": "docs/a", "version": 1, "tenant_id": "acme", "is_seed": True},
+                    {"path": "docs/a/x", "version": None, "tenant_id": "acme", "is_seed": False},
+                    {"path": "docs/a/y", "version": 1, "tenant_id": "other", "is_seed": False},
+                ],
+            )
+        )
+
+        result = await delete_document("docs/a", tenant_id="acme")
+
+        assert result.documents == [DeletedDocument(path="docs/a", version=1, is_folder=False)]
 
     async def test_documents_that_cannot_be_addressed_by_key_are_left_alone(
         self, patch_driver, caplog

@@ -876,6 +876,24 @@ asyncio.run(main())
 
 ---
 
+## Knowing what a run will create
+
+`discover_documents()` walks `input_raw` exactly as `run_pipeline()` does, without converting or reading anything, and tells you what each file will become. Pass the same `tabular_extensions` you pass to `run_pipeline()` (`None` applies the same default):
+
+```python
+from scinr.newton import discover_documents
+
+found = discover_documents("./raw_docs")
+found.tabular    # doc_path of each tabular file, e.g. ["ventas.csv"]
+found.documents  # doc_path of each convertible file, e.g. ["ModuloA/informe.pdf"]
+found.skipped    # SkippedFile(path, reason) for files the pipeline cannot interpret
+found.count      # leaf :Document nodes the run can create, at most
+```
+
+`count` is an upper bound: an unreadable or empty tabular file, or a file that fails before ingestion, creates no `:Document`. With `update_mode=False`, a file whose `doc_path` already exists creates a new version. Use it to decide before ingesting whether a batch fits (for example, a document quota), and adjust afterwards with what was really created.
+
+---
+
 ## PipelineResult Inspection
 
 `run_pipeline()` returns a `PipelineResult` dataclass with structured access to per-stage metrics.

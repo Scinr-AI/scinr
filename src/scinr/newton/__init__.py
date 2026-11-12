@@ -33,7 +33,7 @@ from scinr.newton.navigation import (
     get_graph_navigator,
     graph_navigator,
 )
-from scinr.newton.pipeline import run_pipeline
+from scinr.newton.pipeline import discover_documents, run_pipeline
 from scinr.newton.progress import (
     AsyncProgressCallback,
     DocumentProgress,
@@ -43,12 +43,15 @@ from scinr.newton.progress import (
     ProgressTracker,
 )
 from scinr.newton.results import (
+    DeletedDocument,
     DeletionResult,
+    DiscoveredDocuments,
     DocumentResult,
     FreezeResult,
     OrphanCollectionResult,
     PipelineResult,
     RestoreResult,
+    SkippedFile,
     StageResult,
 )
 from scinr.newton.stages import (
@@ -92,11 +95,15 @@ __all__ = [
     "StageResult",
     "PipelineResult",
     "DeletionResult",
+    "DeletedDocument",
+    "DiscoveredDocuments",
+    "SkippedFile",
     "OrphanCollectionResult",
     "FreezeResult",
     "RestoreResult",
     # Unified pipeline
     "run_pipeline",
+    "discover_documents",
     # Progress reporting
     "ProgressEvent",
     "ProgressCallback",

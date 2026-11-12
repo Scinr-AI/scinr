@@ -144,6 +144,18 @@ Left unset (`None`) it means **"do not filter on this property"** — it does *n
 
 These values are populated by `run_pipeline(tenant_id=..., created_by_user_id=..., job_id=...)` at ingestion time. `DeletionResult` echoes back whichever selector and filters were used (`result.path`, `result.job_id`, `result.tenant_id`, `result.created_by_user_id`, exactly as passed — a string or a list); `result.path` is `None` for a `job_id`-selected deletion, and `result.tenant_id` echoes the value you passed (`None` for a deletion of public documents).
 
+## Which documents were deleted
+
+`result.documents` lists every `:Document` the call deleted — the matched ones and all their `IS_COMPOSED_OF*` descendants, descendants first — as `DeletedDocument(path, version, is_folder)`. Deleting a folder therefore lists the folder, its subfolders and its leaves. Use it to adjust anything you count per document outside the graph, instead of repeating the selection yourself:
+
+```python
+result = await delete_document("ModuloA", tenant_id="acme")
+leaves = [(d.path, d.version) for d in result.documents if not d.is_folder]
+my_usage_store.release(leaves)
+```
+
+The list is empty when `found` is `False`. A call that completes an interrupted deletion lists only what was still there.
+
 ---
 
 ## Understanding the Cascade

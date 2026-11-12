@@ -8,6 +8,12 @@
 
 ::: scinr.newton.results.DeletionResult
 
+::: scinr.newton.results.DeletedDocument
+
+::: scinr.newton.results.DiscoveredDocuments
+
+::: scinr.newton.results.SkippedFile
+
 ::: scinr.newton.results.OrphanCollectionResult
 
 ::: scinr.newton.results.FreezeResult

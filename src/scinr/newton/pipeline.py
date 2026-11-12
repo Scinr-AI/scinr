@@ -69,8 +69,14 @@ from scinr.newton.progress import (
     _ProgressEmitter,
     _validate_callbacks,
 )
-from scinr.newton.results import DocumentResult, PipelineResult, StageResult
-from scinr.newton.utils.naming import source_doc_path, source_document_name
+from scinr.newton.results import (
+    DiscoveredDocuments,
+    DocumentResult,
+    PipelineResult,
+    SkippedFile,
+    StageResult,
+)
+from scinr.newton.utils.naming import source_doc_path, source_document_name, tabular_doc_path
 
 if TYPE_CHECKING:
     from scinr.newton.converters.base import IntermediateDocument
@@ -101,6 +107,43 @@ _DEFAULT_TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 # Stages handled per document by _process_document_unit() (everything but tabular)
 _UNIT_STAGES = frozenset(_DEFAULT_STAGES)
+
+
+def discover_documents(
+    input_raw: str,
+    tabular_extensions: set[str] | None = None,
+) -> DiscoveredDocuments:
+    """Return what run_pipeline() will do with every file under *input_raw*,
+    without converting or reading anything.
+
+    Uses the same discovery as run_pipeline() (one directory walk, a file is
+    judged by its extension), so a caller can decide before ingesting whether
+    a batch fits — for example, reserving ``count`` documents of a quota —
+    without copying Newton's rules.
+
+    Args:
+        input_raw: Root folder to walk recursively, as passed to run_pipeline().
+        tabular_extensions: The same value passed to run_pipeline(). ``None``
+            (the default) applies run_pipeline()'s default: ``.csv``, ``.xlsx``
+            and ``.xls``.
+
+    Returns:
+        DiscoveredDocuments with the ``doc_path`` of every tabular and
+        convertible file, the skipped files and ``count``, an upper bound of
+        the leaf :Document nodes the run can create.
+
+    Raises:
+        FileNotFoundError: If *input_raw* does not exist.
+    """
+    from scinr.newton.pipeline_units import _discover_raw_inputs
+
+    root = Path(input_raw)
+    raw_inputs = _discover_raw_inputs(input_raw, tabular_extensions or _DEFAULT_TABULAR_EXTENSIONS)
+    return DiscoveredDocuments(
+        tabular=[tabular_doc_path(f, root) for f in raw_inputs.tabular],
+        documents=[unit.doc_path for unit in raw_inputs.units],
+        skipped=[SkippedFile(path=str(f), reason=reason) for f, reason in raw_inputs.skipped],
+    )
 
 
 async def run_pipeline(

@@ -46,7 +46,7 @@ from scinr.newton.ingest._cascade import (
 )
 from scinr.newton.ingest._gc import GC_MAX_PASSES, OrphanCollector, sweep_tenant
 from scinr.newton.ingest.config import get_driver
-from scinr.newton.results import DeletionResult, OrphanCollectionResult
+from scinr.newton.results import DeletedDocument, DeletionResult, OrphanCollectionResult
 from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 from scinr.newton.utils.tenancy import tenant_key
 
@@ -132,6 +132,7 @@ WITH collect(DISTINCT d) AS seeds, collect(DISTINCT cd) AS descendants
 UNWIND seeds + descendants AS doc
 WITH DISTINCT doc, seeds
 RETURN doc.path AS path, doc.version AS version, doc.tenant_id AS tenant_id,
+       coalesce(doc.is_folder, false) AS is_folder,
        doc IN seeds AS is_seed,
        coalesce(doc.deletion_pending, doc.frozen_cleanup_pending, false) AS interrupted
 """
@@ -157,10 +158,11 @@ _CASCADE_COUNTER_FIELDS = (
 # ---------------------------------------------------------------------------
 
 
-def _fetch_document_keys(driver, filters: dict) -> tuple[list[dict], bool]:
+def _fetch_document_keys(driver, filters: dict) -> tuple[list[dict], list[DeletedDocument], bool]:
     """Resolve the selector to the ``{"path", "version"}`` keys of the matched
     Documents and their ``IS_COMPOSED_OF*`` descendants — descendants first,
-    matched documents last (the order they are deleted in) — and whether an
+    matched documents last (the order they are deleted in) —, the same
+    documents as :class:`DeletedDocument` (with ``is_folder``), and whether an
     earlier delete or freeze of any of them was interrupted.
 
     A Document that cannot be addressed by its key — no ``path`` /
@@ -191,14 +193,20 @@ def _fetch_document_keys(driver, filters: dict) -> tuple[list[dict], bool]:
         )
     addressable.sort(key=lambda row: row["is_seed"])
     keys = [{"path": row["path"], "version": row["version"]} for row in addressable]
-    return keys, any(row["interrupted"] for row in addressable)
+    documents = [
+        DeletedDocument(path=row["path"], version=row["version"], is_folder=bool(row["is_folder"]))
+        for row in addressable
+    ]
+    return keys, documents, any(row["interrupted"] for row in addressable)
 
 
-def _run_cascade_delete(driver, filters: dict) -> tuple[dict[str, int], dict[str, int]]:
+def _run_cascade_delete(
+    driver, filters: dict
+) -> tuple[dict[str, int], dict[str, int], list[DeletedDocument]]:
     """Delete the subtree of the selected Documents, collect the orphans and
     then delete the Documents themselves, in bounded transactions
-    (``ingest/_cascade.py``). Returns the cascade counters and the ``gc_*``
-    counters.
+    (``ingest/_cascade.py``). Returns the cascade counters, the ``gc_*``
+    counters and the documents it worked on.
 
     Not atomic — a single transaction holding the subtree of hundreds of
     documents overruns the server's transaction memory. The Documents are
@@ -224,7 +232,7 @@ def _run_cascade_delete(driver, filters: dict) -> tuple[dict[str, int], dict[str
     """
     database = get_config().neo4j_database
     tenant = filters["tenant_id"]
-    keys, interrupted = _fetch_document_keys(driver, filters)
+    keys, documents, interrupted = _fetch_document_keys(driver, filters)
     orphans = None
     if interrupted:
         logger.warning(
@@ -274,7 +282,7 @@ def _run_cascade_delete(driver, filters: dict) -> tuple[dict[str, int], dict[str
         raise
     counters = {name: subtree_counts.get(name, 0) for name in _CASCADE_COUNTER_FIELDS}
     counters["documents_deleted"] = documents_deleted
-    return counters, gc_counts
+    return counters, gc_counts, documents
 
 
 def _fetch_existing_versions(driver, filters: dict) -> list[int]:
@@ -549,7 +557,9 @@ async def delete_document(
             page_images_deleted,
         )
 
-        cascade_counts, gc_counts = await asyncio.to_thread(_run_cascade_delete, driver, filters)
+        cascade_counts, gc_counts, documents = await asyncio.to_thread(
+            _run_cascade_delete, driver, filters
+        )
 
         logger.info(
             "delete_document: complete for %s. "
@@ -581,6 +591,7 @@ async def delete_document(
             raw_files_deleted=raw_files_deleted,
             converted_pages_deleted=converted_pages_deleted,
             page_images_deleted=page_images_deleted,
+            documents=documents,
         )
     finally:
         driver.close()
