@@ -10,7 +10,6 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from scinr.newton.config import get_config
 from scinr.newton.ingest.config import get_async_driver, get_driver
 from scinr.newton.ingest.schema import setup_schema
 from scinr.newton.progress import _NULL_EMITTER, _ProgressEmitter
@@ -18,7 +17,6 @@ from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.tabular.agent import decide_content_type
 from scinr.newton.tabular.reader import SheetScan, scan_tabular_file
 from scinr.newton.utils.naming import source_document_name, tabular_doc_path
-from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +33,7 @@ async def run_tabular_pipeline(
     *,
     files: Sequence[tuple[Path, int]] | None = None,
     emitter: _ProgressEmitter = _NULL_EMITTER,
+    batch_version: int | None = None,
 ) -> StageResult:
     """Ingest all tabular files (CSV/XLSX/XLS) in *input_raw* directly into Neo4j.
 
@@ -88,6 +87,10 @@ async def run_tabular_pipeline(
         ``stage_completed`` / ``stage_failed`` → ``document_finished`` with
         ``stage="tabular"`` and its ``document_index``; a skipped file emits
         ``document_finished(status="skipped")`` without a stage outcome.
+    batch_version:
+        Batch version already resolved by the caller (``run_pipeline()`` shares
+        one version across tabular and document units). ``None`` resolves it
+        here from this run's tabular paths and *tenant_id*.
 
     Returns
     -------
@@ -138,13 +141,6 @@ async def run_tabular_pipeline(
 
     file_infos = [_file_to_doc_path(f) for f in tabular_files]
     all_doc_paths = list({dp for _, dp in file_infos})
-    expanded_paths: set[str] = set()
-    for dp in all_doc_paths:
-        expanded_paths.add(dp)
-        parts = dp.split("/")
-        for i in range(1, len(parts)):
-            expanded_paths.add("/".join(parts[:i]))
-    all_paths = list(expanded_paths)
 
     driver = get_driver()
     doc_results: list[DocumentResult] = []
@@ -165,31 +161,20 @@ async def run_tabular_pipeline(
     
         await ensure_theme_structure_once(async_driver, theme_registry)
         logger.info("Setup of theme and catalog complete")
-        cfg = get_config()
-        with driver.session(database=cfg.neo4j_database) as session:
+        if batch_version is not None:
+            resolved_version = batch_version
+        else:
+            from scinr.newton.ingest.loader import _extract_all_paths, resolve_batch_version_sync
+
             logger.info("Verifying previous documents")
-            # Versions are numbered per tenant: only this run's tenant's
-            # documents count (tenant_key: None -> the public scope).
-            if update_mode:
-                result = session.run(
-                    "MATCH (d:Document {latest: true}) "
-                    "WHERE d.tenant_id = $tenant_id AND d.path IN $paths "
-                    "RETURN max(d.version) AS max_version",
-                    tenant_id=tenant_key(tenant_id),
-                    paths=all_paths,
-                )
-            else:
-                result = session.run(
-                    "MATCH (d:Document) WHERE d.tenant_id = $tenant_id AND d.path IN $paths "
-                    "RETURN max(d.version) AS max_version",
-                    tenant_id=tenant_key(tenant_id),
-                    paths=all_paths,
-                )
-            record = result.single()
-            max_version = record["max_version"] if record else None
-            resolved_version = max_version if (update_mode and max_version is not None) else ((max_version + 1) if max_version is not None else 1)
-            logger.info("Max version of ingested document selected")
-            
+            # Versions are numbered per tenant (tenant_id None -> public scope).
+            resolved_version = await asyncio.to_thread(
+                resolve_batch_version_sync,
+                driver,
+                _extract_all_paths(all_doc_paths),
+                update_mode,
+                [tenant_id],
+            )
 
         logger.info("run_tabular_pipeline: batch version=%d (update_mode=%s)", resolved_version, update_mode)
 

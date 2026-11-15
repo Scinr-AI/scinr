@@ -623,6 +623,8 @@ async def _run_pipeline_impl(
 
     from scinr.newton.pipeline_units import _discover_raw_inputs
 
+    shared_batch_version: int | None = None
+
     async def _run_tabular_batch(files: list[tuple[Path, int]]) -> StageResult:
         """Batch events around run_tabular_pipeline(), which emits the per-file ones."""
         emitter.emit("stage_started", stage="tabular")
@@ -637,6 +639,7 @@ async def _run_pipeline_impl(
             job_id=job_id,
             files=files,
             emitter=emitter,
+            batch_version=shared_batch_version,
         )
         _emit_tabular_completed(emitter, sr)
         stage_results.append(sr)
@@ -703,6 +706,35 @@ async def _run_pipeline_impl(
             logger.info(
                 "Tabular files detected in '%s' — running tabular pipeline first.", input_raw
             )
+            # One batch version for the whole run: resolved once over the union
+            # of tabular + document paths and tenants, so folders shared by both
+            # are not split across two versions.
+            from scinr.newton.ingest.config import get_driver as _get_driver
+            from scinr.newton.ingest.loader import (
+                _extract_all_paths,
+            )
+            from scinr.newton.ingest.loader import (
+                resolve_batch_version_sync as _resolve_sync,
+            )
+            from scinr.newton.ingest.schema import setup_schema as _setup_schema
+            from scinr.newton.pipeline_units import unit_tenant as _unit_tenant
+
+            _root = Path(input_raw)
+            _leaves = [tabular_doc_path(f, _root) for f in raw_inputs.tabular]
+            _leaves += [u.doc_path for u in raw_inputs.units if u.doc_path]
+            _tenants = list(
+                dict.fromkeys(
+                    [tenant_id] + [_unit_tenant(u, tenant_id) for u in raw_inputs.units]
+                )
+            )
+            _vdriver = _get_driver()
+            try:
+                _setup_schema(_vdriver)
+                shared_batch_version = await asyncio.to_thread(
+                    _resolve_sync, _vdriver, _extract_all_paths(_leaves), update_mode, _tenants
+                )
+            finally:
+                _vdriver.close()
             sr = await _run_tabular_batch([(f, i) for i, f in enumerate(raw_inputs.tabular)])
             if _should_abort(sr):
                 return _build_result(False)
@@ -779,6 +811,8 @@ async def _run_pipeline_impl(
         if "ingestion" in effective_stages and units:
             sync_driver = get_driver()
             setup_schema(sync_driver)
+            shared_ingest_version = shared_batch_version
+        if shared_ingest_version is None and "ingestion" in effective_stages and units:
             all_paths = build_all_paths_for_versioning(units)
             batch_tenants = list(dict.fromkeys(unit_tenant(u, tenant_id) for u in units))
             shared_ingest_version = await asyncio.to_thread(

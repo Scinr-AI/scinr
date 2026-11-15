@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A mixed tabular + document run no longer splits shared folders across two
+  versions.** `run_pipeline` resolved the tabular and the document batch
+  versions separately, so an ancestor folder common to both (e.g. `A/` with
+  `a.pdf` and `b.xlsx`) was written twice, as version *N* and *N + 1*, on every
+  run. It now resolves one version over the union of all the run's paths and
+  tenants. Graphs already ingested with split versions are not migrated: re-ingest
+  or delete the surplus folder version.
+
+### Added
+- `run_tabular_pipeline(..., batch_version=None)`: batch version already resolved
+  by the caller. When omitted it is resolved with `resolve_batch_version_sync`
+  (the query that duplicated it in `stages/tabular.py` is gone).
+
 ## [0.5.0] - 2026-11-11
 
 Multimodal ingestion: image files, audio and video are turned into text at
