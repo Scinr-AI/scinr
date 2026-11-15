@@ -1432,6 +1432,31 @@ class TestProgressCallbacks:
         assert discovered.stages[-1] == "tabular"
         assert tracker.snapshot().total_documents == 2
 
+    async def test_mixed_folder_resolves_one_batch_version_for_everything(
+        self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, monkeypatch, tmp_path
+    ):
+        import scinr.newton.ingest.loader as ingest_loader_mod
+
+        self._mixed_folder(tmp_path)
+        resolve = MagicMock(return_value=5)
+        monkeypatch.setattr(ingest_loader_mod, "resolve_batch_version_sync", resolve)
+        mock_stages["run_tabular_pipeline"].return_value = _sr("tabular")
+        mock_unit_stage_fns["convert_one"].return_value = ([], [])
+
+        await run_pipeline(
+            stages=["preprocess", "extraction", "ingestion"],
+            input_raw=str(tmp_path),
+            tenant_id="acme",
+        )
+
+        resolve.assert_called_once()
+        _driver, paths, update_mode, tenants = resolve.call_args.args
+        assert {"a.csv", "sub/b.xlsx", "doc1.txt", "sub/doc2.txt", "sub"} <= set(paths)
+        assert update_mode is False
+        assert tenants == ["acme"]
+        kwargs = mock_stages["run_tabular_pipeline"].await_args.kwargs
+        assert kwargs["batch_version"] == 5
+
     async def test_mixed_folder_without_tabular_files_omits_tabular_stage(
         self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, tmp_path
     ):

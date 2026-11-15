@@ -70,7 +70,8 @@ def env(monkeypatch):
     monkeypatch.setattr(tabular_stage, "get_driver", _fake_driver)
     monkeypatch.setattr(tabular_stage, "get_async_driver", lambda: object())
     monkeypatch.setattr(tabular_stage, "setup_schema", lambda d: None)
-    monkeypatch.setattr(tabular_stage, "get_config", lambda: cfg)
+    resolve = MagicMock(return_value=1)
+    monkeypatch.setattr("scinr.newton.ingest.loader.resolve_batch_version_sync", resolve)
     monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_catalog_models_once", _noop)
     monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_theme_structure_once", _noop)
     monkeypatch.setattr("scinr.newton.utils.theme_registry.get_theme_registry", lambda: object())
@@ -83,7 +84,7 @@ def env(monkeypatch):
         return_value={"errors": [], "ingested_table_node_ids": ["t-1"]}
     )
     monkeypatch.setattr("scinr.newton.tabular.agent.run_tabular_agent", agent)
-    return {"agent": agent, "raw_repo": raw_repo}
+    return {"agent": agent, "raw_repo": raw_repo, "resolve": resolve}
 
 
 def _csv(path: Path, text: str = "a,b\n1,2\n") -> Path:
@@ -246,3 +247,28 @@ async def test_default_discovery_numbers_files_in_sorted_order(tmp_path, env):
 
     started = [e for e in emitter.events if e.kind == "document_started"]
     assert sorted((e.document_index, e.document_name) for e in started) == [(0, "a.csv"), (1, "b.csv")]
+
+
+async def test_standalone_resolves_version_with_shared_helper(tmp_path, env):
+    f = _csv(tmp_path / "A" / "data.csv")
+    env["resolve"].return_value = 4
+
+    await tabular_stage.run_tabular_pipeline(
+        str(tmp_path), files=[(f, 0)], tenant_id="acme", update_mode=True
+    )
+
+    env["resolve"].assert_called_once()
+    _driver, paths, update_mode, tenants = env["resolve"].call_args.args
+    assert set(paths) == {"A/data.csv", "A"}
+    assert update_mode is True
+    assert tenants == ["acme"]
+
+
+async def test_explicit_batch_version_skips_graph_lookup(tmp_path, env):
+    f = _csv(tmp_path / "A" / "data.csv")
+
+    await tabular_stage.run_tabular_pipeline(
+        str(tmp_path), files=[(f, 0)], batch_version=7
+    )
+
+    env["resolve"].assert_not_called()

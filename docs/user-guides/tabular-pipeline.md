@@ -233,6 +233,7 @@ async def run_tabular_pipeline(
     *,
     files: Sequence[tuple[Path, int]] | None = None,
     emitter: _ProgressEmitter = _NULL_EMITTER,
+    batch_version: int | None = None,
 ) -> StageResult
 ```
 
@@ -247,6 +248,7 @@ async def run_tabular_pipeline(
 | `created_by_user_id`, `job_id` | `str \| None` | `None` | Provenance metadata written onto every `:Document` created. |
 | `files` | `Sequence[tuple[Path, int]] \| None` | `None` | Files already discovered, each with its `document_index` for progress events. `None` discovers them under `input_raw`. Used by `run_pipeline()`. |
 | `emitter` | internal | no-op | Progress emitter; `run_pipeline()` passes its own. |
+| `batch_version` | `int \| None` | `None` | Batch version already resolved by the caller. `run_pipeline()` resolves one version for the whole run (tabular files and documents) and passes it here, so a folder shared by both is not split across two versions. `None` resolves it from this call's tabular paths and `tenant_id`. |
 
 ---
 
