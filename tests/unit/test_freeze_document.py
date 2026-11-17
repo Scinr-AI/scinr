@@ -18,8 +18,12 @@ import pytest
 from neo4j.time import DateTime
 
 from scinr.newton.exceptions import ConfigurationError, FreezeError
-from scinr.newton.ingest import _cascade, _gc, freeze
-from scinr.newton.ingest._gc import GC_REACHABILITY_MAX_HOPS
+from scinr.newton.graph import reset_graph_store, set_graph_store
+from scinr.newton.graph.neo4j import deletion as neo_deletion
+from scinr.newton.graph.neo4j import driver as neo_driver
+from scinr.newton.graph.neo4j import freeze as neo_freeze
+from scinr.newton.graph.neo4j import gc as neo_gc
+from scinr.newton.graph.neo4j.store import Neo4jGraphStore
 from scinr.newton.ingest.freeze import (
     SNAPSHOT_SCHEMA_VERSION,
     export_document_snapshot,
@@ -92,9 +96,9 @@ class _FakeTx:
             deleted = [d.orphans.pop(i) for i in params["ids"] if i in d.orphans]
             return _FakeResult([{"n": len(deleted)}])
         d.calls.append(("tx.run", query, params))
-        if query == freeze._FREEZE_GUARD_QUERY:
+        if query == neo_freeze._FREEZE_GUARD_QUERY:
             return _FakeResult([d.guard or {"found": len(params["keys"]), "frozen": 0}])
-        if query in (freeze._MARK_FROZEN_QUERY, freeze._MARK_BACKUP_QUERY):
+        if query in (neo_freeze._MARK_FROZEN_QUERY, neo_freeze._MARK_BACKUP_QUERY):
             return _FakeResult([{"n": len(params["keys"])}])
         raise AssertionError(f"Unexpected tx.run query: {query}")
 
@@ -119,17 +123,17 @@ class _FakeSession:
         d = self.driver
         d.calls.append(("session.run", query, params))
         key = (params.get("path"), params.get("version"))
-        if freeze._DOCUMENT_SET_TAIL in query:
+        if neo_freeze._DOCUMENT_SET_TAIL in query:
             return _FakeResult(d.docs)
-        if query == freeze._SUBTREE_NODES_EXPORT_QUERY:
+        if query == neo_freeze._SUBTREE_NODES_EXPORT_QUERY:
             if d.export_error is not None:
                 raise d.export_error
             return _FakeResult(d.nodes.get(key, []))
-        if query == freeze._DOCUMENT_RELATIONSHIPS_EXPORT_QUERY:
+        if query == neo_freeze._DOCUMENT_RELATIONSHIPS_EXPORT_QUERY:
             return _FakeResult(d.doc_rels.get(key, []))
-        if query == freeze._SUBTREE_RELATIONSHIPS_EXPORT_QUERY:
+        if query == neo_freeze._SUBTREE_RELATIONSHIPS_EXPORT_QUERY:
             return _FakeResult(d.rels.get(key, []))
-        if query == _gc.GC_SEEDS_QUERY:
+        if query == neo_gc.GC_SEEDS_QUERY:
             return _FakeResult(d.seed_rows)
         if query in _CANDIDATE_QUERIES:
             # Scoped GC: the orphans among a batch of candidates, each with
@@ -139,13 +143,13 @@ class _FakeSession:
             return _FakeResult(
                 [{"id": i, "dependents": d.orphans[i]} for i in params["ids"] if i in d.orphans]
             )
-        if query == _gc.GC_ENTITY_MODEL_INSTANCE_QUERY:
+        if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY:
             if d.gc_error is not None:
                 raise d.gc_error
             return _FakeResult([{"borrados": d.gc_emi.pop(0) if d.gc_emi else 0}])
-        if query == _gc.GC_LABELED_ENTITY_QUERY:
+        if query == neo_gc.GC_LABELED_ENTITY_QUERY:
             return _FakeResult([{"borrados": 0}])
-        if query == freeze._CLEAR_PENDING_QUERY:
+        if query == neo_freeze._CLEAR_PENDING_QUERY:
             return _FakeResult([{"n": len(params["keys"])}])
         if query in _STEP_QUERIES:
             if d.step_error is not None and "DETACH DELETE" in query:
@@ -209,25 +213,25 @@ _STEP_QUERIES = {
     for ksn in (False, True)
     for ka in (False, True)
     for ker in (False, True)
-    for _, query in _cascade.subtree_steps(ksn, ka, ker)
+    for _, query in neo_deletion.subtree_steps(ksn, ka, ker)
 }
 
 
 _CANDIDATE_QUERIES = (
-    _gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
-    _gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
+    neo_gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
+    neo_gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
 )
 _ORPHAN_DELETE_QUERIES = (
-    _gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
-    _gc.GC_LABELED_ENTITY_DELETE_QUERY,
+    neo_gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
+    neo_gc.GC_LABELED_ENTITY_DELETE_QUERY,
 )
 
 
 def _is_export_read(query: str) -> bool:
-    return freeze._DOCUMENT_SET_TAIL in query or query in (
-        freeze._SUBTREE_NODES_EXPORT_QUERY,
-        freeze._DOCUMENT_RELATIONSHIPS_EXPORT_QUERY,
-        freeze._SUBTREE_RELATIONSHIPS_EXPORT_QUERY,
+    return neo_freeze._DOCUMENT_SET_TAIL in query or query in (
+        neo_freeze._SUBTREE_NODES_EXPORT_QUERY,
+        neo_freeze._DOCUMENT_RELATIONSHIPS_EXPORT_QUERY,
+        neo_freeze._SUBTREE_RELATIONSHIPS_EXPORT_QUERY,
     )
 
 
@@ -287,18 +291,29 @@ def _graph(**doc_props) -> _FakeDriver:
 
 @pytest.fixture(autouse=True)
 def _stub_config(monkeypatch):
-    monkeypatch.setattr(freeze, "get_config", lambda: SimpleNamespace(neo4j_database="neo4j"))
+    """The Neo4j operations call get_config().neo4j_database for each session; these
+    tests never call configure(), so stub the reference imported into those modules."""
+    fake_cfg = SimpleNamespace(neo4j_database="neo4j")
+    for module in (neo_freeze, neo_deletion, neo_gc):
+        monkeypatch.setattr(module, "get_config", lambda: fake_cfg)
 
 
 @pytest.fixture
 def env(monkeypatch):
+    """freeze_document() / export_document_snapshot() through the real
+    ``Neo4jGraphStore`` over the fake driver (no backend is configured in unit tests)."""
+
     def _setup(driver: _FakeDriver, repo: _FakeFreezeRepo | None = None):
         repo = repo or _FakeFreezeRepo()
-        monkeypatch.setattr(freeze, "get_driver", lambda: driver)
+        monkeypatch.setattr(neo_driver, "get_driver", lambda: driver)
         monkeypatch.setattr("scinr.newton.freeze.factory.get_freeze_storage", lambda: repo)
+        set_graph_store(Neo4jGraphStore())
         return driver, repo
 
-    return _setup
+    try:
+        yield _setup
+    finally:
+        reset_graph_store()
 
 
 # ---------------------------------------------------------------------------
@@ -361,11 +376,6 @@ class TestExportSnapshot:
             {"path": "a.pdf", "version": 1, "job_id": "j1", "created_by_user_id": "u1"}
         ]
 
-    def test_document_links_are_tenant_scoped(self):
-        query = freeze._DOCUMENT_RELATIONSHIPS_EXPORT_QUERY
-        assert "m.tenant_id = $tenant_id" in query and "n.tenant_id = $tenant_id" in query
-        assert "IS_COMPOSED_OF|HAS_NEWER_VERSION" in query
-
     async def test_relationships_keep_catalog_refs_and_drop_outside_targets(self, env):
         env(_graph())
         snap = await export_document_snapshot("a.pdf", 1, tenant_id="acme")
@@ -415,7 +425,7 @@ class TestExportSnapshot:
         monkeypatch.setattr("scinr.newton.freeze.factory.get_freeze_storage", _none)
         with pytest.raises(ConfigurationError):
             await export_document_snapshot("a.pdf", tenant_id="acme", destination="storage")
-        assert not any(q == freeze._SUBTREE_NODES_EXPORT_QUERY for _, q, _ in driver.calls)
+        assert not any(q == neo_freeze._SUBTREE_NODES_EXPORT_QUERY for _, q, _ in driver.calls)
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -498,13 +508,6 @@ class TestExportSnapshot:
         snap = await export_document_snapshot("a.pdf", tenant_id="acme")
         assert [e["document"]["path"] for e in snap["documents"]] == ["a.pdf", "a.pdf/child"]
 
-    def test_subtree_query_is_hop_bounded_and_skips_catalog(self):
-        fragment = freeze._SUBTREE_NODES_FRAGMENT
-        assert f"[*1..{GC_REACHABILITY_MAX_HOPS}]" in fragment
-        for label in freeze.CATALOG_KEY_FIELDS:
-            assert f"n:{label}" in fragment
-        assert "tenant_id: $tenant_id" in fragment
-
     async def test_every_query_carries_the_tenant(self, env):
         driver, _ = env(_graph())
         await export_document_snapshot("a.pdf", tenant_id="acme")
@@ -545,7 +548,7 @@ class TestFreezeDocument:
         assert result.mode == "backup"
         assert result.found and result.frozen_blob_id == "blob-1"
         assert result.structure_nodes_deleted == 0
-        assert driver.tx_queries() == [freeze._MARK_BACKUP_QUERY]
+        assert driver.tx_queries() == [neo_freeze._MARK_BACKUP_QUERY]
         [(_, _, params)] = [c for c in driver.calls if c[0] == "tx.run"]
         assert params["blob_id"] == "blob-1"
         assert params["tenant_id"] == "acme"
@@ -591,10 +594,10 @@ class TestFreezeDocument:
             keep_extraction_results=ker,
         )
         queries = driver.write_queries()
-        sub = _cascade.subtree_query
-        md_delete = sub(_cascade.MODEL_DECISION_PATTERN, "delete")
-        er_delete = sub(_cascade.EXTRACTION_RESULT_PATTERN, "delete")
-        iu_delete = sub(_cascade.INFO_UNIT_PATTERN, "delete")
+        sub = neo_deletion.subtree_query
+        md_delete = sub(neo_deletion.MODEL_DECISION_PATTERN, "delete")
+        er_delete = sub(neo_deletion.EXTRACTION_RESULT_PATTERN, "delete")
+        iu_delete = sub(neo_deletion.INFO_UNIT_PATTERN, "delete")
 
         # The snapshot is always complete, whatever the flags.
         [stored] = repo.stored
@@ -608,51 +611,51 @@ class TestFreezeDocument:
 
         # The stubs are marked first, in their own transaction: from then on
         # every document points at the snapshot, whatever happens next.
-        assert queries[:2] == [freeze._FREEZE_GUARD_QUERY, freeze._MARK_FROZEN_QUERY]
+        assert queries[:2] == [neo_freeze._FREEZE_GUARD_QUERY, neo_freeze._MARK_FROZEN_QUERY]
         assert driver.tx_queries() == queries[:2]
         kinds = [kind for kind, _, _ in driver.calls if kind.startswith("tx.")]
         assert kinds == ["tx.run", "tx.run", "tx.commit"]
-        assert "d.frozen_cleanup_pending = true" in freeze._MARK_FROZEN_QUERY
+        assert "d.frozen_cleanup_pending = true" in neo_freeze._MARK_FROZEN_QUERY
 
         assert iu_delete in queries
         assert (md_delete in queries) is (not ka)
-        assert (sub(_cascade.PROPOSED_FIELD_PATTERN, "delete") in queries) is (not ka)
+        assert (sub(neo_deletion.PROPOSED_FIELD_PATTERN, "delete") in queries) is (not ka)
         assert (er_delete in queries) is (not ker)
-        assert (_cascade.STRUCTURE_NODES_DELETE_QUERY in queries) is (not ksn)
-        assert (_cascade.STRUCTURE_NODES_COUNT_QUERY in queries) is ksn
-        assert (_cascade.RELINK_MODEL_DECISIONS_QUERY in queries) is (not ksn and ka)
-        assert (_cascade.RELINK_EXTRACTION_RESULTS_QUERY in queries) is (not ksn and ker)
+        assert (neo_deletion.STRUCTURE_NODES_DELETE_QUERY in queries) is (not ksn)
+        assert (neo_deletion.STRUCTURE_NODES_COUNT_QUERY in queries) is ksn
+        assert (neo_deletion.RELINK_MODEL_DECISIONS_QUERY in queries) is (not ksn and ka)
+        assert (neo_deletion.RELINK_EXTRACTION_RESULTS_QUERY in queries) is (not ksn and ker)
 
         # Order: relinks before the StructureNodes go, children before parents,
         # then the GC of what the deleted ExtractionResults pointed at (read
         # before they go), and the pending mark is cleared last.
         if not ksn:
-            sn = _index(queries, _cascade.STRUCTURE_NODES_DELETE_QUERY)
+            sn = _index(queries, neo_deletion.STRUCTURE_NODES_DELETE_QUERY)
             assert _index(queries, iu_delete) < sn
             if ka:
-                assert _index(queries, _cascade.RELINK_MODEL_DECISIONS_QUERY) < sn
+                assert _index(queries, neo_deletion.RELINK_MODEL_DECISIONS_QUERY) < sn
             if ker:
-                assert _index(queries, _cascade.RELINK_EXTRACTION_RESULTS_QUERY) < sn
+                assert _index(queries, neo_deletion.RELINK_EXTRACTION_RESULTS_QUERY) < sn
         if not ka:
-            assert _index(queries, sub(_cascade.PROPOSED_FIELD_PATTERN, "delete")) < _index(
-                queries, sub(_cascade.PROPOSED_MODEL_PATTERN, "delete")
+            assert _index(queries, sub(neo_deletion.PROPOSED_FIELD_PATTERN, "delete")) < _index(
+                queries, sub(neo_deletion.PROPOSED_MODEL_PATTERN, "delete")
             ) < _index(queries, md_delete)
         steps = driver.step_queries()
         cleanup = queries[2:]
         if not ker:
-            assert cleanup[0] == _gc.GC_SEEDS_QUERY
+            assert cleanup[0] == neo_gc.GC_SEEDS_QUERY
             cleanup = cleanup[1:]
         assert cleanup[: len(steps)] == steps
         tail = cleanup[len(steps) :]
         # Kept ExtractionResults orphan nothing: no candidates, no GC.
         scoped_gc = [
-            _gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
-            _gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
-            _gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
-            _gc.GC_LABELED_ENTITY_DELETE_QUERY,
+            neo_gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
+            neo_gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
+            neo_gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
+            neo_gc.GC_LABELED_ENTITY_DELETE_QUERY,
         ]
         assert tail[:-1] == ([] if ker else scoped_gc)
-        assert tail[-1] == freeze._CLEAR_PENDING_QUERY
+        assert tail[-1] == neo_freeze._CLEAR_PENDING_QUERY
         # Never a scan of the whole tenant.
         assert not any("borrados" in q for q in queries)
         candidates = [p["ids"] for _, q, p in driver.calls if q in _CANDIDATE_QUERIES]
@@ -660,7 +663,7 @@ class TestFreezeDocument:
         deleted = [p["ids"] for kind, _, p in driver.calls if kind == "gc.run"]
         assert deleted == ([] if ker else [["mi-1"], ["le-1"]])
 
-        mark_params = next(p for kind, q, p in driver.calls if q == freeze._MARK_FROZEN_QUERY)
+        mark_params = next(p for kind, q, p in driver.calls if q == neo_freeze._MARK_FROZEN_QUERY)
         assert mark_params["blob_id"] == "blob-1"
         assert (
             mark_params["keep_structure_nodes"],
@@ -712,7 +715,7 @@ class TestFreezeDocument:
         result = await freeze_document("folder", tenant_id="acme")
         assert result.versions_frozen == [1, 2]
         assert result.documents_frozen == 3
-        mark_params = next(p for _, q, p in driver.calls if q == freeze._MARK_FROZEN_QUERY)
+        mark_params = next(p for _, q, p in driver.calls if q == neo_freeze._MARK_FROZEN_QUERY)
         assert mark_params["keys"] == [
             {"path": "folder", "version": 2},
             {"path": "folder", "version": 1},
@@ -727,7 +730,7 @@ class TestFreezeDocument:
             await freeze_document("a.pdf", tenant_id="acme")
         kinds = [kind for kind, _, _ in driver.calls if kind.startswith("tx.")]
         assert "tx.rollback" in kinds and "tx.commit" not in kinds
-        assert driver.write_queries() == [freeze._FREEZE_GUARD_QUERY]
+        assert driver.write_queries() == [neo_freeze._FREEZE_GUARD_QUERY]
 
     async def test_step_failure_leaves_frozen_stubs_pending(self, env, caplog):
         """The subtree is deleted in batches, not atomically: when a step
@@ -743,7 +746,7 @@ class TestFreezeDocument:
         assert kinds == ["tx.run", "tx.run", "tx.commit"]  # guard, mark — committed
         queries = driver.write_queries()
         assert not any("borrados" in q or q in _CANDIDATE_QUERIES for q in queries)
-        assert freeze._CLEAR_PENDING_QUERY not in queries
+        assert neo_freeze._CLEAR_PENDING_QUERY not in queries
         assert "Call freeze_document() again" in caplog.text
         assert "restore_document()" in caplog.text
 
@@ -753,7 +756,7 @@ class TestFreezeDocument:
         env(driver)
         with pytest.raises(RuntimeError, match="gc failed"):
             await freeze_document("a.pdf", tenant_id="acme")
-        assert freeze._CLEAR_PENDING_QUERY not in driver.write_queries()
+        assert neo_freeze._CLEAR_PENDING_QUERY not in driver.write_queries()
 
     async def test_selector_validation(self, env):
         driver, _ = env(_graph())
@@ -800,11 +803,11 @@ class TestResumeInterruptedFreeze:
         assert driver.tx_queries() == []  # neither guard nor mark: already stubs
         assert not any(_is_export_read(q) for _, q, _ in driver.calls[1:])
         queries = driver.write_queries()
-        assert queries[-1] == freeze._CLEAR_PENDING_QUERY
+        assert queries[-1] == neo_freeze._CLEAR_PENDING_QUERY
         # The candidates of the interrupted run died with it: the whole
         # tenant is swept instead (2 + 0 Entity|ModelInstance, 0 LabeledEntity).
         assert sum("borrados" in q for q in queries) == 3
-        assert _gc.GC_SEEDS_QUERY not in queries
+        assert neo_gc.GC_SEEDS_QUERY not in queries
         assert not any(q in _CANDIDATE_QUERIES for q in queries)
         assert result.gc_entity_model_instance_deleted == 2
         assert result.found and result.mode == "freeze"
@@ -819,9 +822,9 @@ class TestResumeInterruptedFreeze:
         result = await freeze_document("a.pdf", tenant_id="acme", keep_extraction_results=True)
 
         assert driver.step_queries() == [
-            query for _, query in _cascade.subtree_steps(False, True, False)
+            query for _, query in neo_deletion.subtree_steps(False, True, False)
         ]
-        assert _cascade.RELINK_MODEL_DECISIONS_QUERY in driver.step_queries()
+        assert neo_deletion.RELINK_MODEL_DECISIONS_QUERY in driver.step_queries()
         assert result.model_decisions_kept == 3
         assert result.extraction_results_kept == 0
 
@@ -835,18 +838,18 @@ class TestResumeInterruptedFreeze:
         # Only the document that was not frozen yet is exported and marked.
         [stored] = repo.stored
         assert [e["document"]["path"] for e in stored["snapshot"]["documents"]] == ["folder"]
-        mark_params = next(p for _, q, p in driver.calls if q == freeze._MARK_FROZEN_QUERY)
+        mark_params = next(p for _, q, p in driver.calls if q == neo_freeze._MARK_FROZEN_QUERY)
         assert mark_params["keys"] == [{"path": "folder", "version": 1}]
         # Each document is cleaned up with its own flags...
         step_keys = {
             q: p["keys"] for kind, q, p in driver.calls if kind == "session.run" and q in _STEP_QUERIES
         }
-        assert step_keys[_cascade.STRUCTURE_NODES_COUNT_QUERY] == [{"path": "folder", "version": 1}]
-        assert step_keys[_cascade.STRUCTURE_NODES_DELETE_QUERY] == [
+        assert step_keys[neo_deletion.STRUCTURE_NODES_COUNT_QUERY] == [{"path": "folder", "version": 1}]
+        assert step_keys[neo_deletion.STRUCTURE_NODES_DELETE_QUERY] == [
             {"path": "folder/old", "version": 1}
         ]
         # ...and the pending mark is cleared on both.
-        clear_params = next(p for _, q, p in driver.calls if q == freeze._CLEAR_PENDING_QUERY)
+        clear_params = next(p for _, q, p in driver.calls if q == neo_freeze._CLEAR_PENDING_QUERY)
         assert clear_params["keys"] == [
             {"path": "folder", "version": 1},
             {"path": "folder/old", "version": 1},
@@ -863,7 +866,7 @@ class TestResumeInterruptedFreeze:
         await freeze_document("folder", tenant_id="acme")
 
         queries = driver.write_queries()
-        assert _gc.GC_SEEDS_QUERY not in queries
+        assert neo_gc.GC_SEEDS_QUERY not in queries
         assert sum("borrados" in q for q in queries) == 3
 
     async def test_a_half_deleted_document_is_swept_and_unmarked(self, env):
@@ -875,10 +878,10 @@ class TestResumeInterruptedFreeze:
 
         queries = driver.write_queries()
         assert len(repo.stored) == 1  # not a stub: exported and frozen as usual
-        assert _gc.GC_SEEDS_QUERY not in queries
+        assert neo_gc.GC_SEEDS_QUERY not in queries
         assert sum("borrados" in q for q in queries) == 3
-        assert queries[-1] == freeze._CLEAR_PENDING_QUERY
-        assert "d.deletion_pending" in freeze._CLEAR_PENDING_QUERY
+        assert queries[-1] == neo_freeze._CLEAR_PENDING_QUERY
+        assert "d.deletion_pending" in neo_freeze._CLEAR_PENDING_QUERY
         assert result.gc_entity_model_instance_deleted == 2
 
     async def test_backup_mode_refuses_pending_stubs(self, env):

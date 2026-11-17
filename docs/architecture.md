@@ -32,6 +32,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 6. [Data Flow](#6-data-flow)
 7. [Neo4j Schema](#7-neo4j-schema)
 8. [Storage Backends](#8-storage-backends)
+   - [Graph Layer (GraphStore)](#8d-graph-layer-graphstore)
    - [Document Lifecycle: Delete, Freeze, Restore](#8c-document-lifecycle-delete-freeze-restore)
 9. [Prompt System](#9-prompt-system)
 10. [Error Handling](#10-error-handling)
@@ -237,13 +238,13 @@ When `output_folder` is provided, the extracted `Document` is written as `extrac
 
 The ingestion module (`ingest/`) provides:
 
-- **`setup_schema(driver)`** — Creates all Neo4j constraints and indexes idempotently (using `IF NOT EXISTS`). Includes:
+- **`store.schema.setup()`** (`graph/neo4j/schema.py`) — Creates all Neo4j constraints and indexes idempotently (using `IF NOT EXISTS`). Includes:
   - 10 unique constraints (Document path+version, StructureNode id, InfoUnit uid, etc.)
   - 9 regular indexes (Document name/latest/path, StructureNode role, etc.)
   - 2 fulltext indexes (InfoUnit description and title for semantic search)
   - Best-effort Neo4j version check (requires >= 4.4)
 
-- **`load_documents(documents, driver, update_mode)`** — In-memory ingestion of `Document` objects.
+- **`load_documents(documents, update_mode)`** — In-memory ingestion of `Document` objects.
 - **`load_files(files, driver, update_mode)`** — Ingestion from explicit file paths.
 - **`load_folder(folder, driver, update_mode)`** — Ingestion from a directory of `extract-*.json` files.
 
@@ -334,7 +335,7 @@ Built-in themes are registered in `utils/theme_registry.py`. User themes are loa
 
 **Catalog and Theme Neo4j Setup:**
 
-Before annotation begins, `ensure_catalog_models_once()` and `ensure_theme_structure_once()` are called (idempotent, memoized) to:
+Before annotation begins, `ensure_catalog_models_once()` and `ensure_theme_structure_once()` (`annotation/catalog.py`) are called. They memoize per process and run the traversal of the models and themes (`ensure_catalog_models()` / `ensure_theme_structure()`, in the same module) against the sink opened by `store.annotation.catalog_sink()` (idempotent) to:
 1. Create `:CatalogModel` and `:ModelField` nodes for all registered models
 2. Create `:Theme` nodes and link them to their models
 3. Create `:EntityLabel` nodes for all entity labels defined in model fields
@@ -386,7 +387,7 @@ The LLM receives:
 
 The LLM returns a populated instance of the composite schema.
 
-**Step 3 — Graph Write (`graph_mapper.py`):**
+**Step 3 — Graph Write (`write_extraction_subgraph()` in `entity_extraction/graph_mapper.py`, which walks the instance and writes through the sink opened by `store.extraction.sink()`, `graph/neo4j/extraction.py`):**
 
 The populated Pydantic instance is converted into a Neo4j subgraph with three levels of entity representation:
 
@@ -458,7 +459,7 @@ The tabular pipeline (`tabular/`) uses a **LangGraph**-based state machine (`tab
 
 5. **`map_columns`** — Makes one LLM call per sheet to map column names to model fields. The LLM receives the sheet headers, the selected model's field definitions, and returns a column-to-field mapping. If no model matched, the LLM call is skipped and all columns are mapped to `__extra__`.
 
-6. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph directly to Neo4j. Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
+6. **`write_tabular`** — Writes the `Table` and `Row` `StructureNode` subgraph to the graph (`write_tabular_subgraph()` in `tabular/graph_writer.py`, through the sink opened by `store.tabular.sink()`). Each row becomes a `:StructureNode {role: "row"}` with `InfoUnit` children for each mapped cell value.
 
 **Per-File Process:**
 
@@ -653,7 +654,7 @@ scinr.newton/
 ├── annotation/                 # Stage 3: LLM classification
 │   ├── agent.py                # run_annotation_agent(), run_manual_annotation()
 │   ├── models.py               # AnnotationDecision, ModelDecision Pydantic models
-│   ├── neo4j_ops.py            # fetch_nodes_to_annotate(), write_annotation(), catalog/theme setup
+│   ├── catalog.py              # Model introspection for the catalog (no Cypher) + ensure_*_once() memoization
 │   ├── nodes.py                # process_single_annotation_node() — per-node LLM pipeline
 │   ├── prompts.py              # Prompt family dispatcher
 │   ├── prompts_generic.py      # GENERIC family prompts
@@ -686,9 +687,8 @@ scinr.newton/
 │
 ├── entity_extraction/          # Stage 4: entity extraction
 │   ├── agent.py                # run_entity_extraction_agent()
-│   ├── graph_mapper.py         # write_extraction_subgraph(), write_triple_subgraph()
+│   ├── graph_mapper.py         # write_extraction_subgraph(), write_triple_subgraph(): traversal of the extracted instance (no Cypher; writes through store.extraction.sink())
 │   ├── model_resolver.py       # resolve_model_class() — theme registry lookup
-│   ├── neo4j_ops.py            # fetch_extraction_targets()
 │   ├── nodes.py                # process_single_extraction_target() — per-node LLM pipeline
 │   ├── prompts.py              # Prompt family dispatcher
 │   ├── prompts_generic.py      # GENERIC family prompts
@@ -708,16 +708,33 @@ scinr.newton/
 │   └── mongodb/
 │       └── repository.py       # MongoDBFreezeRepository (GridFS + metadata collection)
 │
+├── graph/                      # Write-path interface to the graph (GraphStore)
+│   ├── base.py                 # GraphStore ABC and its sub-interfaces
+│   ├── types.py                # Domain types that cross the interface
+│   ├── sinks.py                # Sink protocols (extraction, tabular, catalog)
+│   ├── factory.py              # Chooses the implementation for graph_backend
+│   └── neo4j/                  # Neo4j implementation
+│       ├── store.py            # Neo4jGraphStore, sync_scope()
+│       ├── schema.py           # Neo4jSchemaOps (store.schema): setup(), ensure_indexes() — constraints and indexes
+│       ├── documents.py        # Neo4jDocumentOps (store.documents): versions, document load, replacement, leaf resolution
+│       ├── annotation.py       # Neo4jAnnotationOps (store.annotation): catalog, themes, annotation readers and writers
+│       ├── extraction.py       # Neo4jExtractionOps (store.extraction): sink(), fetch_targets(), mark_info_units_extracted(); Neo4jExtractionSink: the statements of the subgraph writers
+│       ├── tabular.py          # Neo4jTabularOps (store.tabular): sink(), delete_tabular_subgraph(); Neo4jTabularSink: the statements of the sheet writer
+│       ├── deletion.py         # Neo4jDeletionOps (store.deletion): document selection, deletion_pending mark, subtree deletion in bounded transactions (shared with freeze)
+│       ├── gc.py               # Neo4jGcOps (store.gc): OrphanCollector (scoped) and sweep_tenant()
+│       ├── freeze.py           # Neo4jFreezeOps (store.freeze): document set, streaming ExportReader (export_snapshot retries the whole attempt), frozen/backup marks, reduction to stubs
+│       ├── restore.py          # Neo4jRestoreOps (store.restore): batch writer (lanes, bounded concurrency, drain/abort), finish queries, snapshot-reference count
+│       ├── _shared.py          # run_count_query(), DOCS_BY_KEY, batch sizes, delete_stale_model_decision(), delete_stale_extraction_result(), provenance_set_clause() (take the caller's runner)
+│       ├── driver.py           # get_driver(), get_async_driver() — Neo4j driver factories
+│       ├── retry.py            # Neo4j operation retry with exponential backoff
+│       └── errors.py           # neo4j.exceptions → GraphError hierarchy
+│
 ├── ingest/                     # Stage 2: Neo4j ingestion, and the document lifecycle
-│   ├── config.py               # get_driver(), get_async_driver() — Neo4j driver singletons
 │   ├── loader.py               # load_documents(), load_files(), load_folder(), version resolution
-│   ├── nodes.py                # insert_document(), insert_structure_node(), insert_info_unit()
-│   ├── schema.py               # setup_schema(), ensure_indexes() — constraints and indexes
-│   ├── deletion.py             # delete_document(), collect_orphans()
-│   ├── freeze.py               # freeze_document(), export_document_snapshot()
-│   ├── restore.py              # restore_document()
-│   ├── _cascade.py             # Subtree deletion in bounded transactions (shared by delete and freeze)
-│   ├── _gc.py                  # Orphan collection: OrphanCollector (scoped) and sweep_tenant()
+│   ├── nodes.py                # make_structure_node_id(), ROLE_TO_LABEL (engine-independent; the Cypher is in graph/neo4j/documents.py)
+│   ├── deletion.py             # delete_document(), collect_orphans() — filter validation and orchestration (the Cypher is in graph/neo4j/deletion.py and gc.py)
+│   ├── freeze.py               # freeze_document(), export_document_snapshot() — snapshot format, node identity, export validation and orchestration (the Cypher is in graph/neo4j/freeze.py)
+│   ├── restore.py              # restore_document() — snapshot scan/validation and the engine-independent _Rebuilder (the Cypher and the batch writer are in graph/neo4j/restore.py)
 │   └── _json_stream.py         # Streaming JSON writer for snapshots
 │
 ├── models/                     # Core Pydantic models
@@ -769,7 +786,8 @@ scinr.newton/
 │   ├── graph.py                # LangGraph state machine (load_sheets → decide_model → map_columns → write)
 │   ├── state.py                # TabularState — LangGraph state schema
 │   ├── reader.py               # CSV/XLSX/XLS file reading
-│   ├── neo4j_ops.py            # Tabular Neo4j writes
+│   ├── rows.py                 # Cypher-free row logic: value routing, normalization keys, composite instantiation
+│   ├── graph_writer.py         # write_tabular_subgraph(): traversal of a sheet (batches, normalization passes; no Cypher; writes through store.tabular.sink())
 │   ├── nodes.py                # Per-sheet tabular node processing
 │   ├── prompts.py              # Prompt family dispatcher
 │   ├── prompts_generic.py      # GENERIC family prompts
@@ -783,9 +801,8 @@ scinr.newton/
     ├── llm_factory.py          # LLM instance creation helpers
     ├── llm_retry.py            # LLM call retry with exponential backoff
     ├── llm_repair.py           # JSON repair loop via secondary LLM
-    ├── neo4j_retry.py          # Neo4j operation retry with exponential backoff
     ├── neo4j_concurrency.py    # Neo4j concurrency utilities
-    ├── document_resolver.py    # resolve_leaf_document_names() — folder → leaf resolution
+    ├── document_resolver.py    # resolve_leaf_documents() — folder → leaf resolution (query in graph/neo4j/documents.py)
     ├── logging_config.py       # Structured logging setup
     └── uid.py                  # Deterministic UID generation (make_uid, make_instance_uid)
 ```
@@ -908,7 +925,7 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 
 ### Constraints and Indexes
 
-See `ingest/schema.py` for the complete DDL, and [Neo4j Graph Storage — Indexes and Constraints](user-guides/neo4j-graph.md#indexes-and-constraints) for the list:
+See `graph/neo4j/schema.py` for the complete DDL, and [Neo4j Graph Storage — Indexes and Constraints](user-guides/neo4j-graph.md#indexes-and-constraints) for the list:
 - **Unique constraints** ensuring node identity and preventing duplicates
 - **Regular indexes** for query performance: tenant, user and job filters, composite tenant indexes, and the `uid` lookups `restore_document()` relies on
 - **Fulltext indexes** for semantic search on InfoUnit content
@@ -992,9 +1009,71 @@ See the [Graph Navigation user guide](user-guides/graph-navigation.md) and the
 
 ---
 
+## 8d. Graph Layer (GraphStore)
+
+The pipeline never talks to Neo4j directly. Every write to the graph, and the
+internal reads that go with it, goes through `GraphStore`
+(`scinr.newton.graph`), obtained with `get_graph_store()`. `Neo4jGraphStore`
+is the only implementation today and runs exactly the Cypher the pipeline always
+ran. Read-only exploration is a separate layer ([8b](#8b-graph-navigation-layer)).
+
+```
+get_graph_store()  ──reads──▶  cfg.graph_backend   (env GRAPH_BACKEND, default "neo4j")
+      │
+      ▼
+GraphStore (ABC)        facade: one sub-interface per group + sync_scope() / close() / aclose()
+      │
+      ├── schema        SchemaOps        constraints and indexes
+      ├── documents     DocumentOps      versions, document load, replacement, leaf resolution
+      ├── annotation    AnnotationOps    catalog_sink(), annotation readers and writers
+      ├── extraction    ExtractionOps    sink(), extraction targets
+      ├── tabular       TabularOps       sink(), delete_tabular_subgraph()
+      ├── deletion      DeletionOps      selection, deletion_pending mark, cascade, document delete
+      ├── gc            GcOps            orphan collector, sweep_tenant(), run_pass()
+      ├── freeze        FreezeOps        document set, export_snapshot(), marks, reduction to stubs
+      └── restore       RestoreOps       batch_writer(), finishing queries
+      │
+      ▼
+Neo4jGraphStore        graph/neo4j/: one module per sub-interface (Neo4j*Ops)
+      │                retries (retry.py) inside, errors translated at the boundary (errors.py)
+      ▼
+Neo4j
+```
+
+- **Rules.** No engine object (driver, session, transaction, query text) crosses
+  the interface; each method owns its sessions and transactions; retries live
+  inside the implementation; semaphores stay with the caller. Each method keeps
+  the sync or async flavor it had.
+- **Synchronous scope.** `store.sync_scope()` shares one synchronous driver among
+  the calls made inside the block, including the worker threads started with
+  `asyncio.to_thread`; outside a scope each call opens and closes its own
+  connection. `run_pipeline`, `run_ingestion`, `run_tabular_pipeline`,
+  `delete_document`, `collect_orphans`, `freeze_document` and `restore_document`
+  open one. The asynchronous driver is a process-wide singleton (`configure()`
+  discards it).
+- **Sinks.** Where the pipeline walks a Pydantic model or a table to write it
+  (catalog and themes, entity extraction, tabular sheets), the traversal is domain
+  code (`annotation/catalog.py`, `entity_extraction/graph_mapper.py`,
+  `tabular/graph_writer.py`) with no Cypher; it calls a *sink* with one method
+  per statement. The store hands the sink out as an async context manager
+  (`store.annotation.catalog_sink()`, `store.extraction.sink()`,
+  `store.tabular.sink()`). A new backend implements the sink, not the traversal.
+- **Errors.** Engine failures leave as the `GraphError` hierarchy (see
+  [Error Handling](#10-error-handling)), translated outside the retry, with the
+  engine's message and the original exception in `__cause__`.
+- **Boundaries.** Outside `graph/neo4j/` and `navigation/neo4j/` nothing imports
+  `neo4j`, catches `neo4j.exceptions` or contains Cypher text;
+  `tests/unit/test_graph_boundaries.py` enforces it.
+- **Contract.** `tests/contract/` runs the same tests against every registered
+  backend using only `GraphStore`.
+
+See the [Graph Store API reference](api/graph-store.md).
+
+---
+
 ## 8c. Document Lifecycle: Delete, Freeze, Restore
 
-Five public `async` functions act on documents that are already in the graph. They are not pipeline stages: each opens and closes its own Neo4j driver, and none of them calls an LLM.
+Five public `async` functions act on documents that are already in the graph. They are not pipeline stages: each opens and closes its own graph connection (a `store.sync_scope()`), and none of them calls an LLM.
 
 | Function | Module | What it does |
 |---|---|---|
@@ -1008,16 +1087,17 @@ Five public `async` functions act on documents that are already in the graph. Th
 
 **Bounded transactions.** Neo4j caps the memory of all running transactions (`dbms.memory.transaction.total.max`, a fixed size on Aura), so none of these operations runs in one transaction:
 
-- Delete and freeze share `ingest/_cascade.py`: documents are processed 50 at a time and each delete commits every 1,000 nodes (`CALL { ... } IN TRANSACTIONS`).
-- The restore writes idempotent batches (`batch_size` rows, `concurrency` transactions in flight).
+- Delete and freeze share the cascade in `graph/neo4j/deletion.py`: documents are processed 50 at a time and each delete commits every 1,000 nodes (`CALL { ... } IN TRANSACTIONS`).
+- The restore writes idempotent batches (`batch_size` rows, `concurrency` transactions in flight). The engine-independent `_Rebuilder` decides what goes in each batch and in which order; the `RestoreWriter` of `store.restore.batch_writer()` runs them (`lane` and `concurrency` are hints a backend may ignore; `drain()` waits for everything submitted and raises the first error).
+- The export reads through an `ExportReader` that streams (`store.freeze.export_snapshot()` retries the whole attempt, output file included) and writes to the snapshot as it reads.
 - The price is atomicity, so each operation can be called again to finish. The `:Document` carries a mark while the work is in progress: `deletion_pending`, or `frozen_cleanup_pending` on a stub.
 
 **Snapshot first.** A freeze stores the complete snapshot before it deletes anything, and marks the stubs with its id. Whatever happens afterwards, the document can be restored.
 
-**Garbage collection** (`ingest/_gc.py`). An `:Entity` / `:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when nothing points at it.
+**Garbage collection** (`graph/neo4j/gc.py`, `store.gc`). An `:Entity` / `:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when nothing points at it.
 
-- Delete and freeze collect only what they can have orphaned: the nodes the deleted `:ExtractionResult` nodes pointed at, then what each deleted orphan pointed at (`OrphanCollector`). The cost follows the operation, not the tenant.
-- `collect_orphans()` checks every such node of a tenant (`sweep_tenant()`). The same sweep runs when a call finishes an interrupted delete or freeze, and when a restore finds extraction results written onto a frozen document.
+- Delete and freeze collect only what they can have orphaned: the nodes the deleted `:ExtractionResult` nodes pointed at, then what each deleted orphan pointed at (`store.gc.collector()`, an `OrphanCollector` that keeps opaque handles — element ids in Neo4j — the pipeline never inspects). The cost follows the operation, not the tenant.
+- `collect_orphans()` checks every such node of a tenant (`store.gc.sweep_tenant()`). The same sweep runs when a call finishes an interrupted delete or freeze, and when a restore finds extraction results written onto a frozen document.
 - Everything is scoped to one tenant.
 
 **Snapshot format.** A streaming JSON document with one entry per document. Nodes are identified by business key (`(tenant_id, path, version)`, `id`, `uid`), never by element id, so a snapshot can be restored into a graph where the nodes no longer exist. It is written with `ingest/_json_stream.py` and read with `ijson`, never loaded whole.
@@ -1061,21 +1141,25 @@ All exceptions inherit from `ScinrError`:
 
 ```
 ScinrError (base)
-├── ConfigurationError      # Misconfiguration (missing LLM, Neo4j credentials, etc.)
+├── ConfigurationError      # Misconfiguration (missing LLM, invalid storage backend, etc.)
+│   └── GraphConfigurationError  # Graph backend not configured (Neo4j credentials missing)
 ├── PreconditionError       # Pipeline called out of order
 ├── ExtractionError         # LLM extraction failed after retries
-├── IngestionError          # Neo4j write failed
+├── IngestionError          # Ingesting a document failed (not a graph-engine error)
 ├── ModelError              # Pydantic model resolution failure
 ├── StorageError            # MongoDB unavailable/misconfigured
 ├── FreezeError             # A document cannot be frozen, restored or snapshotted
 ├── ConversionError         # File converter failure
-└── NavigationError         # Graph navigation (GraphConnectionError, UnsupportedOperationError, ScopeError)
+├── NavigationError         # Graph navigation input/misuse (UnsupportedOperationError, ScopeError)
+└── GraphError              # Anything from the graph engine (GraphConnectionError, GraphAuthenticationError,
+                            #   TransientGraphError, GraphResourceError, GraphConstraintError,
+                            #   DocumentVersionConflict, GraphQueryError)
 ```
 
 ### Retry Mechanisms
 
 - **LLM Retry** (`utils/llm_retry.py`): Exponential backoff retry for LLM calls
-- **Neo4j Retry** (`utils/neo4j_retry.py`): Exponential backoff retry for Neo4j operations, on transient errors (deadlocks, a full transaction memory pool), an expired session and whatever the driver declares retryable (a leader change in a cluster)
+- **Neo4j Retry** (`graph/neo4j/retry.py`): Exponential backoff retry for Neo4j operations, on transient errors (deadlocks, a full transaction memory pool), an expired session and whatever the driver declares retryable (a leader change in a cluster)
 - **JSON Repair** (`utils/llm_repair.py`): Secondary LLM call to repair malformed JSON output
 - **Bedrock Retry** (`utils/bedrock_retry.py`): Bedrock-specific retry with service-aware backoff
 

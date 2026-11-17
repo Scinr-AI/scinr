@@ -115,8 +115,8 @@ class TestIngestOneSemaphore:
             side_effect=tracker.blocking_call,
         ):
             results = await asyncio.gather(
-                ingest_one(doc=object(), driver=object()),
-                ingest_one(doc=object(), driver=object()),
+                ingest_one(doc=object()),
+                ingest_one(doc=object()),
             )
 
         assert results == ["ok", "ok"]
@@ -131,8 +131,8 @@ class TestIngestOneSemaphore:
             side_effect=tracker.blocking_call,
         ):
             results = await asyncio.gather(
-                ingest_one_from_path(path=object(), driver=object()),
-                ingest_one_from_path(path=object(), driver=object()),
+                ingest_one_from_path(path=object()),
+                ingest_one_from_path(path=object()),
             )
 
         assert results == ["ok", "ok"]
@@ -147,8 +147,8 @@ class TestIngestOneSemaphore:
             "scinr.newton.ingest.loader._load_document_object",
             side_effect=tracker.blocking_call,
         ):
-            await ingest_one(doc=object(), driver=object())
-            await ingest_one(doc=object(), driver=object())
-            await ingest_one(doc=object(), driver=object())
+            await ingest_one(doc=object())
+            await ingest_one(doc=object())
+            await ingest_one(doc=object())
 
         assert tracker.max_in_flight == 1

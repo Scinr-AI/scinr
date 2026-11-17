@@ -26,7 +26,9 @@ async def get_graph_navigator() -> GraphNavigator:
     Raises:
         ConfigurationError: If ``graph_backend`` is unknown, or the library is
             not configured.
-        GraphConnectionError: If the engine is unreachable.
+        GraphConnectionError: If the engine is unreachable (a
+            :class:`~scinr.newton.exceptions.GraphError`, not a
+            :class:`~scinr.newton.exceptions.NavigationError`).
     """
     from scinr.newton.config import get_config
     from scinr.newton.exceptions import ConfigurationError

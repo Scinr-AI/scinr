@@ -7,14 +7,14 @@ re-ingestion via ``update_mode=True``, keeping the :Document node itself), the
 public :func:`delete_document` here removes the :Document node(s) as well
 as their entire composed/structural subtree, and collects the :Entity,
 :ModelInstance and :LabeledEntity nodes that deletion leaves orphaned
-(``ingest/_gc.py``). :func:`collect_orphans` sweeps every orphan of a tenant,
+(``graph/neo4j/gc.py``). :func:`collect_orphans` sweeps every orphan of a tenant,
 whatever left it.
 
-Before touching Neo4j, it also deletes the corresponding documental storage
+Before touching the graph, it also deletes the corresponding documental storage
 records (raw binaries + converted Markdown pages) for every ``raw_file_id``
 referenced by the affected :Document node(s), via the configured storage
 backend (see ``storage/factory.py``). This storage cleanup is fail-fast: if
-it raises, the Neo4j cascade delete never runs.
+it raises, the graph cascade delete never runs.
 
 Public API
 ----------
@@ -24,7 +24,7 @@ Public API
     # tenant_id is mandatory (keyword-only, no default): every deletion is
     # scoped to exactly one tenant, or to the public documents.
     # optional AND filters in either mode: version=, created_by_user_id=
-    # opens its own driver
+    # opens its own graph-store scope (one synchronous driver)
 
     result = await collect_orphans(tenant_id="acme")    # maintenance sweep
 """
@@ -35,19 +35,9 @@ import asyncio
 import logging
 from collections.abc import Sequence
 
-from scinr.newton.config import get_config
-from scinr.newton.ingest._cascade import (
-    DELETE_BATCH_ROWS,
-    DOCS_BY_KEY,
-    delete_documents,
-    run_count_query,
-    run_subtree_steps,
-    subtree_steps,
-)
-from scinr.newton.ingest._gc import GC_MAX_PASSES, OrphanCollector, sweep_tenant
-from scinr.newton.ingest.config import get_driver
+from scinr.newton.graph import GraphStore, get_graph_store
+from scinr.newton.graph.types import GC_MAX_PASSES, DocumentSelector
 from scinr.newton.results import DeletedDocument, DeletionResult, OrphanCollectionResult
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
@@ -64,82 +54,6 @@ def _as_list(name: str, value: str | Sequence[str] | None) -> list[str] | None:
         raise ValueError(f"{name} must not be an empty list (omit it for no filter).")
     return values
 
-
-# ---------------------------------------------------------------------------
-# Cypher queries
-# ---------------------------------------------------------------------------
-
-# delete_document() argument names that optionally narrow the :Document
-# selection, in a fixed order. Each name is also the node property it filters
-# on (equality). The names are a hard-coded whitelist — never user input — so
-# interpolating them into the query string below carries no injection risk.
-# tenant_id is deliberately NOT here: it is never optional (see below).
-# ``job_id`` and ``created_by_user_id`` match with ``IN`` (a list of values);
-# the others with equality.
-_IN_FIELDS = frozenset({"job_id", "created_by_user_id"})
-_FILTERABLE_FIELDS = ("path", "job_id", "version", "created_by_user_id")
-
-
-def _build_doc_match(filters: dict) -> tuple[str, dict]:
-    """Build the ``MATCH (d:Document) WHERE ...`` selection prefix, together
-    with the matching parameter dict.
-
-    The tenant condition is **always** emitted: ``filters["tenant_id"]`` must
-    hold the stored tenant key (``utils.tenancy.tenant_key()`` applied, so
-    never ``None`` — ``"__public__"`` selects public documents). Every other
-    filter produces a condition only when it is set (not ``None``).
-
-    Emitting a condition **only** for each supplied filter keeps the WHERE a
-    plain conjunction of equality predicates, so Neo4j can use the
-    :Document indexes (the ``(tenant_id, path, version)`` constraint index,
-    ``idx_document_job_id``) instead of falling back to a full label scan —
-    which an ``$x IS NULL OR d.x = $x`` disjunction would force.
-
-    ``delete_document()`` guarantees at least one of ``path`` / ``job_id`` is
-    set on top of the tenant.
-    """
-    tenant = filters.get("tenant_id")
-    if tenant is None:
-        raise ValueError("_build_doc_match requires the stored tenant key in filters['tenant_id'].")
-    conditions: list[str] = ["d.tenant_id = $tenant_id"]
-    params: dict = {"tenant_id": tenant}
-    for name in _FILTERABLE_FIELDS:
-        value = filters.get(name)
-        if value is not None:
-            op = "IN" if name in _IN_FIELDS else "="
-            conditions.append(f"d.{name} {op} ${name}")
-            params[name] = value
-    return f"MATCH (d:Document)\nWHERE {' AND '.join(conditions)}\n", params
-
-
-_EXISTENCE_TAIL = "RETURN d.version AS version\n"
-
-_RAW_FILE_IDS_TAIL = """
-OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd)
-WITH collect(DISTINCT d) + collect(DISTINCT cd) AS nodes
-UNWIND nodes AS n
-WITH DISTINCT n
-WHERE n IS NOT NULL AND n.raw_file_id IS NOT NULL AND n.raw_file_id <> ''
-RETURN DISTINCT n.raw_file_id AS raw_file_id, n.tenant_id AS tenant_id
-"""
-
-# The documents the cascade works on: the matched ones and their descendants.
-# ``interrupted``: an earlier delete_document() or freeze_document() stopped
-# half-way through this document.
-_DOCUMENT_KEYS_TAIL = """
-OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd:Document)
-WITH collect(DISTINCT d) AS seeds, collect(DISTINCT cd) AS descendants
-UNWIND seeds + descendants AS doc
-WITH DISTINCT doc, seeds
-RETURN doc.path AS path, doc.version AS version, doc.tenant_id AS tenant_id,
-       coalesce(doc.is_folder, false) AS is_folder,
-       doc IN seeds AS is_seed,
-       coalesce(doc.deletion_pending, doc.frozen_cleanup_pending, false) AS interrupted
-"""
-
-# Set before anything is deleted, and gone with the Document itself: a
-# Document that still carries it was left half-deleted.
-_MARK_PENDING_QUERY = DOCS_BY_KEY + "SET d.deletion_pending = true\nRETURN count(d) AS n\n"
 
 # Cascade-delete counter fields of DeletionResult.
 _CASCADE_COUNTER_FIELDS = (
@@ -158,54 +72,12 @@ _CASCADE_COUNTER_FIELDS = (
 # ---------------------------------------------------------------------------
 
 
-def _fetch_document_keys(driver, filters: dict) -> tuple[list[dict], list[DeletedDocument], bool]:
-    """Resolve the selector to the ``{"path", "version"}`` keys of the matched
-    Documents and their ``IS_COMPOSED_OF*`` descendants — descendants first,
-    matched documents last (the order they are deleted in) —, the same
-    documents as :class:`DeletedDocument` (with ``is_folder``), and whether an
-    earlier delete or freeze of any of them was interrupted.
-
-    A Document that cannot be addressed by its key — no ``path`` /
-    ``version``, or another tenant's (impossible under the write invariant) —
-    is left alone, with a warning.
-    """
-    tenant = filters["tenant_id"]
-
-    def _do_query() -> list[dict]:
-        cfg = get_config()
-        match_clause, params = _build_doc_match(filters)
-        with driver.session(database=cfg.neo4j_database) as session:
-            result = session.run(match_clause + _DOCUMENT_KEYS_TAIL, **params)
-            return [dict(record) for record in result]
-
-    rows = with_neo4j_retry_sync(_do_query)
-    addressable = [
-        row
-        for row in rows
-        if row["path"] is not None and row["version"] is not None and row["tenant_id"] == tenant
-    ]
-    if len(addressable) != len(rows):
-        logger.warning(
-            "delete_document: %d Document(s) reached by the selector have no path/version "
-            "or belong to another tenant than %r; they are left untouched.",
-            len(rows) - len(addressable),
-            tenant,
-        )
-    addressable.sort(key=lambda row: row["is_seed"])
-    keys = [{"path": row["path"], "version": row["version"]} for row in addressable]
-    documents = [
-        DeletedDocument(path=row["path"], version=row["version"], is_folder=bool(row["is_folder"]))
-        for row in addressable
-    ]
-    return keys, documents, any(row["interrupted"] for row in addressable)
-
-
 def _run_cascade_delete(
-    driver, filters: dict
+    store: GraphStore, selector: DocumentSelector, filters: dict
 ) -> tuple[dict[str, int], dict[str, int], list[DeletedDocument]]:
     """Delete the subtree of the selected Documents, collect the orphans and
     then delete the Documents themselves, in bounded transactions
-    (``ingest/_cascade.py``). Returns the cascade counters, the ``gc_*``
+    (``store.deletion``). Returns the cascade counters, the ``gc_*``
     counters and the documents it worked on.
 
     Not atomic — a single transaction holding the subtree of hundreds of
@@ -215,24 +87,23 @@ def _run_cascade_delete(
     same call deletes what is left.
 
     The orphans are collected among what the deleted :ExtractionResult nodes
-    pointed at (``OrphanCollector``). Those candidates only live in this
+    pointed at (``store.gc.collector``). Those candidates only live in this
     process: when a Document carries the mark of an interrupted delete or
     freeze, the candidates of that run are lost and the whole tenant is swept
     instead.
 
     Parameters
     ----------
-    driver:
-        An open, authenticated Neo4j driver instance.
+    store:
+        The graph store; run inside its ``sync_scope()``.
+    selector:
+        The validated target selection (stored tenant key).
     filters:
-        The target-selection parameter dict (``path``, ``version``,
-        ``tenant_id``, ``created_by_user_id``, ``job_id``); ``tenant_id`` (the
-        stored key) always becomes a WHERE condition, the others only when
-        not None — see :func:`_build_doc_match`.
+        The same selection as a ``dict`` (``path``, ``version``, ``tenant_id``,
+        ``created_by_user_id``, ``job_id``), only for the log messages.
     """
-    database = get_config().neo4j_database
-    tenant = filters["tenant_id"]
-    keys, documents, interrupted = _fetch_document_keys(driver, filters)
+    tenant = selector.tenant_id
+    keys, documents, interrupted = store.deletion.fetch_document_keys(selector)
     orphans = None
     if interrupted:
         logger.warning(
@@ -243,35 +114,18 @@ def _run_cascade_delete(
             tenant,
         )
     else:
-        orphans = OrphanCollector(
-            driver, tenant_id=tenant, database=database, caller="delete_document"
-        )
+        orphans = store.gc.collector(tenant, "delete_document")
     try:
-        for start in range(0, len(keys), DELETE_BATCH_ROWS):
-            run_count_query(
-                driver,
-                database,
-                _MARK_PENDING_QUERY,
-                tenant_id=tenant,
-                keys=keys[start : start + DELETE_BATCH_ROWS],
-            )
-        subtree_counts = run_subtree_steps(
-            driver,
-            database,
-            tenant,
-            keys,
-            subtree_steps(),
-            caller="delete_document",
-            orphans=orphans,
+        store.deletion.mark_deletion_pending(tenant, keys)
+        subtree_counts = store.deletion.cascade_delete(
+            tenant, keys, orphans, caller="delete_document"
         )
         if orphans is not None:
             orphans.collect()
             gc_counts = orphans.counts()
         else:
-            gc_counts = sweep_tenant(
-                driver, tenant_id=tenant, database=database, caller="delete_document"
-            )
-        documents_deleted = delete_documents(driver, database, tenant, keys)
+            gc_counts = store.gc.sweep_tenant(tenant, "delete_document")
+        documents_deleted = store.deletion.delete_documents(tenant, keys)
     except Exception:
         logger.exception(
             "delete_document: cascade delete interrupted for filters=%r. Part of the "
@@ -283,55 +137,6 @@ def _run_cascade_delete(
     counters = {name: subtree_counts.get(name, 0) for name in _CASCADE_COUNTER_FIELDS}
     counters["documents_deleted"] = documents_deleted
     return counters, gc_counts, documents
-
-
-def _fetch_existing_versions(driver, filters: dict) -> list[int]:
-    """Run the read-only existence-check query and return the sorted list of
-    matching Document versions.
-
-    Wrapped in with_neo4j_retry_sync for consistency with the cascade delete
-    and GC passes below, so a transient Neo4j error on this first query is
-    retried the same way as the rest of delete_document().
-
-    Any ``None`` version values (from legacy/malformed :Document nodes) are
-    filtered out defensively before sorting, since Python 3 cannot compare
-    ``None`` with ``int`` and would raise TypeError otherwise.
-
-    *filters* is the full target-selection parameter dict (see
-    :func:`_run_cascade_delete`).
-    """
-
-    def _do_query() -> list[int | None]:
-        cfg = get_config()
-        match_clause, params = _build_doc_match(filters)
-        with driver.session(database=cfg.neo4j_database) as session:
-            existence_result = session.run(match_clause + _EXISTENCE_TAIL, **params)
-            return [record["version"] for record in existence_result]
-
-    raw_versions = with_neo4j_retry_sync(_do_query)
-    return sorted(v for v in raw_versions if v is not None)
-
-
-def _fetch_raw_file_ids(driver, filters: dict) -> list[tuple[str, str | None]]:
-    """Run the read-only raw_file_ids query and return the distinct
-    ``(raw_file_id, tenant_id)`` pairs — non-empty ``raw_file_id`` values and
-    the stored tenant of the node carrying each — for the target Document(s)
-    and every descendant reached via ``IS_COMPOSED_OF*``: the same scope used
-    by the cascade delete query below.
-
-    Wrapped in with_neo4j_retry_sync for consistency with the other queries
-    in this module. *filters* is the full target-selection parameter dict
-    (see :func:`_run_cascade_delete`).
-    """
-
-    def _do_query() -> list[tuple[str, str | None]]:
-        cfg = get_config()
-        match_clause, params = _build_doc_match(filters)
-        with driver.session(database=cfg.neo4j_database) as session:
-            result = session.run(match_clause + _RAW_FILE_IDS_TAIL, **params)
-            return [(record["raw_file_id"], record["tenant_id"]) for record in result]
-
-    return with_neo4j_retry_sync(_do_query)
 
 
 async def _delete_storage_for_raw_file_ids(
@@ -351,7 +156,7 @@ async def _delete_storage_for_raw_file_ids(
 
     Fail-fast: no exception raised here is caught — any unexpected error
     (e.g. StorageError, a dropped connection) propagates to the caller so
-    that the Neo4j cascade delete is never reached. Backend implementations
+    that the graph cascade delete is never reached. Backend implementations
     are expected to be idempotent for "already gone" cases (missing
     metadata, missing GridFS binary, invalid ObjectId, no matching pages or
     images, out of scope) and to not raise for those. A backend without
@@ -439,15 +244,15 @@ async def delete_document(
     Who may delete a public document is an authorization decision for the
     calling API layer; this function only enforces the scope.
 
-    Before any Neo4j deletion happens, this also deletes the documental
+    Before any graph deletion happens, this also deletes the documental
     storage records (raw binary + converted Markdown pages + stored images)
     for every non-empty ``raw_file_id`` found on the target Document(s) and
     their ``IS_COMPOSED_OF*`` descendants, via the configured storage backend
     (``storage/factory.py::get_storage()``). This step is fail-fast: if
     deleting storage for any raw_file_id raises an unexpected exception,
-    it propagates immediately and the Neo4j cascade delete is never run.
+    it propagates immediately and the graph cascade delete is never run.
 
-    The cascade runs in bounded transactions (``ingest/_cascade.py``), not
+    The cascade runs in bounded transactions (``graph/neo4j/deletion.py``), not
     in a single one: one transaction holding the subtree of hundreds of
     documents overruns the server's transaction memory. It is therefore not
     atomic — the :Document nodes are marked ``deletion_pending`` first and
@@ -457,7 +262,7 @@ async def delete_document(
 
     Before the :Document nodes go, the :Entity/:ModelInstance and
     :LabeledEntity nodes **of the same tenant** this deletion leaves orphaned
-    are deleted too (``ingest/_gc.py``). Only what hung from the deleted
+    are deleted too (``graph/neo4j/gc.py``). Only what hung from the deleted
     :ExtractionResult nodes is checked, so the cost follows the size of the
     deletion, not of the tenant; orphans left by anything else stay until
     :func:`collect_orphans` is run. The exception is a call that finishes an
@@ -465,10 +270,10 @@ async def delete_document(
     lost, so it sweeps the whole tenant (up to :data:`GC_MAX_PASSES`
     iterations per pass), as ``collect_orphans()`` does.
 
-    Opens and closes its own Neo4j driver — does not require the caller to
-    manage one. The Neo4j-specific work (existence check, raw_file_id
-    lookup, cascade delete, GC passes) uses the existing synchronous Neo4j
-    driver under the hood, dispatched via ``asyncio.to_thread()``; the
+    Opens and closes its own synchronous graph-store scope — does not require
+    the caller to manage one. The graph work (existence check, raw_file_id
+    lookup, cascade delete, GC passes) goes through ``store.deletion`` and
+    ``store.gc`` and is dispatched via ``asyncio.to_thread()``; the
     storage deletion calls are awaited directly since storage repositories
     (Motor-backed) are natively async.
 
@@ -487,6 +292,8 @@ async def delete_document(
         If neither or both of *path* and *job_id* are provided, or
         *tenant_id* is empty, or *job_id* / *created_by_user_id* is an
         empty list.
+    GraphError
+        If the graph engine fails (see :mod:`scinr.newton.exceptions`).
     """
     if (path is None) == (job_id is None):
         raise ValueError(
@@ -505,9 +312,10 @@ async def delete_document(
     }
     selector_repr = ", ".join(f"{k}={v!r}" for k, v in filters.items() if v is not None)
 
-    driver = get_driver()
-    try:
-        versions_found = await asyncio.to_thread(_fetch_existing_versions, driver, filters)
+    selector = DocumentSelector(**filters)
+    store = get_graph_store()
+    with store.sync_scope():
+        versions_found = await asyncio.to_thread(store.deletion.fetch_existing_versions, selector)
 
         if not versions_found:
             logger.warning(
@@ -543,7 +351,7 @@ async def delete_document(
             versions_found,
         )
 
-        raw_file_ids = await asyncio.to_thread(_fetch_raw_file_ids, driver, filters)
+        raw_file_ids = await asyncio.to_thread(store.deletion.fetch_raw_file_ids, selector)
         raw_files_deleted, converted_pages_deleted, page_images_deleted = (
             await _delete_storage_for_raw_file_ids(raw_file_ids)
         )
@@ -558,7 +366,7 @@ async def delete_document(
         )
 
         cascade_counts, gc_counts, documents = await asyncio.to_thread(
-            _run_cascade_delete, driver, filters
+            _run_cascade_delete, store, selector, filters
         )
 
         logger.info(
@@ -593,8 +401,6 @@ async def delete_document(
             page_images_deleted=page_images_deleted,
             documents=documents,
         )
-    finally:
-        driver.close()
 
 
 async def collect_orphans(*, tenant_id: str | None) -> OrphanCollectionResult:
@@ -619,7 +425,7 @@ async def collect_orphans(*, tenant_id: str | None) -> OrphanCollectionResult:
 
     *tenant_id* is mandatory (keyword-only, no default); ``None`` and
     ``"__public__"`` both mean the public documents. Opens and closes its own
-    Neo4j driver.
+    graph-store scope.
 
     Returns
     -------
@@ -632,19 +438,13 @@ async def collect_orphans(*, tenant_id: str | None) -> OrphanCollectionResult:
         If *tenant_id* is not passed.
     ValueError
         If *tenant_id* is empty.
+    GraphError
+        If the graph engine fails (see :mod:`scinr.newton.exceptions`).
     """
     tenant = tenant_key(tenant_id)
-    driver = get_driver()
-    try:
-        counts = await asyncio.to_thread(
-            sweep_tenant,
-            driver,
-            tenant_id=tenant,
-            database=get_config().neo4j_database,
-            caller="collect_orphans",
-        )
-    finally:
-        driver.close()
+    store = get_graph_store()
+    with store.sync_scope():
+        counts = await asyncio.to_thread(store.gc.sweep_tenant, tenant, "collect_orphans")
     logger.info(
         "collect_orphans: complete for tenant %r. gc_entity_model_instance_deleted=%d "
         "gc_labeled_entity_deleted=%d",

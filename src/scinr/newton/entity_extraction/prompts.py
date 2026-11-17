@@ -11,7 +11,6 @@ the configured PromptFamily.
 """
 from __future__ import annotations
 
-
 # ── Shared utility: complementary-field detection ─────────────────────────────
 
 def _has_complementary_fields(schema: type) -> bool:

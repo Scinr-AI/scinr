@@ -13,7 +13,6 @@ instruction-following models and may degrade performance.
 
 from __future__ import annotations
 
-
 _COMPLEMENTARY_GOAL_ADDENDUM = """
 
 This schema contains COMPLEMENTARY sub-models (the optional nested fields). Treat them as strongly preferred: populate every sub-field you can find evidence for in the provided text. Return null for a complementary sub-model only when none of its fields appear anywhere in the provided text."""

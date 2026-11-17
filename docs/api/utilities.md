@@ -14,7 +14,7 @@ Supporting utilities for theme discovery, LLM management, and graph operations.
 
 ::: scinr.newton.utils.llm_retry
 
-::: scinr.newton.utils.neo4j_retry
+::: scinr.newton.graph.neo4j.retry
 
 ## Concurrency
 

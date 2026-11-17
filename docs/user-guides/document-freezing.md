@@ -15,7 +15,7 @@ from scinr.newton import (
 )
 ```
 
-All three are `async` functions. Each opens and closes its own Neo4j driver.
+All three are `async` functions. Each opens and closes its own graph connection.
 
 ---
 

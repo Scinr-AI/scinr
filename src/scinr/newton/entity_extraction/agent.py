@@ -22,8 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from scinr.newton.config import get_config
-
 logger = logging.getLogger(__name__)
 
 
@@ -104,13 +102,11 @@ async def _run_entity_extraction_parallel(
         targets, errors.
     """
     from scinr.newton.config import get_llm_semaphore
-    from scinr.newton.entity_extraction.neo4j_ops import fetch_extraction_targets
     from scinr.newton.entity_extraction.nodes import process_single_extraction_target
-    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.graph import get_graph_store
 
-    driver = get_async_driver()
-    targets = await fetch_extraction_targets(
-        driver, tenant_id=tenant_id, doc_path=doc_path, only_unextracted=only_unextracted
+    targets = await get_graph_store().extraction.fetch_targets(
+        tenant_id=tenant_id, doc_path=doc_path, only_unextracted=only_unextracted
     )
 
     logger.info(
@@ -203,42 +199,30 @@ async def run_entity_extraction_agent(
         raise ValueError("document_name must be a non-empty string.")
 
     from scinr.newton.exceptions import PreconditionError
-    from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.utils.document_resolver import (
-        latest_document_pattern,
-        resolve_leaf_documents_async,
-    )
-    doc_pattern, doc_params = latest_document_pattern(
-        "d", tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    from scinr.newton.graph import get_graph_store
+    from scinr.newton.graph.types import DocumentSelector
+    from scinr.newton.utils.document_resolver import resolve_leaf_documents_async
+
+    selector = DocumentSelector(
+        tenant_id=tenant_id, path=doc_path, document_name=document_name, latest=True
     )
     doc_label = f"'{doc_path or document_name}' (tenant={tenant_id!r})"
-    cfg = get_config()
-    driver = get_async_driver()
-    async with driver.session(database=cfg.neo4j_database) as _session:
-        # Check 1: document exists
-        _result1 = await _session.run(f"MATCH {doc_pattern} RETURN count(d) AS n", **doc_params)
-        _doc_count = (await _result1.single())["n"]
-        if _doc_count == 0:
-            raise PreconditionError(
-                f"Document {doc_label} not found in Neo4j (latest=true). "
-                f"Run run_ingestion() before run_entity_extraction_agent()."
-            )
-        # Check 2: at least one annotated node exists
-        _result2 = await _session.run(
-            f"MATCH {doc_pattern}"
-            "-[:HAS_STRUCTURE|HAS_CHILD*1..]->(sn:StructureNode)"
-            "-[:HAS_MODEL_DECISION]->() RETURN count(sn) AS n",
-            **doc_params,
+    store = get_graph_store()
+    # Check 1: document exists
+    if await store.documents.count_latest_documents(selector) == 0:
+        raise PreconditionError(
+            f"Document {doc_label} not found in Neo4j (latest=true). "
+            f"Run run_ingestion() before run_entity_extraction_agent()."
         )
-        _annotated_count = (await _result2.single())["n"]
-        if _annotated_count == 0:
-            raise PreconditionError(
-                f"Document {doc_label} has no annotated StructureNodes. "
-                f"Run run_annotation_agent() before run_entity_extraction_agent()."
-            )
+    # Check 2: at least one annotated node exists
+    if await store.annotation.count_annotated_nodes(selector) == 0:
+        raise PreconditionError(
+            f"Document {doc_label} has no annotated StructureNodes. "
+            f"Run run_annotation_agent() before run_entity_extraction_agent()."
+        )
 
     leaves = await resolve_leaf_documents_async(
-        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+        tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
     )
     leaf_names = [leaf.name for leaf in leaves]
 

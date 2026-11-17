@@ -13,7 +13,6 @@ instruction-following models and may degrade performance.
 
 from scinr.newton.prompts.system_prompt import _EXTRACTION_PROMPT_PREFIX  # noqa: F401
 
-
 _EXTRACTION_PROMPT_SUFFIX_GPT_REASONING = """
 # Instructions
 

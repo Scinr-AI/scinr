@@ -87,7 +87,7 @@ def neo4j_env():
         config_module._config = previous
         pytest.skip(f"Neo4j not reachable: {exc}")
 
-    from scinr.newton.ingest.schema import setup_schema
+    from scinr.newton.graph.neo4j.schema import setup_schema
 
     setup_schema(driver)
     _create_key_index(settings)
@@ -95,7 +95,7 @@ def neo4j_env():
     try:
         yield driver, settings["neo4j_database"]
     finally:
-        from scinr.newton.annotation.neo4j_ops import instance_key_index_name
+        from scinr.newton.graph.neo4j.annotation import instance_key_index_name
 
         with driver.session(database=settings["neo4j_database"]) as session:
             session.run(f"DROP INDEX {instance_key_index_name(KEY_PROP)} IF EXISTS").consume()
@@ -109,7 +109,7 @@ def _create_key_index(settings: dict[str, str]) -> None:
 
     from neo4j import AsyncGraphDatabase
 
-    from scinr.newton.annotation.neo4j_ops import _ensure_instance_key_indexes
+    from scinr.newton.graph.neo4j.annotation import _ensure_instance_key_indexes
 
     async def _run() -> None:
         driver = AsyncGraphDatabase.driver(
@@ -298,11 +298,13 @@ async def test_graph_mapper_writes_find_their_anchor_by_index(neo4j_env):
     """Every parent / relationship-source MATCH in ``_write_model_fields`` is a
     seek on the uid constraint of its label (WP4)."""
     from scinr.newton.entity_extraction.graph_mapper import _write_model_fields
+    from scinr.newton.graph.neo4j.extraction import Neo4jExtractionSink
+    from scinr.newton.graph.types import Provenance
 
     driver, database = neo4j_env
     session = AsyncMock()
     await _write_model_fields(
-        session=session,
+        sink=Neo4jExtractionSink(session),
         instance=_ItRoot(
             country=_ItCountry(code="ES", name="Spain", aliases=["España"]),
             others=[_ItCountry(code="FR", name="France")],
@@ -313,7 +315,7 @@ async def test_graph_mapper_writes_find_their_anchor_by_index(neo4j_env):
         field_path_prefix="",
         entity_nodes={},
         depth=0,
-        tenant_id=TENANT,
+        prov=Provenance(tenant_id=TENANT, created_by_user_id=None, job_id=None),
     )
     anchor = re.compile(r"MATCH \((parent|src):(\w+) \{uid:")
     checked = 0

@@ -258,8 +258,21 @@ def test_discover_ingestion_json_units_missing_dir_raises(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def neo4j_store():
+    """A real ``Neo4jGraphStore`` (its ``sync_scope`` opens/closes the patched driver)."""
+    from scinr.newton.graph import reset_graph_store, set_graph_store
+    from scinr.newton.graph.neo4j.store import Neo4jGraphStore
+
+    set_graph_store(Neo4jGraphStore())
+    try:
+        yield
+    finally:
+        reset_graph_store()
+
+
 @pytest.mark.asyncio
-async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
+async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch, neo4j_store):
     """A folder name resolving to 3 leaves must yield 3 units; two input
     names that share a leaf must not produce a duplicate unit for it. Names
     are resolved within the run's tenant, and each unit carries the leaf's
@@ -267,7 +280,7 @@ async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
     """
     seen_tenants = []
 
-    def fake_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
+    def fake_resolve(*, tenant_id, doc_path=None, document_name=None):
         seen_tenants.append(tenant_id)
         if document_name == "FolderDoc":
             return [LeafDocument(n, f"Folder/{n}") for n in ("LeafA", "LeafB", "LeafC")]
@@ -285,7 +298,7 @@ async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
         fake_resolve,
     )
     monkeypatch.setattr(
-        "scinr.newton.ingest.config.get_driver",
+        "scinr.newton.graph.neo4j.driver.get_driver",
         lambda: _FakeDriver(),
     )
 
@@ -300,7 +313,7 @@ async def test_discover_pre_ingested_units_resolves_and_dedupes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_discover_pre_ingested_units_closes_driver(monkeypatch):
+async def test_discover_pre_ingested_units_closes_driver(monkeypatch, neo4j_store):
     closed = {"value": False}
 
     class _FakeDriver:
@@ -309,10 +322,10 @@ async def test_discover_pre_ingested_units_closes_driver(monkeypatch):
 
     monkeypatch.setattr(
         "scinr.newton.utils.document_resolver.resolve_leaf_documents",
-        lambda driver, *, tenant_id, document_name: [LeafDocument(document_name, document_name)],
+        lambda *, tenant_id, document_name: [LeafDocument(document_name, document_name)],
     )
     monkeypatch.setattr(
-        "scinr.newton.ingest.config.get_driver",
+        "scinr.newton.graph.neo4j.driver.get_driver",
         lambda: _FakeDriver(),
     )
 

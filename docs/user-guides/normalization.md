@@ -607,7 +607,7 @@ The main entry point. Takes a list of `(model_class, instance)` tuples and retur
 
 ### `process_key_batch()`
 
-Public method for processing a batch of unique normalization keys. Used by the normalization-first write path in `neo4j_ops.py`.
+Public method for processing a batch of unique normalization keys. Used by the normalization-first write path in `tabular/graph_writer.py`.
 
 Returns `{unique_key: normalized_result}` for successfully processed keys. Results are cached in `self.result_cache` for reuse.
 
@@ -737,9 +737,9 @@ configure(
 )
 ```
 
-### Pre-scan dedup map (neo4j_ops.py)
+### Pre-scan dedup map (tabular/graph_writer.py)
 
-The normalization-first write path in `neo4j_ops.py` performs a **pre-scan** of all rows before any LLM calls:
+The normalization-first write path in `tabular/graph_writer.py` performs a **pre-scan** of all rows before any LLM calls:
 
 1. Scans all rows to build a global dedup map of unique normalization keys
 2. Groups unique keys by target type

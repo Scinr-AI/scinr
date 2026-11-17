@@ -99,6 +99,7 @@ nav:
       - Navigation: api/navigation.md
       - Utilities: api/utilities.md
       - Exceptions: api/exceptions.md
+      - Graph Store (GraphStore interface): api/graph-store.md
       - Deletion (delete_document / collect_orphans): api/deletion.md
       - Freezing (freeze_document / restore_document): api/freezing.md
       - Results: api/results.md

@@ -60,7 +60,7 @@ class _Neo4jRuntime:
 
     async def connect(self) -> None:
         if self._driver is None:
-            from scinr.newton.ingest.config import get_async_driver
+            from scinr.newton.graph.neo4j.driver import get_async_driver
 
             self._driver = get_async_driver()  # shared singleton — never closed here
             self._owns_driver = False
@@ -97,7 +97,7 @@ class _Neo4jRuntime:
         if not self._external_driver:
             # Re-fetch the shared singleton so a re-configure() is transparent.
             try:
-                from scinr.newton.ingest.config import get_async_driver
+                from scinr.newton.graph.neo4j.driver import get_async_driver
 
                 self._driver = get_async_driver()
             except Exception:  # noqa: BLE001 — keep the handle we already have
@@ -108,7 +108,7 @@ class _Neo4jRuntime:
 
     async def _read(self, cypher: str, /, **params: Any) -> list[dict[str, Any]]:
         """Run *cypher* in a READ transaction (with retry) and return dict rows."""
-        from scinr.newton.utils.neo4j_retry import with_neo4j_retry
+        from scinr.newton.graph.neo4j.retry import with_neo4j_retry
 
         driver = self._live_driver()
 

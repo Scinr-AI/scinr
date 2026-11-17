@@ -1,0 +1,298 @@
+{
+  "meta": {
+    "commit": "fc30e6f70b8781819ac3ddb54217d9488f49684e",
+    "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O (arm64)",
+    "neo4j_driver": "6.4.1",
+    "python": "3.14.6",
+    "runs": 3,
+    "sizes": {
+      "annotate_extract (nodes)": {
+        "large": 2000,
+        "small": 500,
+        "warm": 30
+      },
+      "ingest_doc / freeze_export / restore / delete_gc (nodes)": {
+        "large": 20000,
+        "small": 5000,
+        "warm": 200
+      },
+      "tabular_rows (rows x 12 columns)": {
+        "large": 8000,
+        "small": 2000,
+        "warm": 100
+      }
+    },
+    "src_dirty": false,
+    "unit": "bytes, tracemalloc peak, median of runs"
+  },
+  "own_criteria": {
+    "annotate_extract": {
+      "c1": {
+        "baseline_violates": false,
+        "large_le_small_x1.10": true
+      },
+      "cdef": {
+        "baseline_violates": false,
+        "large_le_small_x1.10": true
+      }
+    },
+    "delete_gc": {
+      "-": {
+        "baseline_violates": false,
+        "large_le_small_x1.10": true
+      }
+    },
+    "freeze_export": {
+      "-": {
+        "baseline_violates": true,
+        "large_le_small_x1.10": false
+      }
+    },
+    "ingest_doc": {
+      "-": {
+        "baseline_violates": false,
+        "large_le_small_x1.10": true
+      }
+    },
+    "restore": {
+      "c1": {
+        "baseline_violates": true,
+        "large_le_small_x1.10": false
+      },
+      "c4": {
+        "baseline_violates": true,
+        "large_le_small_x1.10": false
+      }
+    },
+    "tabular_rows": {
+      "-": {
+        "baseline_violates": false,
+        "large_le_small_x1.10": true
+      }
+    }
+  },
+  "peaks_bytes": {
+    "annotate_extract": {
+      "large": {
+        "c1": 31604630,
+        "cdef": 35947954
+      },
+      "small": {
+        "c1": 8727911,
+        "cdef": 10862207
+      }
+    },
+    "delete_gc": {
+      "large": {
+        "-": 2491246
+      },
+      "small": {
+        "-": 857075
+      }
+    },
+    "freeze_export": {
+      "large": {
+        "-": 78036709
+      },
+      "small": {
+        "-": 19689329
+      }
+    },
+    "ingest_doc": {
+      "large": {
+        "-": 596657609
+      },
+      "small": {
+        "-": 149307941
+      }
+    },
+    "restore": {
+      "large": {
+        "c1": 36660287,
+        "c4": 42743110
+      },
+      "small": {
+        "c1": 19727466,
+        "c4": 19726660
+      }
+    },
+    "tabular_rows": {
+      "large": {
+        "-": 7244154
+      },
+      "small": {
+        "-": 6729193
+      }
+    }
+  },
+  "runs_bytes": {
+    "annotate_extract": [
+      {
+        "large": {
+          "c1": 31604630,
+          "cdef": 35947954
+        },
+        "small": {
+          "c1": 8727929,
+          "cdef": 11046133
+        }
+      },
+      {
+        "large": {
+          "c1": 31636961,
+          "cdef": 35950731
+        },
+        "small": {
+          "c1": 8727911,
+          "cdef": 10857303
+        }
+      },
+      {
+        "large": {
+          "c1": 31604420,
+          "cdef": 35875607
+        },
+        "small": {
+          "c1": 8727277,
+          "cdef": 10862207
+        }
+      }
+    ],
+    "delete_gc": [
+      {
+        "large": {
+          "-": 2490617
+        },
+        "small": {
+          "-": 857075
+        }
+      },
+      {
+        "large": {
+          "-": 2491988
+        },
+        "small": {
+          "-": 857475
+        }
+      },
+      {
+        "large": {
+          "-": 2491246
+        },
+        "small": {
+          "-": 856531
+        }
+      }
+    ],
+    "freeze_export": [
+      {
+        "large": {
+          "-": 78036709
+        },
+        "small": {
+          "-": 19689216
+        }
+      },
+      {
+        "large": {
+          "-": 78036278
+        },
+        "small": {
+          "-": 19689388
+        }
+      },
+      {
+        "large": {
+          "-": 78036983
+        },
+        "small": {
+          "-": 19689329
+        }
+      }
+    ],
+    "ingest_doc": [
+      {
+        "large": {
+          "-": 596656980
+        },
+        "small": {
+          "-": 149307941
+        }
+      },
+      {
+        "large": {
+          "-": 596657609
+        },
+        "small": {
+          "-": 149308002
+        }
+      },
+      {
+        "large": {
+          "-": 596658013
+        },
+        "small": {
+          "-": 149307933
+        }
+      }
+    ],
+    "restore": [
+      {
+        "large": {
+          "c1": 36660287,
+          "c4": 42743069
+        },
+        "small": {
+          "c1": 19727522,
+          "c4": 19726660
+        }
+      },
+      {
+        "large": {
+          "c1": 36659944,
+          "c4": 43608060
+        },
+        "small": {
+          "c1": 19727282,
+          "c4": 19726660
+        }
+      },
+      {
+        "large": {
+          "c1": 36660593,
+          "c4": 42743110
+        },
+        "small": {
+          "c1": 19727466,
+          "c4": 19726660
+        }
+      }
+    ],
+    "tabular_rows": [
+      {
+        "large": {
+          "-": 7432437
+        },
+        "small": {
+          "-": 6729193
+        }
+      },
+      {
+        "large": {
+          "-": 7244154
+        },
+        "small": {
+          "-": 6762537
+        }
+      },
+      {
+        "large": {
+          "-": 7230466
+        },
+        "small": {
+          "-": 6671329
+        }
+      }
+    ]
+  }
+}

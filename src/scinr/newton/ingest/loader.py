@@ -2,13 +2,15 @@
 ingest/loader.py — Loading JSON extractions into Neo4j.
 
 Usage:
-    from scinr.newton.ingest.config import get_driver
     from scinr.newton.ingest.loader import load_file, load_folder, load_documents
 
-    driver = get_driver()
-    load_file(Path("data/output/extract-my_doc.json"), driver)
-    load_folder(Path("data/output/"), driver)
-    load_documents([doc1, doc2], driver)  # in-memory mode
+    load_file(Path("data/output/extract-my_doc.json"))
+    load_folder(Path("data/output/"))
+    load_documents([doc1, doc2])  # in-memory mode
+
+The graph is reached through :func:`scinr.newton.graph.get_graph_store`; each
+``load_*`` function shares one synchronous connection among its calls
+(``store.sync_scope()``, which nests inside the caller's scope if there is one).
 
 The synchronous ``load_*`` functions are the graph-writing primitives: they do
 **not** verify that a document's ``raw_file_id`` belongs to its tenant (the
@@ -25,18 +27,8 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-from neo4j.exceptions import ConstraintError
-
-from scinr.newton.config import get_config
-from scinr.newton.exceptions import IngestionError
-from scinr.newton.ingest.nodes import (
-    get_current_latest_version,
-    get_next_version,
-    insert_document_graph,
-)
-from scinr.newton.ingest.schema import DOCUMENT_KEY_CONSTRAINT
+from scinr.newton.graph import get_graph_store
 from scinr.newton.models.document_structure import Document
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
@@ -100,94 +92,6 @@ def _batch_tenants(tenant_id: str | None, baked: Iterable[str | None]) -> list[s
     return list(dict.fromkeys(baked))
 
 
-def _resolve_batch_version(
-    session,
-    all_paths: list[str],
-    update_mode: bool,
-    tenant_ids: Iterable[str | None],
-) -> int:
-    """Compute a single shared integer version for a batch of documents.
-
-    Versions are numbered per tenant, so only the batch's own tenants'
-    documents are considered — another tenant's documents at the same paths
-    never bump (or, in update mode, select) this batch's version.
-
-    In normal mode:  max existing version across all paths + 1  (or 1 if none).
-    In update mode:  max current latest version across all paths (or 1 if none).
-
-    Parameters
-    ----------
-    session:
-        An open Neo4j session.
-    all_paths:
-        All document paths in the batch (leaves + ancestor folders).
-    update_mode:
-        True → return the current latest version (no increment).
-        False → return the next version (increment).
-    tenant_ids:
-        Tenant(s) the batch's documents will be written under, in public-API
-        form (``None`` = public). Usually one; several only when documents
-        carry different tenants baked into their ``extract-*.json``.
-    """
-    if not all_paths:
-        return 1
-
-    stored_tenants = sorted({tenant_key(t) for t in tenant_ids})
-    if update_mode:
-        result = session.run(
-            "MATCH (d:Document {latest: true}) "
-            "WHERE d.tenant_id IN $tenant_ids AND d.path IN $paths "
-            "RETURN max(d.version) AS max_version",
-            tenant_ids=stored_tenants,
-            paths=all_paths,
-        )
-    else:
-        result = session.run(
-            "MATCH (d:Document) WHERE d.tenant_id IN $tenant_ids AND d.path IN $paths "
-            "RETURN max(d.version) AS max_version",
-            tenant_ids=stored_tenants,
-            paths=all_paths,
-        )
-
-    record = result.single()
-    max_version = record["max_version"] if record else None
-
-    if update_mode:
-        return max_version if max_version is not None else 1
-    else:
-        return (max_version + 1) if max_version is not None else 1
-
-
-def resolve_batch_version_sync(
-    driver,
-    all_paths: list[str],
-    update_mode: bool,
-    tenant_ids: Iterable[str | None],
-) -> int:
-    """Public wrapper around _resolve_batch_version(): opens its own read
-    session and delegates to the existing private function, without
-    duplicating any logic. Intended to be called via asyncio.to_thread()
-    from the future per-document orchestration engine (does not exist yet).
-
-    Parameters
-    ----------
-    driver:
-        An open, authenticated Neo4j driver instance.
-    all_paths:
-        All document paths in the batch (leaves + ancestor folders) —
-        see _extract_all_paths() for how this list is computed today.
-    update_mode:
-        True → return the current latest version (no increment).
-        False → return the next version (increment).
-    tenant_ids:
-        Tenant(s) the batch will be written under (public-API form, ``None``
-        = public) — see ``_resolve_batch_version``.
-    """
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        return _resolve_batch_version(session, all_paths, update_mode, tenant_ids)
-
-
 def _read_doc_path(path: Path) -> str | None:
     """Read *only* the doc_path field from an extract-*.json file without full validation."""
     try:
@@ -219,7 +123,6 @@ def _read_tenant_id(path: Path) -> str | None:
 
 def load_file(
     path: Path,
-    driver,
     update_mode: bool = False,
     shared_version: int | None = None,
     tenant_id: str | None = None,
@@ -236,8 +139,6 @@ def load_file(
     ----------
     path:
         Path to a JSON extraction file produced by the pipeline.
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert with the same version.
         If False (default), create a new version and link via HAS_NEWER_VERSION.
@@ -270,60 +171,29 @@ def load_file(
         len(doc.document_structure),
     )
 
-    # Resolve version (use shared_version if provided by batch caller)
-    if shared_version is not None:
-        resolved_version = shared_version
-    else:
-        cfg = get_config()
-        with driver.session(database=cfg.neo4j_database) as session:
-            if update_mode:
-                resolved_version = get_current_latest_version(session, doc_path, tenant) or 1
-            else:
-                resolved_version = get_next_version(session, doc_path, tenant)
+    store = get_graph_store()
+    with store.sync_scope():
+        if shared_version is not None:
+            resolved_version = shared_version
+        elif update_mode:
+            resolved_version = store.documents.current_latest_version(doc_path, tenant) or 1
+        else:
+            resolved_version = store.documents.next_version(doc_path, tenant)
 
-    logger.info(
-        "Resolved version for '%s': %d (update_mode=%s)",
-        doc_path,
-        resolved_version,
-        update_mode,
-    )
+        logger.info(
+            "Resolved version for '%s': %d (update_mode=%s)",
+            doc_path,
+            resolved_version,
+            update_mode,
+        )
 
-    def _do_insert() -> None:
-        cfg = get_config()
-        with driver.session(database=cfg.neo4j_database) as session:
-            with session.begin_transaction() as tx:
-                try:
-                    insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
-                    tx.commit()
-                    logger.info(
-                        "Transaction committed for document: %s (v%d)",
-                        doc.document_name,
-                        resolved_version,
-                    )
-                except ConstraintError as exc:
-                    tx.rollback()
-                    if (
-                        DOCUMENT_KEY_CONSTRAINT in str(exc).lower()
-                        or "version" in str(exc).lower()
-                    ):
-                        raise IngestionError(
-                            f"Version conflict: version {resolved_version} was already "
-                            f"ingested by a concurrent process. Retry the ingestion."
-                        ) from exc
-                    raise
-                except Exception:
-                    tx.rollback()
-                    logger.exception("Transaction rolled back for document: %s", doc.document_name)
-                    raise
-
-    with_neo4j_retry_sync(_do_insert)
+        store.documents.insert_document_graph(doc, resolved_version, update_mode)
 
     return doc.document_name
 
 
 def load_files(
     files: list[Path],
-    driver,
     update_mode: bool = False,
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
@@ -339,8 +209,6 @@ def load_files(
     ----------
     files:
         Explicit list of JSON extraction file paths to ingest.
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
     tenant_id, created_by_user_id, job_id:
@@ -362,29 +230,28 @@ def load_files(
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
     tenants = _batch_tenants(tenant_id, (_read_tenant_id(f) for f in files))
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
+    store = get_graph_store()
+    with store.sync_scope():
+        shared_version = store.documents.resolve_batch_version(all_paths, tenants, update_mode)
 
-    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
+        logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
-    errors: dict[Path, Exception] = {}
-    doc_names: list[str] = []
-    for path in files:
-        try:
-            doc_name = load_file(
-                path,
-                driver,
-                update_mode=update_mode,
-                shared_version=shared_version,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            doc_names.append(doc_name)
-        except Exception as exc:
-            logger.exception("Failed to load file: %s", path)
-            errors[path] = exc
+        errors: dict[Path, Exception] = {}
+        doc_names: list[str] = []
+        for path in files:
+            try:
+                doc_name = load_file(
+                    path,
+                    update_mode=update_mode,
+                    shared_version=shared_version,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
+                )
+                doc_names.append(doc_name)
+            except Exception as exc:
+                logger.exception("Failed to load file: %s", path)
+                errors[path] = exc
 
     success_count = len(files) - len(errors)
     logger.info(
@@ -403,7 +270,6 @@ def load_files(
 
 def _load_document_object(
     doc: Document,
-    driver,
     update_mode: bool = False,
     shared_version: int | None = None,
     tenant_id: str | None = None,
@@ -419,8 +285,6 @@ def _load_document_object(
     ----------
     doc:
         A fully validated Document object (produced by Stage 1 / run_extraction()).
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert with the same version.
     shared_version:
@@ -447,52 +311,23 @@ def _load_document_object(
         len(doc.document_structure),
     )
 
-    if shared_version is not None:
-        resolved_version = shared_version
-    else:
-        cfg = get_config()
-        with driver.session(database=cfg.neo4j_database) as session:
-            if update_mode:
-                resolved_version = get_current_latest_version(session, doc_path, tenant) or 1
-            else:
-                resolved_version = get_next_version(session, doc_path, tenant)
+    store = get_graph_store()
+    with store.sync_scope():
+        if shared_version is not None:
+            resolved_version = shared_version
+        elif update_mode:
+            resolved_version = store.documents.current_latest_version(doc_path, tenant) or 1
+        else:
+            resolved_version = store.documents.next_version(doc_path, tenant)
 
-    logger.info(
-        "Resolved version for '%s': %d (update_mode=%s)",
-        doc_path,
-        resolved_version,
-        update_mode,
-    )
+        logger.info(
+            "Resolved version for '%s': %d (update_mode=%s)",
+            doc_path,
+            resolved_version,
+            update_mode,
+        )
 
-    def _do_insert() -> None:
-        cfg = get_config()
-        with driver.session(database=cfg.neo4j_database) as session:
-            with session.begin_transaction() as tx:
-                try:
-                    insert_document_graph(tx, doc, resolved_version, update_mode=update_mode)
-                    tx.commit()
-                    logger.info(
-                        "Transaction committed for document: %s (v%d)",
-                        doc.document_name,
-                        resolved_version,
-                    )
-                except ConstraintError as exc:
-                    tx.rollback()
-                    if (
-                        DOCUMENT_KEY_CONSTRAINT in str(exc).lower()
-                        or "version" in str(exc).lower()
-                    ):
-                        raise IngestionError(
-                            f"Version conflict: version {resolved_version} was already "
-                            f"ingested by a concurrent process. Retry the ingestion."
-                        ) from exc
-                    raise
-                except Exception:
-                    tx.rollback()
-                    logger.exception("Transaction rolled back for document: %s", doc.document_name)
-                    raise
-
-    with_neo4j_retry_sync(_do_insert)
+        store.documents.insert_document_graph(doc, resolved_version, update_mode)
 
     return doc.document_name
 
@@ -513,7 +348,6 @@ def _load_document_object(
 
 async def ingest_one(
     doc: Document,
-    driver,
     update_mode: bool = False,
     shared_version: int | None = None,
     tenant_id: str | None = None,
@@ -534,8 +368,6 @@ async def ingest_one(
     ----------
     doc:
         A fully validated in-memory Document object.
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert with the same version.
     shared_version:
@@ -564,7 +396,6 @@ async def ingest_one(
         return await asyncio.to_thread(
             _load_document_object,
             doc,
-            driver,
             update_mode,
             shared_version,
             tenant_id,
@@ -575,7 +406,6 @@ async def ingest_one(
 
 async def ingest_one_from_path(
     path: Path,
-    driver,
     update_mode: bool = False,
     shared_version: int | None = None,
     tenant_id: str | None = None,
@@ -597,8 +427,6 @@ async def ingest_one_from_path(
     ----------
     path:
         Path to a JSON extraction file produced by the pipeline.
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert with the same version.
     shared_version:
@@ -627,7 +455,6 @@ async def ingest_one_from_path(
         return await asyncio.to_thread(
             load_file,
             path,
-            driver,
             update_mode,
             shared_version,
             tenant_id,
@@ -638,7 +465,6 @@ async def ingest_one_from_path(
 
 def load_documents(
     documents: list[Document],
-    driver,
     update_mode: bool = False,
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
@@ -654,8 +480,6 @@ def load_documents(
     ----------
     documents:
         List of fully validated Document objects produced by Stage 1 (run_extraction()).
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
     tenant_id, created_by_user_id, job_id:
@@ -677,29 +501,28 @@ def load_documents(
     leaf_doc_paths = [doc.doc_path if doc.doc_path else doc.document_name for doc in documents]
     all_paths = _extract_all_paths(leaf_doc_paths)
     tenants = _batch_tenants(tenant_id, (doc.tenant_id for doc in documents))
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
+    store = get_graph_store()
+    with store.sync_scope():
+        shared_version = store.documents.resolve_batch_version(all_paths, tenants, update_mode)
 
-    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
+        logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
-    errors: dict[str, Exception] = {}
-    doc_names: list[str] = []
-    for doc in documents:
-        try:
-            doc_name = _load_document_object(
-                doc,
-                driver,
-                update_mode=update_mode,
-                shared_version=shared_version,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            doc_names.append(doc_name)
-        except Exception as exc:
-            logger.exception("Failed to load in-memory document: %s", doc.document_name)
-            errors[doc.document_name] = exc
+        errors: dict[str, Exception] = {}
+        doc_names: list[str] = []
+        for doc in documents:
+            try:
+                doc_name = _load_document_object(
+                    doc,
+                    update_mode=update_mode,
+                    shared_version=shared_version,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
+                )
+                doc_names.append(doc_name)
+            except Exception as exc:
+                logger.exception("Failed to load in-memory document: %s", doc.document_name)
+                errors[doc.document_name] = exc
 
     success_count = len(documents) - len(errors)
     logger.info(
@@ -718,7 +541,6 @@ def load_documents(
 
 def load_folder(
     folder: Path,
-    driver,
     update_mode: bool = False,
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
@@ -732,8 +554,6 @@ def load_folder(
     ----------
     folder:
         Path to a directory containing JSON extraction files (searched recursively).
-    driver:
-        An open, authenticated Neo4j driver instance.
     update_mode:
         If True, wipe existing structure and re-insert without creating new versions.
     tenant_id, created_by_user_id, job_id:
@@ -770,29 +590,28 @@ def load_folder(
     leaf_doc_paths = [p for p in (_read_doc_path(f) for f in json_files) if p]
     all_paths = _extract_all_paths(leaf_doc_paths)
     tenants = _batch_tenants(tenant_id, (_read_tenant_id(f) for f in json_files))
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        shared_version = _resolve_batch_version(session, all_paths, update_mode, tenants)
+    store = get_graph_store()
+    with store.sync_scope():
+        shared_version = store.documents.resolve_batch_version(all_paths, tenants, update_mode)
 
-    logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
+        logger.info("Batch version resolved: %d for %d path(s)", shared_version, len(all_paths))
 
-    errors: dict[Path, Exception] = {}
-    doc_names: list[str] = []
-    for json_file in json_files:
-        try:
-            doc_name = load_file(
-                json_file,
-                driver,
-                update_mode=update_mode,
-                shared_version=shared_version,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            doc_names.append(doc_name)
-        except Exception as exc:
-            logger.exception("Failed to load file: %s", json_file)
-            errors[json_file] = exc
+        errors: dict[Path, Exception] = {}
+        doc_names: list[str] = []
+        for json_file in json_files:
+            try:
+                doc_name = load_file(
+                    json_file,
+                    update_mode=update_mode,
+                    shared_version=shared_version,
+                    tenant_id=tenant_id,
+                    created_by_user_id=created_by_user_id,
+                    job_id=job_id,
+                )
+                doc_names.append(doc_name)
+            except Exception as exc:
+                logger.exception("Failed to load file: %s", json_file)
+                errors[json_file] = exc
 
     success_count = len(json_files) - len(errors)
     logger.info(

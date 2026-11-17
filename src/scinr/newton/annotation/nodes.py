@@ -7,10 +7,9 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 from scinr.newton.annotation.models import AnnotationDecision
-from scinr.newton.annotation.neo4j_ops import fetch_node_context, write_annotation
 from scinr.newton.annotation.prompts import build_annotation_decision_prompt
 from scinr.newton.config import get_llm, make_system_message
-from scinr.newton.ingest.config import get_async_driver
+from scinr.newton.graph import get_graph_store
 from scinr.newton.utils.llm_repair import extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
 from scinr.newton.utils.neo4j_concurrency import get_neo4j_semaphore
@@ -81,20 +80,18 @@ def _build_annotation_human_message(ctx: dict, user_context: str = "") -> str:
 
 # ── Private helper: fetch node context ───────────────────────────────────────
 
-async def _fetch_node_context(node_data: dict, driver) -> dict | None:
+async def _fetch_node_context(node_data: dict) -> dict | None:
     """Fetch full context (InfoUnits + qualifying children) for a node.
 
     Args:
         node_data: Node dict with keys: full_id, node_id, title, role.
-        driver: Async Neo4j driver instance.
 
     Returns:
         NodeContext-shaped dict on success, None on error.
     """
     node_id = node_data.get("node_id", "unknown")
     try:
-        context = await fetch_node_context(
-            driver=driver,
+        context = await get_graph_store().annotation.fetch_node_context(
             full_node_id=node_data["full_id"],
             node_id=node_data["node_id"],
             title=node_data.get("title"),
@@ -204,7 +201,6 @@ async def _decide_model(
 # ── Private helper: write decision ────────────────────────────────────────────
 
 async def _write_decision(
-    driver,
     full_id: str,
     decision: AnnotationDecision,
     document_name: str,
@@ -213,7 +209,6 @@ async def _write_decision(
     """Write the AnnotationDecision to Neo4j.
 
     Args:
-        driver: Async Neo4j driver instance.
         full_id: Full StructureNode.id as stored in Neo4j.
         decision: Parsed AnnotationDecision to persist.
         document_name: Neo4j Document.name.
@@ -223,7 +218,7 @@ async def _write_decision(
         Error message on failure, None on success.
     """
     try:
-        await write_annotation(driver, full_id, decision, document_name)
+        await get_graph_store().annotation.write_annotation(full_id, decision, document_name)
         logger.info(
             "_write_decision: wrote AnnotationDecision for node '%s' (class=%s, confidence=%s)",
             node_id,
@@ -269,7 +264,6 @@ async def process_single_annotation_node(
         ``{"node_id": str, "decision": AnnotationDecision | None, "error": str | None}``
     """
     node_id = node_data.get("node_id", "unknown")
-    driver = get_async_driver()
     neo4j_semaphore = get_neo4j_semaphore()
 
     # The LLM slot is taken FIRST so that the context, prompt and messages of a
@@ -279,7 +273,7 @@ async def process_single_annotation_node(
     async with bedrock_semaphore:
         # ── Fetch context (bounded by Neo4j semaphore) ────────────────────────
         async with neo4j_semaphore:
-            ctx = await _fetch_node_context(node_data, driver)
+            ctx = await _fetch_node_context(node_data)
         if ctx is None:
             return {
                 "node_id": node_id,
@@ -294,7 +288,7 @@ async def process_single_annotation_node(
         # ── Write decision (outside the LLM slot, bounded by Neo4j semaphore) ─
         async with neo4j_semaphore:
             write_error = await _write_decision(
-                driver, node_data["full_id"], decision, document_name, node_id
+                node_data["full_id"], decision, document_name, node_id
             )
         if write_error:
             error = write_error

@@ -148,7 +148,8 @@ class GraphNavigator(ABC):
         """Acquire the backend connection and verify it is reachable.
 
         Raises:
-            GraphConnectionError: If the engine cannot be reached.
+            GraphConnectionError: If the engine cannot be reached (a ``GraphError``,
+                not a ``NavigationError``).
         """
 
     @abstractmethod
@@ -163,7 +164,8 @@ class GraphNavigator(ABC):
         """Return ``True`` if the backend answers a trivial read.
 
         Raises:
-            GraphConnectionError: If the engine cannot be reached.
+            GraphConnectionError: If the engine cannot be reached (a ``GraphError``,
+                not a ``NavigationError``).
         """
 
     async def __aenter__(self) -> GraphNavigator:

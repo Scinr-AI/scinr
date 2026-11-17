@@ -1,0 +1,869 @@
+{
+  "extras": {
+    "v1": "alpha.txt"
+  },
+  "nodes": [
+    {
+      "key": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": true,
+        "latest": false,
+        "load_date": "<ts>",
+        "name": "Docs",
+        "path": "Docs",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": true,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "Docs",
+        "path": "Docs",
+        "tenant_id": "golden-a",
+        "version": 2
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": true,
+        "latest": false,
+        "load_date": "<ts>",
+        "name": "Sub",
+        "path": "Docs/Sub",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": true,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "Sub",
+        "path": "Docs/Sub",
+        "tenant_id": "golden-a",
+        "version": 2
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": false,
+        "load_date": "<ts>",
+        "name": "beta.txt",
+        "path": "Docs/Sub/beta.txt",
+        "raw_file_id": "<oid:3>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "beta.txt",
+        "path": "Docs/Sub/beta.txt",
+        "raw_file_id": "<oid:4>",
+        "tenant_id": "golden-a",
+        "version": 2
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": false,
+        "load_date": "<ts>",
+        "name": "alpha.txt",
+        "path": "alpha.txt",
+        "raw_file_id": "<oid:1>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "alpha.txt",
+        "path": "alpha.txt",
+        "raw_file_id": "<oid:2>",
+        "tenant_id": "golden-a",
+        "version": 2
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"06f7be3f27ed2065\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "06f7be3f27ed2065",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "06f7be3f27ed2065"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"0d1e8a43f5fb9705\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "0d1e8a43f5fb9705",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "0d1e8a43f5fb9705"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"1171a9d1597f8118\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "1171a9d1597f8118",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "1171a9d1597f8118"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"245e76b313c661b1\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "245e76b313c661b1",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "245e76b313c661b1"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"2fcd3ca112d0c8f3\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "info_unit_id": "2fcd3ca112d0c8f3",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "2fcd3ca112d0c8f3"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"33205b4f9b523576\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "33205b4f9b523576",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "33205b4f9b523576"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"3c7a27e2200567f3\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "3c7a27e2200567f3",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "3c7a27e2200567f3"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"45f4fcca43bdeca8\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "45f4fcca43bdeca8",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "45f4fcca43bdeca8"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"4b794fb34de833e3\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "4b794fb34de833e3",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "4b794fb34de833e3"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"5097b7a9560a4f34\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 2.",
+        "info_unit_id": "5097b7a9560a4f34",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "5097b7a9560a4f34"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"52d4996974ddfa57\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "52d4996974ddfa57",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "52d4996974ddfa57"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"b23db2a0bfea7366\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "b23db2a0bfea7366",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "b23db2a0bfea7366"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"c5a22cdeaf55841b\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "info_unit_id": "c5a22cdeaf55841b",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "c5a22cdeaf55841b"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"c6c33ab10eb69d93\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "c6c33ab10eb69d93",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "c6c33ab10eb69d93"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"ea5f2603f99271f2\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 3.",
+        "info_unit_id": "ea5f2603f99271f2",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "ea5f2603f99271f2"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"f67dd0d4470b1b2b\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "f67dd0d4470b1b2b",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "f67dd0d4470b1b2b"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::Docs/Sub/beta.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::Docs/Sub/beta.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::Docs/Sub/beta.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::Docs/Sub/beta.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::Docs/Sub/beta.txt::2::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::Docs/Sub/beta.txt::2::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::Docs/Sub/beta.txt::2::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::Docs/Sub/beta.txt::2::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::alpha.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::alpha.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::alpha.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::alpha.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::alpha.txt::2::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::alpha.txt::2::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::alpha.txt::2::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::alpha.txt::2::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"b23db2a0bfea7366\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"52d4996974ddfa57\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"f67dd0d4470b1b2b\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"2fcd3ca112d0c8f3\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"4b794fb34de833e3\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"33205b4f9b523576\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"3c7a27e2200567f3\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"c5a22cdeaf55841b\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"0d1e8a43f5fb9705\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"45f4fcca43bdeca8\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"c6c33ab10eb69d93\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"5097b7a9560a4f34\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"245e76b313c661b1\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"06f7be3f27ed2065\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"1171a9d1597f8118\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"ea5f2603f99271f2\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "HAS_NEWER_VERSION"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "HAS_NEWER_VERSION"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "HAS_NEWER_VERSION"
+    },
+    {
+      "from": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "HAS_NEWER_VERSION"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::Docs/Sub/beta.txt::2::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"alpha.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::alpha.txt::2::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "type": "IS_COMPOSED_OF"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub/beta.txt\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "IS_COMPOSED_OF"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "type": "IS_COMPOSED_OF"
+    },
+    {
+      "from": "Document|{\"path\": \"Docs\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "props": {},
+      "to": "Document|{\"path\": \"Docs/Sub\", \"tenant_id\": \"golden-a\", \"version\": 2}",
+      "type": "IS_COMPOSED_OF"
+    }
+  ]
+}

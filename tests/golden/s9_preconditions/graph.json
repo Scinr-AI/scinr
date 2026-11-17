@@ -1,0 +1,199 @@
+{
+  "extras": {
+    "annotation_missing": "Document 'ghost.txt' (tenant='golden-a') not found in Neo4j (latest=true). Run run_ingestion() before run_annotation_agent().",
+    "extraction_missing": "Document 'ghost.txt' (tenant='golden-a') not found in Neo4j (latest=true). Run run_ingestion() before run_entity_extraction_agent().",
+    "extraction_unannotated": "Document 'plain.txt' (tenant='golden-a') has no annotated StructureNodes. Run run_annotation_agent() before run_entity_extraction_agent()."
+  },
+  "nodes": [
+    {
+      "key": "Document|{\"path\": \"plain.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "plain.txt",
+        "path": "plain.txt",
+        "raw_file_id": "<oid:0>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"71cda05fa905a4fe\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "71cda05fa905a4fe",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "71cda05fa905a4fe"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"81b6cc4292743685\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "81b6cc4292743685",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "81b6cc4292743685"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"823a97ecf66214b2\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "info_unit_id": "823a97ecf66214b2",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "823a97ecf66214b2"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"f66317e9a7c30051\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "f66317e9a7c30051",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "f66317e9a7c30051"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::plain.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::plain.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::plain.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::plain.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::plain.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"81b6cc4292743685\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"71cda05fa905a4fe\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"f66317e9a7c30051\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"823a97ecf66214b2\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "Document|{\"path\": \"plain.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::plain.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"plain.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::plain.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    }
+  ]
+}

@@ -14,8 +14,16 @@ class ConfigurationError(ScinrError):
     """
     Raised when the library is misconfigured.
 
-    Examples: LLM not set, Neo4j credentials missing, invalid storage backend,
-    models directory not found, invalid catalog.py.
+    Examples: LLM not set, invalid storage backend, models directory not found,
+    invalid catalog.py.
+    """
+
+
+class GraphConfigurationError(ConfigurationError):
+    """
+    Raised when the graph backend is not configured.
+
+    Example: Neo4j credentials missing (``neo4j_user`` / ``neo4j_password``).
     """
 
 
@@ -36,9 +44,11 @@ class ExtractionError(ScinrError):
 
 class IngestionError(ScinrError):
     """
-    Raised when writing to Neo4j fails.
+    Raised when ingesting a document fails.
 
-    Examples: version conflict, schema constraint violation.
+    Examples: a version conflict (until the graph store translates it to
+    :class:`DocumentVersionConflict`), a raw file that cannot be verified.
+    Graph-engine failures are :class:`GraphError` subclasses.
     """
 
 
@@ -95,13 +105,68 @@ class NavigationError(ScinrError):
     """
 
 
-class GraphConnectionError(NavigationError):
+class GraphError(ScinrError):
+    """
+    Base class for every error that comes from the graph engine.
+
+    Graph stores translate the engine's own exceptions (for Neo4j,
+    ``neo4j.exceptions.*``) to this hierarchy at their boundary, keeping the
+    original message and chaining the original exception in ``__cause__``.
+    """
+
+
+class GraphConnectionError(GraphError):
     """
     Raised when the configured graph engine is unreachable.
 
-    Surfaced by :func:`scinr.newton.navigation.get_graph_navigator` and by
+    Surfaced by the graph store (write path), by
+    :func:`scinr.newton.navigation.get_graph_navigator` and by
     ``GraphNavigator.ping()``. Mirrors :class:`StorageError` for the storage
     layer.
+    """
+
+
+class GraphAuthenticationError(GraphConnectionError):
+    """
+    Raised when the graph engine rejects the configured credentials.
+    """
+
+
+class TransientGraphError(GraphError):
+    """
+    Raised when a transient graph-engine error persists after all retries
+    have been exhausted (deadlock, lost leader, defunct connection, ...).
+    """
+
+
+class GraphResourceError(GraphError):
+    """
+    Raised when the graph engine runs out of resources for the operation
+    (for Neo4j, ``MemoryPoolOutOfMemoryError``).
+
+    Retrying the same operation will not help: reduce the size of the batch or
+    of the transaction.
+    """
+
+
+class GraphConstraintError(GraphError):
+    """
+    Raised when a write violates a constraint of the graph schema.
+    """
+
+
+class DocumentVersionConflict(GraphConstraintError):
+    """
+    Raised when the version of a document being inserted was already ingested,
+    typically by a concurrent process. Retry the ingestion.
+    """
+
+
+class GraphQueryError(GraphError):
+    """
+    Raised for a query the graph engine rejects (syntax, client errors, ...).
+
+    These are programming errors, not conditions to retry.
     """
 
 

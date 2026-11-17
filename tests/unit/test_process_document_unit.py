@@ -53,7 +53,6 @@ def _base_kwargs(**overrides: object) -> dict:
             "entity_extraction",
         ],
         document_semaphore=asyncio.Semaphore(1),
-        sync_driver=MagicMock(),
         shared_ingest_version=1,
         converter_output_dir=None,
         extraction_output_dir=None,
@@ -164,7 +163,6 @@ class TestFullSuccessRawFile:
         mock_extract_one_file.assert_not_called()
         mock_ingest_one.assert_awaited_once_with(
             extracted_doc,
-            kwargs["sync_driver"],
             False,
             1,
             tenant_id=None,

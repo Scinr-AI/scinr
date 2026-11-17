@@ -1,7 +1,7 @@
 """
 tests/unit/test_entity_extraction_agent.py — Regression tests for the
 event-loop-blocking fix in scinr.newton.entity_extraction.agent /
-scinr.newton.entity_extraction.neo4j_ops.
+scinr.newton.graph.neo4j.extraction.
 
 Prior to the fix, `fetch_extraction_targets()` was a *synchronous* Neo4j call
 executed directly inside the async `_run_entity_extraction_parallel()` /
@@ -38,45 +38,8 @@ from scinr.newton.entity_extraction.agent import (
 from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
-# Helpers — fake async Neo4j driver/session (async context manager protocol)
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeAsyncResult:
-    """Mimics neo4j.AsyncResult for the precondition-check queries."""
-
-    def __init__(self, record: dict) -> None:
-        self._record = record
-
-    async def single(self):
-        return self._record
-
-
-class _FakeAsyncSession:
-    """Mimics neo4j.AsyncSession — answers every `.run(...)` with `n=1`,
-    which is enough for both `run_entity_extraction_agent()` precondition
-    checks (document exists, at least one annotated StructureNode exists) to
-    pass regardless of the exact query text.
-    """
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc_info):
-        return False
-
-    async def run(self, query, **kwargs):
-        return _FakeAsyncResult({"n": 1})
-
-
-class _FakeAsyncDriver:
-    """Mimics neo4j.AsyncDriver — `.session()` is a plain (non-async) method
-    that returns a fresh async-context-manager session each call, exactly
-    like the real driver's API.
-    """
-
-    def session(self, **kwargs):
-        return _FakeAsyncSession()
 
 
 class _ConcurrencyTracker:
@@ -108,7 +71,7 @@ class _ConcurrencyTracker:
 
 
 class TestRunEntityExtractionParallelConcurrency:
-    async def test_two_concurrent_calls_overlap_during_fetch(self):
+    async def test_two_concurrent_calls_overlap_during_fetch(self, fake_graph_store):
         """Two concurrent `_run_entity_extraction_parallel()` calls must
         overlap their `fetch_extraction_targets()` awaits — proving it no
         longer blocks the event loop synchronously.
@@ -120,24 +83,16 @@ class TestRunEntityExtractionParallelConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_fetch(driver, *, tenant_id, doc_path, only_unextracted=False):
+        async def _tracking_fetch(*, tenant_id, doc_path, only_unextracted=False):
             await tracker.track()
             return []
 
-        with (
-            patch(
-                "scinr.newton.entity_extraction.neo4j_ops.fetch_extraction_targets",
-                AsyncMock(side_effect=_tracking_fetch),
-            ),
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=MagicMock(name="async_driver")),
-            ),
-        ):
-            results = await asyncio.gather(
-                _run_entity_extraction_parallel("docA", tenant_id=None, doc_path="docA"),
-                _run_entity_extraction_parallel("docB", tenant_id=None, doc_path="docB"),
-            )
+        fake_graph_store.extraction.fetch_targets.side_effect = _tracking_fetch
+
+        results = await asyncio.gather(
+            _run_entity_extraction_parallel("docA", tenant_id=None, doc_path="docA"),
+            _run_entity_extraction_parallel("docB", tenant_id=None, doc_path="docB"),
+        )
 
         assert results == [
             {"document_name": "docA", "doc_path": "docA", "targets": [], "errors": []},
@@ -152,7 +107,7 @@ class TestRunEntityExtractionParallelConcurrency:
 
 
 class TestRunEntityExtractionAgentPreconditionConcurrency:
-    async def test_two_concurrent_calls_overlap_during_leaf_resolution(self):
+    async def test_two_concurrent_calls_overlap_during_leaf_resolution(self, fake_graph_store):
         """Two concurrent `run_entity_extraction_agent()` calls must overlap
         during `resolve_leaf_documents_async()` — proving the
         precondition-check / leaf-resolution plumbing (async driver session,
@@ -164,19 +119,15 @@ class TestRunEntityExtractionAgentPreconditionConcurrency:
         code, not the downstream per-target extraction logic (already
         covered by `TestRunEntityExtractionParallelConcurrency` above).
         """
+        fake_graph_store.documents.count_latest_documents.return_value = 1
+        fake_graph_store.annotation.count_annotated_nodes.return_value = 1
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
+        async def _tracking_resolve(*, tenant_id, doc_path=None, document_name=None):
             await tracker.track()
             return [LeafDocument(document_name, document_name)]
 
-        fake_driver = _FakeAsyncDriver()
-
         with (
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=fake_driver),
-            ),
             patch(
                 "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
                 AsyncMock(side_effect=_tracking_resolve),
@@ -204,6 +155,39 @@ class TestRunEntityExtractionAgentPreconditionConcurrency:
         assert tracker.max_in_flight == 2
 
 
+class TestRunEntityExtractionAgentPrecondition:
+    async def test_missing_document_raises_precondition_error(self, fake_graph_store):
+        from scinr.newton.exceptions import PreconditionError
+        from scinr.newton.graph.types import DocumentSelector
+
+        fake_graph_store.documents.count_latest_documents.return_value = 0
+
+        with pytest.raises(PreconditionError, match="not found in Neo4j"):
+            await run_entity_extraction_agent("docA", tenant_id="acme", doc_path="F/docA")
+
+        fake_graph_store.documents.count_latest_documents.assert_awaited_once_with(
+            DocumentSelector(tenant_id="acme", path="F/docA", document_name="docA", latest=True)
+        )
+        fake_graph_store.annotation.count_annotated_nodes.assert_not_called()
+
+    async def test_document_without_annotated_nodes_raises_precondition_error(
+        self, fake_graph_store
+    ):
+        from scinr.newton.exceptions import PreconditionError
+        from scinr.newton.graph.types import DocumentSelector
+
+        fake_graph_store.documents.count_latest_documents.return_value = 1
+        fake_graph_store.annotation.count_annotated_nodes.return_value = 0
+
+        with pytest.raises(PreconditionError, match="no annotated StructureNodes"):
+            await run_entity_extraction_agent("docA", tenant_id=None)
+
+        fake_graph_store.annotation.count_annotated_nodes.assert_awaited_once_with(
+            DocumentSelector(tenant_id=None, path=None, document_name="docA", latest=True)
+        )
+        fake_graph_store.documents.resolve_leaf_documents_async.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # 3. Guardrails against silent future regressions
 # ---------------------------------------------------------------------------
@@ -216,25 +200,25 @@ class TestFetchExtractionTargetsIsAsync:
         anyone noticing (e.g. during a refactor) — which would silently
         reintroduce the event-loop-blocking bug this suite protects against.
         """
-        from scinr.newton.entity_extraction.neo4j_ops import fetch_extraction_targets
+        from scinr.newton.graph.neo4j.extraction import Neo4jExtractionOps
 
-        assert inspect.iscoroutinefunction(fetch_extraction_targets) is True
+        assert inspect.iscoroutinefunction(Neo4jExtractionOps.fetch_targets) is True
 
 
 class TestMarkInfoUnitsExtractedMigration:
     def test_sync_mark_info_units_extracted_was_removed(self):
         """The dead synchronous `mark_info_units_extracted()` function must
         stay removed — it was replaced entirely by the async
-        `mark_info_units_extracted_async()` below.
+        `store.extraction.mark_info_units_extracted()` below.
         """
-        import scinr.newton.entity_extraction.neo4j_ops as neo4j_ops_module
+        import scinr.newton.graph.neo4j.extraction as extraction_module
 
-        assert not hasattr(neo4j_ops_module, "mark_info_units_extracted")
+        assert not hasattr(extraction_module, "mark_info_units_extracted")
 
     def test_async_mark_info_units_extracted_exists_and_is_a_coroutine_function(self):
-        from scinr.newton.entity_extraction.neo4j_ops import mark_info_units_extracted_async
+        from scinr.newton.graph.neo4j.extraction import Neo4jExtractionOps
 
-        assert inspect.iscoroutinefunction(mark_info_units_extracted_async) is True
+        assert inspect.iscoroutinefunction(Neo4jExtractionOps.mark_info_units_extracted) is True
 
 
 if __name__ == "__main__":

@@ -5,9 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from neo4j import Driver
-
-from scinr.newton.config import get_config
+from scinr.newton.graph import get_graph_store
 from scinr.newton.tabular.graph import tabular_graph
 from scinr.newton.tabular.reader import SheetScan
 from scinr.newton.tabular.state import TabularState
@@ -20,7 +18,6 @@ async def run_tabular_agent(
     file_path: Path,
     document_name: str,
     doc_path: str,
-    driver: Driver,
     resolved_version: int,
     update_mode: bool = False,
     raw_file_id: str = "",
@@ -32,7 +29,8 @@ async def run_tabular_agent(
 ) -> dict:
     """Run the full tabular pipeline for one CSV or XLSX file.
 
-    1. Creates the Document node and folder hierarchy in Neo4j (one transaction).
+    1. Creates the Document node and folder hierarchy in the graph (one transaction;
+       it uses the connection of the surrounding ``store.sync_scope()``, if any).
     2. Runs the LangGraph: load_sheets → decide_model → map_columns → write_tabular
        (per sheet).
     3. Returns the final TabularState dict.
@@ -42,7 +40,6 @@ async def run_tabular_agent(
     file_path : Path to the source file (absolute).
     document_name : Display name (source file name with extension, e.g. ``ventas.xlsx``).
     doc_path : Relative path used as Neo4j Document key.
-    driver : Open Neo4j driver (caller-owned).
     resolved_version : Pre-computed batch version.
     update_mode : If True, existing Table/Row subgraph is wiped before re-inserting.
     raw_file_id : MongoDB ObjectId string for the stored raw file, or "" when no storage backend is configured.
@@ -60,58 +57,18 @@ async def run_tabular_agent(
         unreadable files before creating the Document); ``load_sheets`` then reuses
         it instead of reading the file again. ``None`` scans it in ``load_sheets``.
     """
-    from scinr.newton.ingest.nodes import (
-        handle_versioning,
-        insert_document,
-        insert_folder_document_hierarchy,
-        link_leaf_to_folder,
-    )
-
     tenant = tenant_key(tenant_id)
 
     # Step 1: create Document node + folder hierarchy
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        with session.begin_transaction() as tx:
-            try:
-                if "/" in doc_path:
-                    folder_path = doc_path.rsplit("/", 1)[0]
-                    insert_folder_document_hierarchy(
-                        tx,
-                        folder_path,
-                        resolved_version,
-                        tenant_id=tenant,
-                        created_by_user_id=created_by_user_id,
-                        job_id=job_id,
-                    )
-                insert_document(
-                    tx,
-                    document_name,
-                    doc_path,
-                    resolved_version,
-                    raw_file_id,
-                    is_folder=False,
-                    context_instructions=None,
-                    tenant_id=tenant,
-                    created_by_user_id=created_by_user_id,
-                    job_id=job_id,
-                )
-                handle_versioning(tx, doc_path, resolved_version, tenant)
-                link_leaf_to_folder(tx, doc_path, resolved_version, tenant)
-                tx.commit()
-                logger.info(
-                    "tabular agent: Document node created for '%s' (v%d)",
-                    doc_path,
-                    resolved_version,
-                )
-            except Exception as exc:
-                tx.rollback()
-                logger.error(
-                    "tabular agent: Document creation failed for '%s': %s",
-                    doc_path,
-                    exc,
-                )
-                raise
+    get_graph_store().documents.create_tabular_document(
+        document_name=document_name,
+        doc_path=doc_path,
+        version=resolved_version,
+        raw_file_id=raw_file_id,
+        tenant=tenant,
+        created_by_user_id=created_by_user_id,
+        job_id=job_id,
+    )
 
     # Step 2: run LangGraph
     initial_state: TabularState = {
@@ -157,7 +114,6 @@ def run_tabular_agent_sync(
     file_path: Path,
     document_name: str,
     doc_path: str,
-    driver: Driver,
     resolved_version: int,
     update_mode: bool = False,
     raw_file_id: str = "",
@@ -173,7 +129,6 @@ def run_tabular_agent_sync(
             file_path,
             document_name,
             doc_path,
-            driver,
             resolved_version,
             update_mode,
             raw_file_id,

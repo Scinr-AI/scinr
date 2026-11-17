@@ -323,7 +323,7 @@ The tabular pipeline (CSV/XLSX/XLS ingestion) supports an optional **normalizati
 **Non-normalized vs. normalized fields — the core distinction:**
 
 - A **non-normalized** field (e.g. `raw_address: str`) holds the value **exactly as it came from the source dataset** — whatever string was in that CSV/Excel column, untouched. It is populated purely by column-mapping, with no LLM call involved.
-- A **normalized** field (e.g. `normalized_address: NormalizedAddress | None`) is a nested sub-model that the `NormalizationEngine` fills in by sending the listed `normalization_source_fields` to an LLM (`with_structured_output()`), validating the result with `TypeAdapter.validate_python()`, and writing it back onto the instance. This runs **in memory, before the row is written to Neo4j** — it never touches Cypher directly; the same graph writer (`write_extraction_subgraph`) used by the unstructured (PDF/DOCX) pipeline is reused afterward.
+- A **normalized** field (e.g. `normalized_address: NormalizedAddress | None`) is a nested sub-model that the `NormalizationEngine` fills in by sending the listed `normalization_source_fields` to an LLM (`with_structured_output()`), validating the result with `TypeAdapter.validate_python()`, and writing it back onto the instance. This runs **in memory, before the row is written to Neo4j** — it never touches Cypher directly; the same graph writer (`write_extraction_subgraph` in `entity_extraction/graph_mapper.py`) used by the unstructured (PDF/DOCX) pipeline is reused afterward.
 
 **Why this matters for the graph — linking across datasets:** the raw field on its own is just a string property; it does not participate in any deduplication unless it separately carries its own `entity_label`. The **normalized** sub-model, by contrast, is written to the graph as an ordinary `:ModelInstance` node (linked from its parent via `[:HAS_<FIELDNAME>]`) — and if *that* sub-model declares its own `instance_key` and/or `entity_label` fields (exactly as described in the section above), it deduplicates and links globally just like any other keyed `ModelInstance`. In other words: **normalization does not create graph links by itself** — it produces a clean, structured value that is *much easier* to key or label consistently than free-text, which is what actually enables reliable joins between rows/documents that describe the same real-world entity but wrote it differently (e.g. `"123 Main St, Springfield"` vs `"123 main street springfield"`).
 
@@ -579,13 +579,13 @@ ORDER BY old.version;
 
 ## Indexes and Constraints
 
-`setup_schema()` (run by `run_ingestion`, the pipeline, the tabular pipeline and the loader) creates every constraint and index below with `IF NOT EXISTS`; there is nothing to create by hand. The authoritative list is `ingest/schema.py`.
+`store.schema.setup()` (`get_graph_store().schema.setup()`; run by `run_ingestion`, the pipeline, the tabular pipeline and the loader) creates every constraint and index below with `IF NOT EXISTS`; there is nothing to create by hand. The authoritative list is `graph/neo4j/schema.py`.
 
 ### Unique constraints
 
 | Label | Key | Notes |
 |---|---|---|
-| `:Document` | `(tenant_id, path, version)` | The document identity. `setup_schema()` drops the legacy `constraint_document_path_version`. |
+| `:Document` | `(tenant_id, path, version)` | The document identity. `store.schema.setup()` drops the legacy `constraint_document_path_version`. |
 | `:StructureNode` | `id` | The id is tenant-prefixed. |
 | `:InfoUnit`, `:ExtractionResult`, `:ModelInstance`, `:LabeledEntity`, `:Entity` | `uid` | The uid hashes the tenant. |
 | `:ModelField` | `(name, model)` | Catalog. |
@@ -614,7 +614,7 @@ The single `tenant_id` indexes are kept: a query over all tenants (`tenant_id=No
 
 ### `instance_key` indexes
 
-For every distinct field name marked `instance_key: True` in the registered models, `ensure_catalog_models()` creates
+For every distinct field name marked `instance_key: True` in the registered models, the catalog setup (the `CatalogSink` of `store.annotation.catalog_sink()`) creates
 
 ```cypher
 CREATE INDEX idx_mi_key_<field> IF NOT EXISTS
@@ -642,13 +642,13 @@ A predicate placed after a `WITH` (`WITH n, x WHERE n.tenant_id = ...`) is not a
 
 ### Community edition
 
-Neo4j Community does not support property existence constraints (`IS NOT NULL`), node key constraints or property type constraints; `setup_schema()` does not create them. Range indexes (single and composite), unique constraints (also composite) and fulltext indexes are all available, and are the only kinds scinr uses.
+Neo4j Community does not support property existence constraints (`IS NOT NULL`), node key constraints or property type constraints; `store.schema.setup()` does not create them. Range indexes (single and composite), unique constraints (also composite) and fulltext indexes are all available, and are the only kinds scinr uses.
 
 ### Verifying index usage
 
 `tests/integration/test_index_usage.py` checks that the representative queries **can** use their index — it does not measure time and needs no data volume:
 
-- **Neo4j**: runs `setup_schema()`, creates one `instance_key` index, and runs `EXPLAIN <query> USING INDEX <expected index>` for each navigation query (captured from the real navigator), the `instance_key` lookup and the `graph_mapper` writes. Nothing is executed.
+- **Neo4j**: runs `store.schema.setup()`, creates one `instance_key` index, and runs `EXPLAIN <query> USING INDEX <expected index>` for each navigation query (captured from the real navigator), the `instance_key` lookup and the extraction subgraph writes (`graph/neo4j/extraction.py`). Nothing is executed.
 - **MongoDB**: in a throwaway `scinr_it_<uuid>` database (dropped afterwards), checks that `get_storage()` created the indexes, inserts a few documents and asserts `IXSCAN` on the expected index and no `COLLSCAN` for the page, raw-file inventory and delete queries.
 
 ```bash
@@ -657,7 +657,7 @@ MONGODB_URI=mongodb://user:pass@localhost:27017/?authSource=admin \
 pytest -m integration tests/integration/test_index_usage.py
 ```
 
-Each backend is skipped when its variables are missing or the server is unreachable. The Neo4j user needs schema privileges (it runs `setup_schema()`); the MongoDB user needs to create and drop a database.
+Each backend is skipped when its variables are missing or the server is unreachable. The Neo4j user needs schema privileges (it runs `store.schema.setup()`); the MongoDB user needs to create and drop a database.
 
 ---
 

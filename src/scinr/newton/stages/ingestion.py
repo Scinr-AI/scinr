@@ -8,11 +8,9 @@ import logging
 import time
 from pathlib import Path
 
-from scinr.newton.config import get_config
 from scinr.newton.exceptions import IngestionError, PreconditionError
-from scinr.newton.ingest.config import get_driver
+from scinr.newton.graph import get_graph_store
 from scinr.newton.ingest.loader import load_documents, load_files
-from scinr.newton.ingest.schema import setup_schema
 from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.utils.tenancy import tenant_key
 
@@ -113,17 +111,16 @@ async def run_ingestion(
                 logger.error("run_ingestion: rejecting '%s': %s", path, exc)
                 rejected[i] = str(exc)
 
-    driver = get_driver()
+    store = get_graph_store()
     doc_results: list[DocumentResult] = []
-    try:
-        setup_schema(driver)
+    with store.sync_scope():
+        store.schema.setup()
 
         if documents is not None:
             # In-memory mode
             accepted = [d for i, d in enumerate(documents) if i not in rejected]
             doc_names = load_documents(
                 accepted,
-                driver,
                 update_mode=update_mode,
                 tenant_id=tenant_id,
                 created_by_user_id=created_by_user_id,
@@ -145,7 +142,6 @@ async def run_ingestion(
             accepted_files = [p for i, p in enumerate(files_to_check) if i not in rejected]
             doc_names = load_files(
                 accepted_files,
-                driver,
                 update_mode=update_mode,
                 tenant_id=tenant_id,
                 created_by_user_id=created_by_user_id,
@@ -162,8 +158,6 @@ async def run_ingestion(
                         rejected.get(i, f"Failed to ingest '{path.name}'")
                     ],
                 ))
-    finally:
-        driver.close()
 
     total_failed = sum(1 for r in doc_results if r.nodes_failed > 0)
     duration = time.monotonic() - t0
@@ -177,8 +171,8 @@ async def run_ingestion(
     )
 
 
-def preflight_check_replaces(driver, replaces_name: str, *, tenant_id: str | None = None) -> dict:
-    """Verify that the document to be replaced exists in Neo4j.
+def preflight_check_replaces(replaces_name: str, *, tenant_id: str | None = None) -> dict:
+    """Verify that the document to be replaced exists in the graph.
 
     Queries for *tenant_id*'s Document nodes with the given name and
     latest=True — another tenant's document with the same name is never
@@ -189,10 +183,11 @@ def preflight_check_replaces(driver, replaces_name: str, *, tenant_id: str | Non
     - Multiple documents with the same name and latest=True are found
       (ambiguous — user should use a more specific path).
 
+    Opens and closes its own graph connection, unless called inside a
+    ``store.sync_scope()`` block.
+
     Parameters
     ----------
-    driver:
-        An open, authenticated Neo4j driver.
     replaces_name:
         The ``name`` property of the document to replace.
     tenant_id:
@@ -207,18 +202,10 @@ def preflight_check_replaces(driver, replaces_name: str, *, tenant_id: str | Non
     ------
     PreconditionError
         If the document is not found or if the match is ambiguous.
+    GraphError
+        If the graph engine fails.
     """
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        result = session.run(
-            """
-            MATCH (d:Document {tenant_id: $tenant_id, name: $name, latest: true})
-            RETURN d.path AS path, d.version AS version
-            """,
-            tenant_id=tenant_key(tenant_id),
-            name=replaces_name,
-        )
-        rows = [dict(r) for r in result]
+    rows = get_graph_store().documents.preflight_replaces(replaces_name, tenant_key(tenant_id))
 
     if len(rows) == 0:
         raise PreconditionError(
@@ -239,7 +226,6 @@ def preflight_check_replaces(driver, replaces_name: str, *, tenant_id: str | Non
 
 
 def apply_replacement(
-    driver,
     replaces_name: str,
     new_root_doc_names: list[str],
     *,
@@ -253,10 +239,11 @@ def apply_replacement(
     so a tenant can never mark another tenant's (or a public) document as
     superseded.
 
+    Opens and closes its own graph connection, unless called inside a
+    ``store.sync_scope()`` block.
+
     Parameters
     ----------
-    driver:
-        An open, authenticated Neo4j driver.
     replaces_name:
         The ``name`` property of the old document being replaced.
     new_root_doc_names:
@@ -266,56 +253,18 @@ def apply_replacement(
     replaced_path:
         Path of the old document, as returned by :func:`preflight_check_replaces`.
         When given, the old document is selected by path instead of by name.
+
+    Raises
+    ------
+    GraphError
+        If the graph engine fails.
     """
     if not new_root_doc_names:
         logger.warning("apply_replacement: no new root documents found; skipping.")
         return
-    stored_tenant = tenant_key(tenant_id)
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        # Find the new root documents (those just ingested with no IS_COMPOSED_OF parent)
-        result = session.run(
-            """
-            MATCH (d:Document {tenant_id: $tenant_id, latest: true})
-            WHERE d.name IN $names AND NOT ()-[:IS_COMPOSED_OF]->(d)
-            RETURN d.path AS path, d.version AS version, d.name AS name
-            """,
-            tenant_id=stored_tenant,
-            names=new_root_doc_names,
-        )
-        new_roots = [dict(r) for r in result]
-
-    if not new_roots:
-        logger.warning(
-            "apply_replacement: could not find any root documents among %s; skipping.",
-            new_root_doc_names,
-        )
-        return
-    # Select the old document by path when known (a name is not unique within
-    # a tenant); never the new document itself (same name, or same path when
-    # ingestion already versioned it).
-    old_filter = "path: $old_path" if replaced_path is not None else "name: $old_name"
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        for new_root in new_roots:
-            session.run(
-                f"""
-                MATCH (old:Document {{tenant_id: $tenant_id, {old_filter}, latest: true}})
-                MATCH (new:Document {{tenant_id: $tenant_id, path: $new_path, version: $new_version}})
-                WHERE old <> new
-                SET old.latest = false
-                MERGE (old)-[:HAS_NEWER_VERSION]->(new)
-                """,
-                tenant_id=stored_tenant,
-                old_path=replaced_path,
-                old_name=replaces_name,
-                new_path=new_root["path"],
-                new_version=new_root["version"],
-            )
-            logger.info(
-                "apply_replacement: linked '%s' (latest=false) -[:HAS_NEWER_VERSION]-> '%s' (path=%s, v=%s)",
-                replaces_name,
-                new_root["name"],
-                new_root["path"],
-                new_root["version"],
-            )
+    get_graph_store().documents.apply_replacement(
+        replaces_name,
+        new_root_doc_names,
+        tenant=tenant_key(tenant_id),
+        replaced_path=replaced_path,
+    )

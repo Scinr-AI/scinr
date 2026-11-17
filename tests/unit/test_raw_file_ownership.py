@@ -110,22 +110,20 @@ class TestIngestOne:
         load = MagicMock(return_value="doc")
         monkeypatch.setattr(loader, "_load_document_object", load)
         with pytest.raises(IngestionError):
-            await loader.ingest_one(_doc("rf-acme", None), driver=object(), tenant_id="globex")
+            await loader.ingest_one(_doc("rf-acme", None), tenant_id="globex")
         load.assert_not_called()
 
     async def test_override_tenant_is_the_one_checked(self, storage, monkeypatch):
         """The run's tenant wins over the one baked into the Document."""
         load = MagicMock(return_value="doc")
         monkeypatch.setattr(loader, "_load_document_object", load)
-        await loader.ingest_one(_doc("rf-acme", "globex"), driver=object(), tenant_id="acme")
+        await loader.ingest_one(_doc("rf-acme", "globex"), tenant_id="acme")
         load.assert_called_once()
 
     async def test_same_tenant_other_job_is_ingested(self, storage, monkeypatch):
         load = MagicMock(return_value="doc")
         monkeypatch.setattr(loader, "_load_document_object", load)
-        await loader.ingest_one(
-            _doc("rf-acme", "acme"), driver=object(), job_id="ingest-job"
-        )
+        await loader.ingest_one(_doc("rf-acme", "acme"), job_id="ingest-job")
         load.assert_called_once()
 
     async def test_forged_ingestion_json_fails_and_writes_nothing(
@@ -137,9 +135,9 @@ class TestIngestOne:
         load = MagicMock(return_value="doc")
         monkeypatch.setattr(loader, "load_file", load)
         with pytest.raises(IngestionError):
-            await loader.ingest_one_from_path(path, driver=object())
+            await loader.ingest_one_from_path(path)
         with pytest.raises(IngestionError):
-            await loader.ingest_one_from_path(path, driver=object(), tenant_id="globex")
+            await loader.ingest_one_from_path(path, tenant_id="globex")
         load.assert_not_called()
 
     async def test_json_without_raw_file_id_skips_the_check(self, monkeypatch, tmp_path: Path):
@@ -148,17 +146,14 @@ class TestIngestOne:
         path.write_text(json.dumps({"raw_file_id": "", "tenant_id": "acme"}), encoding="utf-8")
         load = MagicMock(return_value="doc")
         monkeypatch.setattr(loader, "load_file", load)
-        await loader.ingest_one_from_path(path, driver=object())
+        await loader.ingest_one_from_path(path)
         load.assert_called_once()
 
 
 class TestRunIngestion:
-    async def test_rejects_only_the_forged_document(self, storage, monkeypatch):
+    async def test_rejects_only_the_forged_document(self, storage, fake_graph_store, monkeypatch):
         from scinr.newton.stages import ingestion
 
-        driver = MagicMock()
-        monkeypatch.setattr(ingestion, "get_driver", lambda: driver)
-        monkeypatch.setattr(ingestion, "setup_schema", lambda d: None)
         seen: list[list[Document]] = []
 
         def _load_documents(docs, *a, **k):
@@ -174,17 +169,19 @@ class TestRunIngestion:
         result = await ingestion.run_ingestion(documents=[good, bad], tenant_id="acme")
 
         assert [d.document_name for d in seen[0]] == ["good"]
+        fake_graph_store.sync_scope_calls.assert_called_once()
+        fake_graph_store.schema.setup.assert_called_once()
         by_name = {r.document_name: r for r in result.documents}
         assert by_name["good"].nodes_processed == 1
         assert by_name["bad"].nodes_failed == 1
         assert "does not belong" in by_name["bad"].errors[0]
         assert result.success is False
 
-    async def test_folder_mode_filters_forged_files(self, storage, monkeypatch, tmp_path: Path):
+    async def test_folder_mode_filters_forged_files(
+        self, storage, fake_graph_store, monkeypatch, tmp_path: Path
+    ):
         from scinr.newton.stages import ingestion
 
-        monkeypatch.setattr(ingestion, "get_driver", lambda: MagicMock())
-        monkeypatch.setattr(ingestion, "setup_schema", lambda d: None)
         loaded: list[list[Path]] = []
 
         def _load_files(files, *a, **k):
