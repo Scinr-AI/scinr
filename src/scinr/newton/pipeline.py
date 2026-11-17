@@ -54,6 +54,7 @@ Follow progress while the pipeline runs::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Sequence
@@ -433,7 +434,7 @@ async def _run_pipeline_impl(
 ) -> PipelineResult:
     """Body of :func:`run_pipeline`; *emitter* receives the progress events."""
     # ── Imports (deferred to avoid circular imports at module level) ──────────
-    from scinr.newton.ingest.config import get_driver
+    from scinr.newton.graph import get_graph_store
     from scinr.newton.stages import (
         apply_replacement,
         preflight_check_replaces,
@@ -576,14 +577,10 @@ async def _run_pipeline_impl(
     # ── 10. Replaces pre-flight check ─────────────────────────────────────────
     replaced_path: str | None = None
     if replaces is not None and "ingestion" in effective_stages:
-        _driver = get_driver()
-        try:
-            replaced_path = preflight_check_replaces(_driver, replaces, tenant_id=tenant_id)["path"]
-            logger.info(
-                "Pre-flight check passed: document '%s' found in Neo4j.", replaces
-            )
-        finally:
-            _driver.close()
+        replaced_path = preflight_check_replaces(replaces, tenant_id=tenant_id)["path"]
+        logger.info(
+            "Pre-flight check passed: document '%s' found in Neo4j.", replaces
+        )
 
     # ── State accumulators ────────────────────────────────────────────────────
     stage_results: list[StageResult] = []
@@ -709,14 +706,9 @@ async def _run_pipeline_impl(
             # One batch version for the whole run: resolved once over the union
             # of tabular + document paths and tenants, so folders shared by both
             # are not split across two versions.
-            from scinr.newton.ingest.config import get_driver as _get_driver
             from scinr.newton.ingest.loader import (
                 _extract_all_paths,
             )
-            from scinr.newton.ingest.loader import (
-                resolve_batch_version_sync as _resolve_sync,
-            )
-            from scinr.newton.ingest.schema import setup_schema as _setup_schema
             from scinr.newton.pipeline_units import unit_tenant as _unit_tenant
 
             _root = Path(input_raw)
@@ -727,14 +719,15 @@ async def _run_pipeline_impl(
                     [tenant_id] + [_unit_tenant(u, tenant_id) for u in raw_inputs.units]
                 )
             )
-            _vdriver = _get_driver()
-            try:
-                _setup_schema(_vdriver)
+            _store = get_graph_store()
+            with _store.sync_scope():
+                _store.schema.setup()
                 shared_batch_version = await asyncio.to_thread(
-                    _resolve_sync, _vdriver, _extract_all_paths(_leaves), update_mode, _tenants
+                    _store.documents.resolve_batch_version,
+                    _extract_all_paths(_leaves),
+                    _tenants,
+                    update_mode,
                 )
-            finally:
-                _vdriver.close()
             sr = await _run_tabular_batch([(f, i) for i, f in enumerate(raw_inputs.tabular)])
             if _should_abort(sr):
                 return _build_result(False)
@@ -788,13 +781,10 @@ async def _run_pipeline_impl(
         logger.info("No documents discovered for this run; nothing to process.")
 
     # ── Pre-warm shared resources, then fan out one task per document unit ──
-    from scinr.newton.annotation.neo4j_ops import (
+    from scinr.newton.annotation.catalog import (
         ensure_catalog_models_once,
         ensure_theme_structure_once,
     )
-    from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.ingest.loader import resolve_batch_version_sync
-    from scinr.newton.ingest.schema import setup_schema
     from scinr.newton.utils.theme_registry import get_theme_registry
 
     raw_file_repo = None
@@ -803,27 +793,28 @@ async def _run_pipeline_impl(
         from scinr.newton.storage.factory import get_storage
         raw_file_repo, page_repo = get_storage()
 
-    sync_driver = None
+    # One synchronous graph connection shared by every unit's ingestion (only
+    # when something will be ingested; the other stages use the async one).
+    store = get_graph_store() if "ingestion" in effective_stages and units else None
+    sync_scope = store.sync_scope() if store is not None else contextlib.nullcontext()
     shared_ingest_version: int | None = None
     unit_results: list = []
     unit_gather_duration = 0.0
-    try:
+    with sync_scope:
         if "ingestion" in effective_stages and units:
-            sync_driver = get_driver()
-            setup_schema(sync_driver)
+            store.schema.setup()
             shared_ingest_version = shared_batch_version
         if shared_ingest_version is None and "ingestion" in effective_stages and units:
             all_paths = build_all_paths_for_versioning(units)
             batch_tenants = list(dict.fromkeys(unit_tenant(u, tenant_id) for u in units))
             shared_ingest_version = await asyncio.to_thread(
-                resolve_batch_version_sync, sync_driver, all_paths, update_mode, batch_tenants
+                store.documents.resolve_batch_version, all_paths, batch_tenants, update_mode
             )
 
         if ("annotation" in effective_stages or "entity_extraction" in effective_stages) and units:
-            async_driver_for_prewarm = get_async_driver()
             theme_registry = get_theme_registry()
-            await ensure_catalog_models_once(async_driver_for_prewarm)
-            await ensure_theme_structure_once(async_driver_for_prewarm, theme_registry)
+            await ensure_catalog_models_once(theme_registry)
+            await ensure_theme_structure_once(theme_registry)
 
         document_semaphore = asyncio.Semaphore(parallel_docs)
         unit_gather_t0 = time.monotonic()
@@ -834,7 +825,6 @@ async def _run_pipeline_impl(
                         u,
                         effective_stages=effective_stages,
                         document_semaphore=document_semaphore,
-                        sync_driver=sync_driver,
                         shared_ingest_version=shared_ingest_version,
                         converter_output_dir=converter_output_dir,
                         extraction_output_dir=extraction_output_dir,
@@ -860,9 +850,6 @@ async def _run_pipeline_impl(
                 return_exceptions=True,
             )
         unit_gather_duration = time.monotonic() - unit_gather_t0
-    finally:
-        if sync_driver is not None:
-            sync_driver.close()
 
     # ── Per-stage aggregation (Fase 7a) ───────────────────────────────────────
     # Never returns early on failure here: once units are dispatched, every
@@ -938,17 +925,12 @@ async def _run_pipeline_impl(
                 ingested_doc_names = [
                     doc.document_name for doc in stage_sr.documents if doc.nodes_failed == 0
                 ]
-                _driver = get_driver()
-                try:
-                    apply_replacement(
-                        _driver,
-                        replaces,
-                        ingested_doc_names,
-                        tenant_id=tenant_id,
-                        replaced_path=replaced_path,
-                    )
-                finally:
-                    _driver.close()
+                apply_replacement(
+                    replaces,
+                    ingested_doc_names,
+                    tenant_id=tenant_id,
+                    replaced_path=replaced_path,
+                )
 
         if on_partial_failure == "warn" and total_failed > 0:
             logger.warning(
@@ -1058,7 +1040,6 @@ async def _process_document_unit(
     *,
     effective_stages: list[str],
     document_semaphore: asyncio.Semaphore,
-    sync_driver,
     shared_ingest_version: int | None,
     converter_output_dir: str | None,
     extraction_output_dir: str | None,
@@ -1123,8 +1104,6 @@ async def _process_document_unit(
             ``{"preprocess", "extraction", "ingestion", "annotation",
             "entity_extraction"}``).
         document_semaphore: Shared semaphore bounding how many document units run concurrently.
-        sync_driver: Shared sync Neo4j ``Driver``, or ``None`` if ``"ingestion"`` is not
-            in *effective_stages*.
         shared_ingest_version: Pre-computed batch version forwarded to ``ingest_one()`` /
             ``ingest_one_from_path()``.
         converter_output_dir: Folder where Stage 0 writes intermediate JSON to disk, or ``None``
@@ -1348,7 +1327,6 @@ async def _process_document_unit(
                     if unit.kind == "ingestion_json":
                         current_name = await ingest_one_from_path(
                             unit.source_path,
-                            sync_driver,
                             update_mode,
                             shared_ingest_version,
                             tenant_id=tenant_id,
@@ -1358,7 +1336,6 @@ async def _process_document_unit(
                     else:
                         current_name = await ingest_one(
                             doc_obj,
-                            sync_driver,
                             update_mode,
                             shared_ingest_version,
                             tenant_id=tenant_id,

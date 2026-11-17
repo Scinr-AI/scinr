@@ -1,5 +1,13 @@
 """
-entity_extraction/graph_mapper.py
+entity_extraction/graph_mapper.py — domain side of the extraction subgraph: no Cypher.
+
+This module holds the traversal of the populated Pydantic instance
+(:func:`write_extraction_subgraph` / :func:`write_triple_subgraph`): timestamp,
+every uid, the entity registry, which fields are written. It emits one
+:class:`~scinr.newton.graph.sinks.ExtractionSink` call per statement, in the
+order the statements are executed; the Cypher is in ``graph/neo4j/extraction.py``
+(``store.extraction.sink()``). It also keeps the Pydantic helpers the traversal
+uses (field metadata, instance keys, relationship-type normalization).
 
 Converts a populated Pydantic instance (ExtractionModel or CompositeSchema) into
 a Neo4j subgraph using three relationship mechanisms:
@@ -56,24 +64,27 @@ from __future__ import annotations
 
 import logging
 import re
+import typing
 import unicodedata
 import uuid
-from collections.abc import Sequence
-from datetime import UTC
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
-from neo4j import AsyncDriver
 from pydantic import BaseModel
 
-from scinr.newton.config import get_config
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry
-from scinr.newton.utils.tenancy import PUBLIC_TENANT
+from scinr.newton.graph import get_graph_store
+from scinr.newton.graph.types import Provenance, RawProvenance
+from scinr.newton.utils.tenancy import require_stored_tenant
 from scinr.newton.utils.uid import make_instance_uid as _make_instance_uid
 from scinr.newton.utils.uid import make_uid as _make_uid
 from scinr.newton.utils.uid import normalize_key as _normalize
 
+if TYPE_CHECKING:
+    from scinr.newton.graph.sinks import ExtractionSink
+
 log = logging.getLogger(__name__)
 
+_MAX_DEPTH = 10
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -171,250 +182,6 @@ def _get_instance_key_fields(instance: BaseModel) -> dict[str, str] | None:
     return key_fields if key_fields else None
 
 
-def _require_stored_tenant(stored: str | None, node_full_id: str) -> str:
-    """Return the stored tenant key read off a StructureNode, refusing a
-    missing one: hashing a null tenant into a uid would silently create a
-    bucket shared by every such node, outside any tenant."""
-    if stored is None:
-        raise RuntimeError(
-            f"StructureNode {node_full_id!r} has no tenant_id; re-ingest its document."
-        )
-    return stored
-
-
-def _provenance_set_clause(alias: str) -> str:
-    """SET-clause fragment for a MERGE'd node: scalar ``tenant_id`` plus
-    accumulate ``created_by_user_id`` / ``job_id`` into deduplicated arrays.
-
-    Used identically in ``ON CREATE`` and ``ON MATCH`` branches — re-affirming
-    ``tenant_id`` on every MATCH is harmless since it is already folded into the
-    node's ``uid`` (a MATCH only ever happens within the same tenant). A ``None``
-    provenance value is skipped rather than pushed into the array.
-    """
-    return (
-        f"{alias}.tenant_id = $tenant_id, "
-        f"{alias}.created_by_user_ids = CASE "
-        f"WHEN $created_by_user_id IS NULL THEN coalesce({alias}.created_by_user_ids, []) "
-        f"WHEN $created_by_user_id IN coalesce({alias}.created_by_user_ids, []) THEN {alias}.created_by_user_ids "
-        f"ELSE coalesce({alias}.created_by_user_ids, []) + $created_by_user_id END, "
-        f"{alias}.job_ids = CASE "
-        f"WHEN $job_id IS NULL THEN coalesce({alias}.job_ids, []) "
-        f"WHEN $job_id IN coalesce({alias}.job_ids, []) THEN {alias}.job_ids "
-        f"ELSE coalesce({alias}.job_ids, []) + $job_id END"
-    )
-
-
-_STALE_EXTRACTION_RESULT_DELETE_QUERY = """
-UNWIND $node_ids AS nid
-MATCH (n:StructureNode {id: nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-OPTIONAL MATCH (er)-[*1..10]->(child:ModelInstance)
-DETACH DELETE child
-WITH DISTINCT er
-DETACH DELETE er
-"""
-
-
-async def delete_stale_extraction_result(runner, node_ids: str | Sequence[str]) -> None:
-    """Delete the ExtractionResult(s) hanging from the given StructureNode(s),
-    together with every :ModelInstance reachable from them within 10 hops.
-
-    The idempotency step of write_extraction_subgraph(),
-    write_manual_annotation() and restore_document(). Note that the
-    ModelInstance purge does not check whether another live ExtractionResult
-    still reaches the instance (long-standing pipeline behaviour); the GC
-    passes of ``ingest/_gc.py`` clean up whatever else is left orphaned.
-
-    Parameters
-    ----------
-    runner:
-        An ``AsyncSession`` or ``AsyncTransaction`` (anything with an async ``run``).
-    node_ids:
-        One ``StructureNode.id`` (tenant-prefixed) or several.
-    """
-    ids = [node_ids] if isinstance(node_ids, str) else list(node_ids)
-    await runner.run(_STALE_EXTRACTION_RESULT_DELETE_QUERY, node_ids=ids)
-
-
-# ---------------------------------------------------------------------------
-# Core writer
-# ---------------------------------------------------------------------------
-
-
-async def write_extraction_subgraph(
-    driver: AsyncDriver,
-    node_full_id: str,
-    composite_instance: BaseModel,
-    primary_model_class: str,
-    complementary_model_classes: list[str],
-    document_name: str,
-    extraction_uid: str,
-) -> None:
-    """
-    Write the complete extraction subgraph for one StructureNode to Neo4j.
-
-    Creates:
-      (:StructureNode)-[:HAS_EXTRACTION]->(:ExtractionResult)
-      + all entity nodes and relationships derived from the composite instance.
-
-    Idempotent: uses MERGE for all entity nodes. ExtractionResult is re-created
-    fresh (existing one for this node is deleted first).
-
-    Parameters
-    ----------
-    driver:
-        Open Neo4j driver.
-    node_full_id:
-        The StructureNode.id composite key.
-    composite_instance:
-        Populated instance of the composite Pydantic schema.
-    primary_model_class:
-        Name of the primary CatalogModel.
-    complementary_model_classes:
-        Names of complementary CatalogModel classes.
-    document_name:
-        Document.name for provenance.
-    extraction_uid:
-        Deterministic UID for the ExtractionResult node.
-    """
-    from datetime import datetime
-
-    timestamp = datetime.now(UTC).isoformat()
-    cfg = get_config()
-    async with driver.session(database=cfg.neo4j_database) as session:
-        # ── Guard: verify StructureNode exists, read its provenance ───────
-        # tenant_id / created_by_user_id / job_id are stamped on the
-        # StructureNode at Stage-2 ingestion time (see ingest/nodes.py) — read
-        # them back here rather than threading them through the whole
-        # extraction call stack. This is the single source of truth for "which
-        # tenant does this extraction belong to".
-        result = await session.run(
-            "MATCH (n:StructureNode {id: $nid}) "
-            "RETURN count(n) AS cnt, n.tenant_id AS tenant_id, "
-            "n.created_by_user_id AS created_by_user_id, n.job_id AS job_id",
-            nid=node_full_id,
-        )
-        rec = await result.single()
-        cnt = rec["cnt"] if rec else 0
-        if cnt == 0:
-            raise RuntimeError(
-                f"write_extraction_subgraph: StructureNode not found: {node_full_id!r}"
-            )
-        tenant_id = _require_stored_tenant(rec["tenant_id"], node_full_id)
-        created_by_user_id = rec["created_by_user_id"]
-        job_id = rec["job_id"]
-
-        # ── Idempotency: delete stale ExtractionResult subgraph ───────────
-        await delete_stale_extraction_result(session, node_full_id)
-
-        # ── Create ExtractionResult node ──────────────────────────────────
-        await session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})
-            CREATE (er:ExtractionResult {
-                uid:           $uid,
-                node_full_id:  $nid,
-                document_name: $doc_name,
-                model_class:   $model_class,
-                timestamp:     $timestamp,
-                tenant_id:            $tenant_id,
-                created_by_user_id:   $created_by_user_id,
-                job_id:               $job_id
-            })
-            CREATE (n)-[:HAS_EXTRACTION]->(er)
-            """,
-            nid=node_full_id,
-            uid=extraction_uid,
-            doc_name=document_name,
-            model_class=primary_model_class,
-            timestamp=timestamp,
-            tenant_id=tenant_id,
-            created_by_user_id=created_by_user_id,
-            job_id=job_id,
-        )
-
-        # ── Link primary CatalogModel ─────────────────────────────────────
-        _primary_params = dict(uid=extraction_uid, name=primary_model_class)
-        await with_neo4j_retry(
-            lambda: session.run(
-                """
-            MATCH (er:ExtractionResult {uid: $uid})
-            MERGE (cm:CatalogModel {name: $name})
-            MERGE (er)-[:USES_PRIMARY_MODEL]->(cm)
-            """,
-                **_primary_params,
-            )
-        )
-
-        # ── Link complementary CatalogModels that were actually extracted ─
-        # Only write USES_COMPLEMENTARY_MODEL for Optional[BaseModel] fields
-        # where the LLM actually returned a non-None value. Required (primary)
-        # fields are skipped because type(None) is not among their Union args.
-        import typing as _typing
-
-        for field_name, field_info in composite_instance.model_fields.items():
-            ann = field_info.annotation
-            args = _typing.get_args(ann)
-            if type(None) not in args:
-                continue  # required field — not a complementary model slot
-            model_arg = next(
-                (
-                    a
-                    for a in args
-                    if a is not type(None) and isinstance(a, type) and hasattr(a, "model_fields")
-                ),
-                None,
-            )
-            if model_arg is None:
-                continue  # not a BaseModel field
-            value = getattr(composite_instance, field_name, None)
-            if value is None:
-                continue  # LLM returned None — do not write the relationship
-            # Actually extracted — write the relationship
-            _comp_params = dict(uid=extraction_uid, name=model_arg.__name__)
-            await with_neo4j_retry(
-                lambda: session.run(
-                    """
-                MATCH (er:ExtractionResult {uid: $uid})
-                MERGE (cm:CatalogModel {name: $name})
-                MERGE (er)-[:USES_COMPLEMENTARY_MODEL]->(cm)
-                """,
-                    **_comp_params,
-                )
-            )
-
-        # ── Collect all entity nodes for Level 2 relationship resolution ──
-        entity_nodes: dict[str, str] = {}  # field_path → labeled_entity_uid
-
-        # ── Write fields from the composite instance ──────────────────────
-        await _write_model_fields(
-            session=session,
-            instance=composite_instance,
-            parent_uid=extraction_uid,
-            parent_label="ExtractionResult",
-            field_path_prefix="",
-            entity_nodes=entity_nodes,
-            depth=0,
-            tenant_id=tenant_id,
-            created_by_user_id=created_by_user_id,
-            job_id=job_id,
-        )
-
-        # ── Level 2: resolve field_relationships ──────────────────────────
-        await _apply_field_relationships(
-            session=session,
-            instance=composite_instance,
-            entity_nodes=entity_nodes,
-            field_path_prefix="",
-        )
-
-    log.info(
-        "write_extraction_subgraph: wrote ExtractionResult %s for node %r (%d entity nodes)",
-        extraction_uid,
-        node_full_id,
-        len(entity_nodes),
-    )
-
-
 _PARENT_LABELS = frozenset({"ExtractionResult", "ModelInstance"})
 
 
@@ -426,18 +193,73 @@ def _check_parent_label(label: str) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Triple (fallback) predicates
+# ---------------------------------------------------------------------------
+
+
+def _normalize_rel_type(predicate: str) -> str:
+    """
+    Normalize a free-text predicate to a valid Neo4j relationship type in UPPER_SNAKE_CASE.
+
+    Steps:
+    1. Lowercase and strip leading/trailing whitespace.
+    2. Strip unicode accents (NFKD normalization).
+    3. Replace any character that is not alphanumeric or whitespace with a single underscore.
+    4. Replace all whitespace sequences with a single underscore.
+    5. Collapse consecutive underscores into one.
+    6. Strip leading and trailing underscores.
+    7. Uppercase the result.
+    8. If the result is empty after normalization, return "RELATED_TO" as a safe default.
+
+    Examples:
+        "is manufactured by"      → "IS_MANUFACTURED_BY"
+        "contains active ingredient" → "CONTAINS_ACTIVE_INGREDIENT"
+        "has (primary) use"       → "HAS_PRIMARY_USE"
+        "α-helix forms"           → "HELIX_FORMS"   (accent stripped, leading _ removed)
+    """
+    # Step 1: lowercase + strip
+    text = predicate.strip().lower()
+    # Step 2: strip accents
+    nfkd = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in nfkd if not unicodedata.combining(c))
+    # Step 3: non-alphanumeric, non-whitespace → underscore
+    text = re.sub(r"[^a-z0-9\s]", "_", text)
+    # Step 4: whitespace → underscore
+    text = re.sub(r"\s+", "_", text)
+    # Step 5: collapse consecutive underscores
+    text = re.sub(r"_+", "_", text)
+    # Step 6: strip edge underscores
+    text = text.strip("_")
+    # Step 7: uppercase
+    text = text.upper()
+    # Step 8: safe default
+    return text if text else "RELATED_TO"
+
+
+# ---------------------------------------------------------------------------
+# Traversal: Pydantic instance -> ExtractionSink calls
+# ---------------------------------------------------------------------------
+
+
+def _provenance(raw: RawProvenance, node_full_id: str) -> Provenance:
+    """Validate the stored tenant of a StructureNode and keep its provenance."""
+    return Provenance(
+        tenant_id=require_stored_tenant(raw.tenant_id, node_full_id),
+        created_by_user_id=raw.created_by_user_id,
+        job_id=raw.job_id,
+    )
+
+
 async def _write_model_fields(
-    session,
+    sink: ExtractionSink,
     instance: BaseModel,
     parent_uid: str,
     parent_label: str,
     field_path_prefix: str,
     entity_nodes: dict[str, str],
     depth: int,
-    tenant_id: str = PUBLIC_TENANT,
-    created_by_user_id: str | None = None,
-    job_id: str | None = None,
-    list_index: int | None = None,
+    prov: Provenance,
 ) -> None:
     """
     Recursively write all fields of *instance* under the parent node identified by *parent_uid*.
@@ -450,15 +272,15 @@ async def _write_model_fields(
 
     Parameters
     ----------
-    session:
-        Open Neo4j session.
+    sink:
+        Open extraction sink.
     instance:
         Pydantic model instance to process.
     parent_uid:
-        Neo4j uid of the parent node.
+        uid of the parent node.
     parent_label:
-        Neo4j label of the parent node: ``"ExtractionResult"`` at the root,
-        ``"ModelInstance"`` below. Every MATCH on the parent uses it, so the
+        Label of the parent node: ``"ExtractionResult"`` at the root,
+        ``"ModelInstance"`` below. Every lookup of the parent uses it, so the
         lookup is a seek on the label's uid constraint instead of a scan of
         every node in the graph.
     field_path_prefix:
@@ -467,13 +289,12 @@ async def _write_model_fields(
         Accumulator: maps "field_path" → labeled_entity_uid for Level 2 resolution.
     depth:
         Current recursion depth (safety cap at 10).
-    list_index:
-        If this instance is an element of a list, its 0-based index.
+    prov:
+        Provenance stamped on every node written.
     """
-    # Interpolated into the Cypher: a closed set, never caller-controlled text.
     _check_parent_label(parent_label)
 
-    if depth > 10:
+    if depth > _MAX_DEPTH:
         log.warning("_write_model_fields: max depth reached, stopping recursion")
         return
 
@@ -499,58 +320,38 @@ async def _write_model_fields(
             if key_fields:
                 # ModelInstance con clave compuesta: UID determinístico (incluye
                 # tenant_id), MERGE — nunca se comparte entre tenants distintos.
-                child_uid = _make_instance_uid(type(value).__name__, key_fields, tenant_id)
-                key_props_set = ", ".join(f"child.`{k}` = ${k}" for k in key_fields)
-                prov_set = _provenance_set_clause("child")
-                await session.run(
-                    f"""
-                    MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                    MERGE (child:ModelInstance {{uid: $child_uid}})
-                    ON CREATE SET child.model_class = $model_class, {key_props_set}, {prov_set}
-                    ON MATCH  SET {key_props_set}, {prov_set}
-                    MERGE (parent)-[:`{rel_name}`]->(child)
-                    """,
-                    parent_uid=parent_uid,
-                    child_uid=child_uid,
-                    model_class=type(value).__name__,
-                    tenant_id=tenant_id,
-                    created_by_user_id=created_by_user_id,
-                    job_id=job_id,
-                    **key_fields,
+                child_uid = _make_instance_uid(type(value).__name__, key_fields, prov.tenant_id)
+                await sink.merge_keyed_instance(
+                    parent_label,
+                    parent_uid,
+                    rel_name,
+                    child_uid,
+                    type(value).__name__,
+                    key_fields,
+                    prov,
+                    None,
                 )
             else:
                 # ModelInstance sin clave: UID posicional, CREATE (comportamiento original)
                 child_uid = uuid.uuid4().hex[:16]
-                await session.run(
-                    f"""
-                    MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                    CREATE (child:ModelInstance {{
-                        uid:         $child_uid,
-                        model_class: $model_class,
-                        tenant_id:   $tenant_id,
-                        created_by_user_ids: CASE WHEN $created_by_user_id IS NULL THEN [] ELSE [$created_by_user_id] END,
-                        job_ids:             CASE WHEN $job_id IS NULL THEN [] ELSE [$job_id] END
-                    }})
-                    CREATE (parent)-[:`{rel_name}`]->(child)
-                    """,
-                    parent_uid=parent_uid,
-                    child_uid=child_uid,
-                    model_class=type(value).__name__,
-                    tenant_id=tenant_id,
-                    created_by_user_id=created_by_user_id,
-                    job_id=job_id,
+                await sink.create_instance(
+                    parent_label,
+                    parent_uid,
+                    rel_name,
+                    child_uid,
+                    type(value).__name__,
+                    prov,
+                    None,
                 )
             await _write_model_fields(
-                session=session,
+                sink=sink,
                 instance=value,
                 parent_uid=child_uid,
                 parent_label="ModelInstance",
                 field_path_prefix=field_path,
                 entity_nodes=entity_nodes,
                 depth=depth + 1,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
+                prov=prov,
             )
             continue
 
@@ -566,83 +367,45 @@ async def _write_model_fields(
                     key_fields = _get_instance_key_fields(item)
                     rel_name = f"HAS_{_to_rel_name(field_name)}"
                     if key_fields:
-                        child_uid = _make_instance_uid(type(item).__name__, key_fields, tenant_id)
-                        key_props_set = ", ".join(f"child.`{k}` = ${k}" for k in key_fields)
-                        prov_set = _provenance_set_clause("child")
-                        await session.run(
-                            f"""
-                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                            MERGE (child:ModelInstance {{uid: $child_uid}})
-                            ON CREATE SET child.model_class = $model_class, {key_props_set}, {prov_set}
-                            ON MATCH  SET {key_props_set}, {prov_set}
-                            MERGE (parent)-[:`{rel_name}` {{index: $idx}}]->(child)
-                            """,
-                            parent_uid=parent_uid,
-                            child_uid=child_uid,
-                            model_class=type(item).__name__,
-                            idx=i,
-                            tenant_id=tenant_id,
-                            created_by_user_id=created_by_user_id,
-                            job_id=job_id,
-                            **key_fields,
+                        child_uid = _make_instance_uid(
+                            type(item).__name__, key_fields, prov.tenant_id
+                        )
+                        await sink.merge_keyed_instance(
+                            parent_label,
+                            parent_uid,
+                            rel_name,
+                            child_uid,
+                            type(item).__name__,
+                            key_fields,
+                            prov,
+                            i,
                         )
                     else:
                         child_uid = uuid.uuid4().hex[:16]
-                        await session.run(
-                            f"""
-                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                            CREATE (child:ModelInstance {{
-                                uid:         $child_uid,
-                                model_class: $model_class,
-                                tenant_id:   $tenant_id,
-                                created_by_user_ids: CASE WHEN $created_by_user_id IS NULL THEN [] ELSE [$created_by_user_id] END,
-                                job_ids:             CASE WHEN $job_id IS NULL THEN [] ELSE [$job_id] END
-                            }})
-                            CREATE (parent)-[:`{rel_name}` {{index: $idx}}]->(child)
-                            """,
-                            parent_uid=parent_uid,
-                            child_uid=child_uid,
-                            model_class=type(item).__name__,
-                            idx=i,
-                            tenant_id=tenant_id,
-                            created_by_user_id=created_by_user_id,
-                            job_id=job_id,
+                        await sink.create_instance(
+                            parent_label,
+                            parent_uid,
+                            rel_name,
+                            child_uid,
+                            type(item).__name__,
+                            prov,
+                            i,
                         )
                     await _write_model_fields(
-                        session=session,
+                        sink=sink,
                         instance=item,
                         parent_uid=child_uid,
                         parent_label="ModelInstance",
                         field_path_prefix=item_path,
                         entity_nodes=entity_nodes,
                         depth=depth + 1,
-                        tenant_id=tenant_id,
-                        created_by_user_id=created_by_user_id,
-                        job_id=job_id,
-                        list_index=i,
+                        prov=prov,
                     )
                 else:
                     if isinstance(item, str) and entity_label:
                         # list[str] with entity_label
-                        le_uid = await _merge_labeled_entity(
-                            session,
-                            entity_label,
-                            str(item),
-                            tenant_id=tenant_id,
-                            created_by_user_id=created_by_user_id,
-                            job_id=job_id,
-                        )
-                        await session.run(
-                            f"""
-                            MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                            MATCH (le:LabeledEntity {{uid: $le_uid}})
-                            MERGE (parent)-[:REFERENCES {{field_name: $field_name, list_index: $idx}}]->(le)
-                            """,
-                            parent_uid=parent_uid,
-                            le_uid=le_uid,
-                            field_name=field_name,
-                            idx=i,
-                        )
+                        le_uid = await _merge_labeled_entity(sink, entity_label, str(item), prov)
+                        await sink.link_reference(parent_label, parent_uid, le_uid, field_name, i)
                         entity_nodes[item_path] = le_uid
                     if isinstance(item, dict):
                         log.warning(
@@ -660,24 +423,8 @@ async def _write_model_fields(
         # ── Case: scalar with entity_label ────────────────────────────────
         # Se guarda tanto como referencia y como propiedad si tiene label.
         if entity_label and isinstance(value, (str, int, float, bool)):
-            le_uid = await _merge_labeled_entity(
-                session,
-                entity_label,
-                str(value),
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            await session.run(
-                f"""
-                MATCH (parent:{parent_label} {{uid: $parent_uid}})
-                MATCH (le:LabeledEntity {{uid: $le_uid}})
-                MERGE (parent)-[:REFERENCES {{field_name: $field_name}}]->(le)
-                """,
-                parent_uid=parent_uid,
-                le_uid=le_uid,
-                field_name=field_name,
-            )
+            le_uid = await _merge_labeled_entity(sink, entity_label, str(value), prov)
+            await sink.link_reference(parent_label, parent_uid, le_uid, field_name, None)
             entity_nodes[field_path] = le_uid
 
         # ── Case: scalar -> accumulate as property ────
@@ -693,70 +440,37 @@ async def _write_model_fields(
 
     # ── Level 3: instance_relationships ──────────────────────────────────
     await _apply_instance_relationships(
-        session=session,
+        sink=sink,
         instance=instance,
         src_mi_uid=parent_uid,
         src_label=parent_label,
-        tenant_id=tenant_id,
-        created_by_user_id=created_by_user_id,
-        job_id=job_id,
+        prov=prov,
     )
 
     # Batch-SET all scalar properties on the parent node
     if scalar_props:
-        set_clause = ", ".join(f"parent.`{k}` = ${k}" for k in scalar_props)
-        await session.run(
-            f"MATCH (parent:{parent_label} {{uid: $parent_uid}}) SET {set_clause}",
-            parent_uid=parent_uid,
-            **scalar_props,
-        )
+        await sink.set_instance_properties(parent_label, parent_uid, scalar_props)
 
 
 async def _merge_labeled_entity(
-    session,
-    label: str,
-    value: str,
-    *,
-    tenant_id: str = PUBLIC_TENANT,
-    created_by_user_id: str | None = None,
-    job_id: str | None = None,
+    sink: ExtractionSink, label: str, value: str, prov: Provenance
 ) -> str:
     """
-    MERGE a :LabeledEntity node with the given label and value.
+    MERGE a :LabeledEntity node with the given label and value; returns its uid.
 
-    ``tenant_id`` is folded into the ``uid`` (see :func:`make_instance_uid` for
+    The tenant is folded into the ``uid`` (see :func:`make_instance_uid` for
     the rationale) so entities never merge across tenants; the node's
     ``(label, normalized_value)`` uniqueness is therefore only enforced
-    *within* a tenant. Returns the uid of the node.
+    *within* a tenant.
     """
     normalized = _normalize(value)
-    uid = _make_uid("le", tenant_id, label, normalized)
-    prov_set = _provenance_set_clause("le")
-    _le_params = dict(
-        label=label,
-        normalized_value=normalized,
-        uid=uid,
-        value=value,
-        tenant_id=tenant_id,
-        created_by_user_id=created_by_user_id,
-        job_id=job_id,
-    )
-    await with_neo4j_retry(
-        lambda: session.run(
-            f"""
-        MERGE (le:LabeledEntity {{uid: $uid}})
-        ON CREATE SET le.label = $label, le.normalized_value = $normalized_value,
-                      le.value = $value, {prov_set}
-        ON MATCH  SET {prov_set}
-        """,
-            **_le_params,
-        )
-    )
+    uid = _make_uid("le", prov.tenant_id, label, normalized)
+    await sink.merge_labeled_entity(uid, label, value, normalized, prov)
     return uid
 
 
 async def _apply_field_relationships(
-    session,
+    sink: ExtractionSink,
     instance: BaseModel,
     entity_nodes: dict[str, str],
     field_path_prefix: str,
@@ -792,15 +506,7 @@ async def _apply_field_relationships(
                         target_path = to_field
                     tgt_uid = entity_nodes.get(target_path)
                     if tgt_uid:
-                        await session.run(
-                            f"""
-                            MATCH (src:LabeledEntity {{uid: $src_uid}})
-                            MATCH (tgt:LabeledEntity {{uid: $tgt_uid}})
-                            MERGE (src)-[:`{rel_type}`]->(tgt)
-                            """,
-                            src_uid=src_uid,
-                            tgt_uid=tgt_uid,
-                        )
+                        await sink.link_field_relationship(src_uid, tgt_uid, rel_type)
                         log.debug(
                             "_apply_field_relationships: %s -[%s]-> %s",
                             field_path,
@@ -817,24 +523,22 @@ async def _apply_field_relationships(
 
         # Recurse into nested models
         if isinstance(value, BaseModel):
-            await _apply_field_relationships(session, value, entity_nodes, field_path)
+            await _apply_field_relationships(sink, value, entity_nodes, field_path)
         elif isinstance(value, list):
             for i, item in enumerate(value):
                 if isinstance(item, BaseModel):
                     await _apply_field_relationships(
-                        session, item, entity_nodes, f"{field_path}[{i}]"
+                        sink, item, entity_nodes, f"{field_path}[{i}]"
                     )
 
 
 async def _apply_instance_relationships(
-    session,
+    sink: ExtractionSink,
     instance: BaseModel,
     src_mi_uid: str,
     *,
     src_label: str = "ModelInstance",
-    tenant_id: str = PUBLIC_TENANT,
-    created_by_user_id: str | None = None,
-    job_id: str | None = None,
+    prov: Provenance,
 ) -> None:
     """
     Level 3 — Instance Key Relationships.
@@ -851,8 +555,8 @@ async def _apply_instance_relationships(
 
     Parameters
     ----------
-    session:
-        Open Neo4j session.
+    sink:
+        Open extraction sink.
     instance:
         Pydantic model instance whose fields are inspected for instance_relationships.
     src_mi_uid:
@@ -860,6 +564,8 @@ async def _apply_instance_relationships(
         instance — it becomes the source of the typed relationship.
     src_label:
         Label of that node (``"ModelInstance"`` or ``"ExtractionResult"``).
+    prov:
+        Provenance stamped on the target shells.
     """
     _check_parent_label(src_label)
     if not hasattr(instance, "model_fields"):
@@ -934,42 +640,12 @@ async def _apply_instance_relationships(
                     **fixed_key_fields,
                     fanout_remote_field: _normalize(str(item)),
                 }
-                tgt_uid = _make_instance_uid(target_model, tgt_key_fields, tenant_id)
+                tgt_uid = _make_instance_uid(target_model, tgt_key_fields, prov.tenant_id)
 
                 # MERGE del nodo target (shell con solo las keys si es nuevo)
-                key_set = ", ".join(f"tgt.`{k}` = ${k}" for k in tgt_key_fields)
-                prov_set = _provenance_set_clause("tgt")
-                merge_params: dict = {
-                    "tgt_uid": tgt_uid,
-                    "model_class": target_model,
-                    "tenant_id": tenant_id,
-                    "created_by_user_id": created_by_user_id,
-                    "job_id": job_id,
-                    **tgt_key_fields,
-                }
-                await with_neo4j_retry(
-                    lambda p=merge_params, ks=key_set, ps=prov_set: session.run(
-                        f"""
-                    MERGE (tgt:ModelInstance {{uid: $tgt_uid}})
-                    ON CREATE SET tgt.model_class = $model_class, {ks}, {ps}
-                    ON MATCH  SET {ks}, {ps}
-                    """,
-                        **p,
-                    )
-                )
-
+                await sink.merge_instance_shell(tgt_uid, target_model, tgt_key_fields, prov)
                 # MERGE de la relación (src)-[:REL_TYPE]->(tgt)
-                rel_params = {"src_uid": src_mi_uid, "tgt_uid": tgt_uid}
-                await with_neo4j_retry(
-                    lambda p=rel_params: session.run(
-                        f"""
-                    MATCH (src:{src_label} {{uid: $src_uid}})
-                    MATCH (tgt:ModelInstance {{uid: $tgt_uid}})
-                    MERGE (src)-[:`{rel_type}`]->(tgt)
-                    """,
-                        **p,
-                    )
-                )
+                await sink.link_instance_relationship(src_label, src_mi_uid, tgt_uid, rel_type)
                 log.debug(
                     "_apply_instance_relationships: %s -[%s]-> %s(%r)",
                     src_mi_uid[:8],
@@ -979,59 +655,137 @@ async def _apply_instance_relationships(
                 )
 
 
-# ---------------------------------------------------------------------------
-# Triple (fallback) writer
-# ---------------------------------------------------------------------------
-
-
-def _normalize_rel_type(predicate: str) -> str:
+async def write_extraction_subgraph(
+    node_full_id: str,
+    composite_instance: BaseModel,
+    primary_model_class: str,
+    complementary_model_classes: list[str],
+    document_name: str,
+    extraction_uid: str,
+) -> None:
     """
-    Normalize a free-text predicate to a valid Neo4j relationship type in UPPER_SNAKE_CASE.
+    Write the complete extraction subgraph for one StructureNode.
 
-    Steps:
-    1. Lowercase and strip leading/trailing whitespace.
-    2. Strip unicode accents (NFKD normalization).
-    3. Replace any character that is not alphanumeric or whitespace with a single underscore.
-    4. Replace all whitespace sequences with a single underscore.
-    5. Collapse consecutive underscores into one.
-    6. Strip leading and trailing underscores.
-    7. Uppercase the result.
-    8. If the result is empty after normalization, return "RELATED_TO" as a safe default.
+    Creates:
+      (:StructureNode)-[:HAS_EXTRACTION]->(:ExtractionResult)
+      + all entity nodes and relationships derived from the composite instance.
 
-    Examples:
-        "is manufactured by"      → "IS_MANUFACTURED_BY"
-        "contains active ingredient" → "CONTAINS_ACTIVE_INGREDIENT"
-        "has (primary) use"       → "HAS_PRIMARY_USE"
-        "α-helix forms"           → "HELIX_FORMS"   (accent stripped, leading _ removed)
+    Idempotent: uses MERGE for all entity nodes. ExtractionResult is re-created
+    fresh (existing one for this node is deleted first). One sink = one engine
+    session for the whole write.
+
+    Parameters
+    ----------
+    node_full_id:
+        The StructureNode.id composite key.
+    composite_instance:
+        Populated instance of the composite Pydantic schema.
+    primary_model_class:
+        Name of the primary CatalogModel.
+    complementary_model_classes:
+        Names of complementary CatalogModel classes.
+    document_name:
+        Document.name for provenance.
+    extraction_uid:
+        Deterministic UID for the ExtractionResult node.
+
+    Raises
+    ------
+    RuntimeError
+        If the StructureNode does not exist or has no tenant.
+    GraphError
+        If the engine fails.
     """
-    # Step 1: lowercase + strip
-    text = predicate.strip().lower()
-    # Step 2: strip accents
-    nfkd = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in nfkd if not unicodedata.combining(c))
-    # Step 3: non-alphanumeric, non-whitespace → underscore
-    text = re.sub(r"[^a-z0-9\s]", "_", text)
-    # Step 4: whitespace → underscore
-    text = re.sub(r"\s+", "_", text)
-    # Step 5: collapse consecutive underscores
-    text = re.sub(r"_+", "_", text)
-    # Step 6: strip edge underscores
-    text = text.strip("_")
-    # Step 7: uppercase
-    text = text.upper()
-    # Step 8: safe default
-    return text if text else "RELATED_TO"
+    timestamp = datetime.now(UTC).isoformat()
+    async with get_graph_store().extraction.sink() as sink:
+        # ── Guard: verify StructureNode exists, read its provenance ───────
+        # tenant_id / created_by_user_id / job_id are stamped on the
+        # StructureNode at Stage-2 ingestion time (see ingest/nodes.py) — read
+        # them back here rather than threading them through the whole
+        # extraction call stack. This is the single source of truth for "which
+        # tenant does this extraction belong to".
+        raw = await sink.read_node_provenance(node_full_id)
+        if raw is None:
+            raise RuntimeError(
+                f"write_extraction_subgraph: StructureNode not found: {node_full_id!r}"
+            )
+        prov = _provenance(raw, node_full_id)
+
+        # ── Idempotency: delete stale ExtractionResult subgraph ───────────
+        await sink.delete_stale_extraction_result(node_full_id)
+
+        # ── Create ExtractionResult node ──────────────────────────────────
+        await sink.create_extraction_result(
+            node_full_id, extraction_uid, document_name, primary_model_class, timestamp, prov
+        )
+
+        # ── Link primary CatalogModel ─────────────────────────────────────
+        await sink.link_catalog_model(extraction_uid, primary_model_class, primary=True)
+
+        # ── Link complementary CatalogModels that were actually extracted ─
+        # Only write USES_COMPLEMENTARY_MODEL for Optional[BaseModel] fields
+        # where the LLM actually returned a non-None value. Required (primary)
+        # fields are skipped because type(None) is not among their Union args.
+        for field_name, field_info in composite_instance.model_fields.items():
+            ann = field_info.annotation
+            args = typing.get_args(ann)
+            if type(None) not in args:
+                continue  # required field — not a complementary model slot
+            model_arg = next(
+                (
+                    a
+                    for a in args
+                    if a is not type(None) and isinstance(a, type) and hasattr(a, "model_fields")
+                ),
+                None,
+            )
+            if model_arg is None:
+                continue  # not a BaseModel field
+            value = getattr(composite_instance, field_name, None)
+            if value is None:
+                continue  # LLM returned None — do not write the relationship
+            # Actually extracted — write the relationship
+            await sink.link_catalog_model(extraction_uid, model_arg.__name__, primary=False)
+
+        # ── Collect all entity nodes for Level 2 relationship resolution ──
+        entity_nodes: dict[str, str] = {}  # field_path → labeled_entity_uid
+
+        # ── Write fields from the composite instance ──────────────────────
+        await _write_model_fields(
+            sink=sink,
+            instance=composite_instance,
+            parent_uid=extraction_uid,
+            parent_label="ExtractionResult",
+            field_path_prefix="",
+            entity_nodes=entity_nodes,
+            depth=0,
+            prov=prov,
+        )
+
+        # ── Level 2: resolve field_relationships ──────────────────────────
+        await _apply_field_relationships(
+            sink=sink,
+            instance=composite_instance,
+            entity_nodes=entity_nodes,
+            field_path_prefix="",
+        )
+
+    log.info(
+        "write_extraction_subgraph: wrote ExtractionResult %s for node %r (%d entity nodes)",
+        extraction_uid,
+        node_full_id,
+        len(entity_nodes),
+    )
 
 
 async def write_triple_subgraph(
-    driver: AsyncDriver,
     node_full_id: str,
     triple_instance: BaseModel,
     document_name: str,
     extraction_uid: str,
 ) -> None:
     """
-    Write the Triple extraction subgraph for one StructureNode to Neo4j.
+    Write the Triple extraction subgraph for one StructureNode.
 
     Used for nodes where ModelDecision.matched_model_class IS NULL (no specific
     domain model matched). Extracts all subject-predicate-object statements and
@@ -1050,8 +804,6 @@ async def write_triple_subgraph(
 
     Parameters
     ----------
-    driver:
-        Open Neo4j driver.
     node_full_id:
         The StructureNode.id composite key.
     triple_instance:
@@ -1061,65 +813,32 @@ async def write_triple_subgraph(
         Document.name for provenance.
     extraction_uid:
         Deterministic UID for the ExtractionResult node.
-    """
-    from datetime import datetime
 
+    Raises
+    ------
+    RuntimeError
+        If the StructureNode does not exist or has no tenant.
+    GraphError
+        If the engine fails.
+    """
     timestamp = datetime.now(UTC).isoformat()
 
     # Collect all TripleItem instances from the `triples` field
     triple_items = getattr(triple_instance, "triples", None) or []
-    cfg = get_config()
-    async with driver.session(database=cfg.neo4j_database) as session:
+    async with get_graph_store().extraction.sink() as sink:
         # ── Guard: verify StructureNode exists, read its provenance ───────
         # (see write_extraction_subgraph for why provenance is read back here)
-        result = await session.run(
-            "MATCH (n:StructureNode {id: $nid}) "
-            "RETURN count(n) AS cnt, n.tenant_id AS tenant_id, "
-            "n.created_by_user_id AS created_by_user_id, n.job_id AS job_id",
-            nid=node_full_id,
-        )
-        rec = await result.single()
-        cnt = rec["cnt"] if rec else 0
-        if cnt == 0:
+        raw = await sink.read_node_provenance(node_full_id)
+        if raw is None:
             raise RuntimeError(f"write_triple_subgraph: StructureNode not found: {node_full_id!r}")
-        tenant_id = _require_stored_tenant(rec["tenant_id"], node_full_id)
-        created_by_user_id = rec["created_by_user_id"]
-        job_id = rec["job_id"]
+        prov = _provenance(raw, node_full_id)
 
         # ── Idempotency: delete stale ExtractionResult ────────────────────
-        # DETACH DELETE removes HAS_EXTRACTION and HAS_ENTITY relationships
-        # but leaves :Entity nodes intact (they are deduplicated within a tenant).
-        await session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-            DETACH DELETE er
-            """,
-            nid=node_full_id,
-        )
+        await sink.delete_triple_extraction_result(node_full_id)
 
         # ── Create new ExtractionResult node ──────────────────────────────
-        await session.run(
-            """
-            MATCH (n:StructureNode {id: $nid})
-            CREATE (er:ExtractionResult {
-                uid:           $uid,
-                node_full_id:  $nid,
-                document_name: $doc_name,
-                model_class:   'Triple',
-                timestamp:     $timestamp,
-                tenant_id:            $tenant_id,
-                created_by_user_id:   $created_by_user_id,
-                job_id:               $job_id
-            })
-            CREATE (n)-[:HAS_EXTRACTION]->(er)
-            """,
-            nid=node_full_id,
-            uid=extraction_uid,
-            doc_name=document_name,
-            timestamp=timestamp,
-            tenant_id=tenant_id,
-            created_by_user_id=created_by_user_id,
-            job_id=job_id,
+        await sink.create_triple_extraction_result(
+            node_full_id, extraction_uid, document_name, timestamp, prov
         )
 
         # ── Process each TripleItem ────────────────────────────────────────
@@ -1142,85 +861,19 @@ async def write_triple_subgraph(
             # Normalize and build UIDs (tenant folded in — see make_instance_uid)
             subj_norm = _normalize(subject_val)
             obj_norm = _normalize(object_val)
-            subj_uid = _make_uid("entity", tenant_id, subj_norm)
-            obj_uid = _make_uid("entity", tenant_id, obj_norm)
+            subj_uid = _make_uid("entity", prov.tenant_id, subj_norm)
+            obj_uid = _make_uid("entity", prov.tenant_id, obj_norm)
             rel_type = _normalize_rel_type(predicate_val)
-            entity_prov_set = _provenance_set_clause("e")
 
-            # MERGE subject :Entity node
-            _subj_params = dict(
-                normalized_value=subj_norm,
-                uid=subj_uid,
-                value=subject_val,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            await with_neo4j_retry(
-                lambda: session.run(
-                    f"""
-                MERGE (e:Entity {{uid: $uid}})
-                ON CREATE SET e.normalized_value = $normalized_value,
-                              e.value = $value, {entity_prov_set}
-                ON MATCH  SET {entity_prov_set}
-                """,
-                    **_subj_params,
-                )
-            )
-
-            # MERGE object :Entity node
-            _obj_params = dict(
-                normalized_value=obj_norm,
-                uid=obj_uid,
-                value=object_val,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                job_id=job_id,
-            )
-            await with_neo4j_retry(
-                lambda: session.run(
-                    f"""
-                MERGE (e:Entity {{uid: $uid}})
-                ON CREATE SET e.normalized_value = $normalized_value,
-                              e.value = $value, {entity_prov_set}
-                ON MATCH  SET {entity_prov_set}
-                """,
-                    **_obj_params,
-                )
-            )
+            await sink.merge_entity(subj_uid, subject_val, subj_norm, prov)
+            await sink.merge_entity(obj_uid, object_val, obj_norm, prov)
 
             # Link subject and object to ExtractionResult via HAS_ENTITY
-            await session.run(
-                """
-                MATCH (er:ExtractionResult {uid: $er_uid})
-                MATCH (subj:Entity {uid: $subj_uid})
-                MERGE (er)-[:HAS_ENTITY {role: 'subject'}]->(subj)
-                """,
-                er_uid=extraction_uid,
-                subj_uid=subj_uid,
-            )
-            await session.run(
-                """
-                MATCH (er:ExtractionResult {uid: $er_uid})
-                MATCH (obj:Entity {uid: $obj_uid})
-                MERGE (er)-[:HAS_ENTITY {role: 'object'}]->(obj)
-                """,
-                er_uid=extraction_uid,
-                obj_uid=obj_uid,
-            )
+            await sink.link_triple_entity(extraction_uid, subj_uid, "subject")
+            await sink.link_triple_entity(extraction_uid, obj_uid, "object")
 
             # MERGE the predicate relationship between subject and object entities
-            await session.run(
-                f"""
-                MATCH (subj:Entity {{uid: $subj_uid}})
-                MATCH (obj:Entity {{uid: $obj_uid}})
-                MERGE (subj)-[r:`{rel_type}`]->(obj)
-                ON CREATE SET r.predicate_raw = $predicate_raw
-                """,
-                subj_uid=subj_uid,
-                obj_uid=obj_uid,
-                predicate_raw=predicate_val,
-            )
+            await sink.merge_predicate(subj_uid, obj_uid, rel_type, predicate_val)
 
     log.info(
         "write_triple_subgraph: wrote ExtractionResult %s for node %r (%d triples)",

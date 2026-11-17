@@ -1,6 +1,6 @@
 """
 tests/unit/test_neo4j_retry_sync.py — Unit tests for
-scinr.newton.utils.neo4j_retry.with_neo4j_retry_sync()
+scinr.newton.graph.neo4j.retry.with_neo4j_retry_sync()
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from neo4j.exceptions import ClientError, Neo4jError, ServiceUnavailable, SessionExpired
 
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
+from scinr.newton.graph.neo4j.retry import with_neo4j_retry_sync
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,7 +44,7 @@ def test_retries_transient_error_then_succeeds():
     """A transient ServiceUnavailable error should be retried until success."""
     flaky = _FlakyCallable(fail_times=3)
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep") as mock_sleep:
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep") as mock_sleep:
         result = with_neo4j_retry_sync(flaky)
 
     assert result == "ok"
@@ -56,7 +56,7 @@ def test_exhausts_all_retries_then_raises():
     """If every attempt fails with a transient error, the last exception is re-raised."""
     flaky = _FlakyCallable(fail_times=999)  # always fails
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep"):
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep"):
         with pytest.raises(ServiceUnavailable):
             with_neo4j_retry_sync(flaky, exp_retries=2, plateau_retries=1)
 
@@ -68,7 +68,7 @@ def test_non_transient_error_raised_immediately_without_retry():
     """A non-transient exception (e.g. ValueError) must propagate immediately, no retries."""
     flaky = _FlakyCallable(fail_times=999, exc_factory=lambda: ValueError("boom"))
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep") as mock_sleep:
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep") as mock_sleep:
         with pytest.raises(ValueError, match="boom"):
             with_neo4j_retry_sync(flaky)
 
@@ -80,7 +80,7 @@ def test_returns_value_on_first_try_without_sleeping():
     """A callable that succeeds immediately should never sleep."""
     flaky = _FlakyCallable(fail_times=0)
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep") as mock_sleep:
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep") as mock_sleep:
         result = with_neo4j_retry_sync(flaky)
 
     assert result == "ok"
@@ -113,7 +113,7 @@ def _server_error(code: str) -> Neo4jError:
 def test_cluster_and_memory_errors_are_retried(exc_factory):
     flaky = _FlakyCallable(fail_times=2, exc_factory=exc_factory)
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep") as mock_sleep:
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep") as mock_sleep:
         result = with_neo4j_retry_sync(flaky)
 
     assert result == "ok"
@@ -128,7 +128,7 @@ def test_cluster_and_memory_errors_are_retried(exc_factory):
 def test_client_errors_are_not_retried(code):
     flaky = _FlakyCallable(fail_times=999, exc_factory=lambda: _server_error(code))
 
-    with patch("scinr.newton.utils.neo4j_retry.time.sleep") as mock_sleep:
+    with patch("scinr.newton.graph.neo4j.retry.time.sleep") as mock_sleep:
         with pytest.raises(ClientError):
             with_neo4j_retry_sync(flaky)
 

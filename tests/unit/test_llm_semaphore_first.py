@@ -45,7 +45,7 @@ def annotation_env(monkeypatch):
     counter = _Counter()
     written: list[str] = []
 
-    async def fake_fetch_context(node_data, driver):
+    async def fake_fetch_context(node_data):
         counter.enter()  # context now exists
         await asyncio.sleep(0)
         return {"node": node_data["node_id"]}
@@ -55,11 +55,10 @@ def annotation_env(monkeypatch):
         counter.leave()  # prompt/LLM call finished, context released
         return object(), None
 
-    async def fake_write_decision(driver, full_id, decision, document_name, node_id):
+    async def fake_write_decision(full_id, decision, document_name, node_id):
         written.append(node_id)
         return None
 
-    monkeypatch.setattr(ann_nodes, "get_async_driver", lambda: object())
     monkeypatch.setattr(ann_nodes, "get_neo4j_semaphore", lambda: asyncio.Semaphore(10))
     monkeypatch.setattr(ann_nodes, "_fetch_node_context", fake_fetch_context)
     monkeypatch.setattr(ann_nodes, "_decide_model", fake_decide_model)
@@ -97,7 +96,7 @@ class TestAnnotationSemaphoreFirst:
     ):
         counter, _ = annotation_env
 
-        async def fetch_none_for_first(node_data, driver):
+        async def fetch_none_for_first(node_data):
             if node_data["node_id"] == "n0":
                 return None
             counter.enter()
@@ -125,7 +124,7 @@ class TestAnnotationSemaphoreFirst:
         sem = asyncio.Semaphore(1)
         held_during_write: list[bool] = []
 
-        async def write(driver, full_id, decision, document_name, node_id):
+        async def write(full_id, decision, document_name, node_id):
             held_during_write.append(sem.locked())
             return None
 
@@ -136,7 +135,7 @@ class TestAnnotationSemaphoreFirst:
         assert held_during_write == [False]
 
     async def test_write_error_is_reported(self, annotation_env, monkeypatch):
-        async def write(driver, full_id, decision, document_name, node_id):
+        async def write(full_id, decision, document_name, node_id):
             return "write failed for n0: boom"
 
         monkeypatch.setattr(ann_nodes, "_write_decision", write)
@@ -165,14 +164,13 @@ def entity_env(monkeypatch):
         counter.leave()  # LLM call finished, schema/prompt released
         return {"entities": []}, None
 
-    async def fake_write_entities(driver, target, extraction, document_name):
+    async def fake_write_entities(target, extraction, document_name):
         return None
 
-    async def fake_mark_extracted(driver, node_full_id):
+    async def fake_mark_extracted(node_full_id):
         marked.append(node_full_id)
         return None
 
-    monkeypatch.setattr(ent_nodes, "get_async_driver", lambda: object())
     monkeypatch.setattr(ent_nodes, "get_neo4j_semaphore", lambda: asyncio.Semaphore(10))
     monkeypatch.setattr(ent_nodes, "_compose_schema", fake_compose_schema)
     monkeypatch.setattr(ent_nodes, "_extract_entities", fake_extract_entities)
@@ -232,11 +230,11 @@ class TestEntityExtractionSemaphoreFirst:
         sem = asyncio.Semaphore(1)
         held: list[bool] = []
 
-        async def write(driver, target, extraction, document_name):
+        async def write(target, extraction, document_name):
             held.append(sem.locked())
             return None
 
-        async def mark(driver, node_full_id):
+        async def mark(node_full_id):
             held.append(sem.locked())
             return None
 

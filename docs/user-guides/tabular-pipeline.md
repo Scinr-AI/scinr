@@ -602,7 +602,7 @@ The `NormalizationEngine` caches results by a hash of the source values. If two 
 
 ### 9.1 Graph Structure
 
-The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subgraph`) as the unstructured pipeline, so the node and relationship types match the [Neo4j Graph Model](neo4j-graph.md). One sheet becomes a `:StructureNode:Table`; each data row becomes a `:StructureNode:Row`:
+The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subgraph` in `entity_extraction/graph_mapper.py`) as the unstructured pipeline, so the node and relationship types match the [Neo4j Graph Model](neo4j-graph.md). One sheet becomes a `:StructureNode:Table`; each data row becomes a `:StructureNode:Row`:
 
 ```
 (:Document)

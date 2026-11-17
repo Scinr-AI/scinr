@@ -694,7 +694,11 @@ structure node, it is reported in `not_found_page_ids`). See
 | `GraphConnectionError` | the engine is unreachable (`get_graph_navigator` / `ping`) |
 | `UnsupportedOperationError` | an optional capability (`execute_raw`) is not implemented by the backend |
 
-All three inherit from `ScinrError`.
+`UnsupportedOperationError` is a `NavigationError`. `GraphConnectionError` is a
+`GraphError` (the same class the write path raises when the engine is down), **not**
+a `NavigationError`. To handle both, catch `(NavigationError, GraphConnectionError)`.
+Everything inherits from `ScinrError`. See the [Exceptions](../api/exceptions.md)
+reference.
 
 ---
 

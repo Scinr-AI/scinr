@@ -203,9 +203,9 @@ result = await delete_document("ModuloA/SubModulo/doc_a", tenant_id="acme")
 
 Behavior:
 
-1. Opens and closes its own Neo4j driver internally (via `get_driver()`) — no driver management required by the caller.
+1. Opens and closes its own graph connection internally (a `store.sync_scope()` of `get_graph_store()`) — no driver management required by the caller.
 2. Read-only check: finds every `:Document` of the tenant matching the selector (`path` or `job_id`) and the optional filters (all versions when `version=None`). If none match, returns immediately with `found=False` and all counters at 0 — no storage cleanup, delete, or garbage-collection queries are executed.
-3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the Neo4j driver is still closed via the `finally` block).
+3. **Storage cleanup (runs before any Neo4j deletion):** collects the `raw_file_id` property of every matched `:Document` and every descendant reached via `IS_COMPOSED_OF*` (skipping empty `raw_file_id` values, e.g. folders or documents ingested with `storage_backend="none"`), then deletes the corresponding records from the configured documental storage backend (see [Storage Layer](#storage-layer) below) — the converted Markdown pages first, then the raw binary + its metadata, for each `raw_file_id`. This step is **fail-fast**: if deleting storage for any `raw_file_id` raises an unexpected exception, it propagates immediately and neither the cascade delete nor the GC passes run (the store's sync scope still closes its connection).
 4. Cascade delete (bounded transactions — documents 50 at a time, each delete committing every 1,000 nodes — so a large folder does not overrun Neo4j's transaction memory): marks the `:Document` node(s) `deletion_pending`, then deletes every `:StructureNode` descendant (`HAS_STRUCTURE`/`HAS_CHILD`) of the matched `:Document` node(s) and of their `IS_COMPOSED_OF*` descendants, together with its `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, `:ComplementaryMatch`, `:SupplementaryField` and `:ExtractionResult` children. The `:Document` nodes go last, after step 5. Not atomic: if it fails half-way, calling `delete_document()` again with the same selector deletes what is left.
 5. Garbage collection of the orphans the deletion caused, scoped to the tenant:
    - an `:Entity`/`:ModelInstance` is an orphan when no `:ExtractionResult` reaches it within 7 hops; a `:LabeledEntity`, when it has no incoming relationship at all;
@@ -226,7 +226,7 @@ Behavior:
 
 **Modules:** `scinr.newton.ingest.freeze`, `scinr.newton.ingest.restore`
 
-Freezing archives the subgraph of a document to a **snapshot** in the freeze backend and reduces the document in Neo4j to a **stub**. Unlike deletion, it is reversible, and restoring calls no LLM. The three functions are `async`, open and close their own Neo4j driver, and take the selector of `delete_document()`: a mandatory keyword-only `tenant_id`, exactly one of `path` (optionally `version`) or `job_id`, an optional `created_by_user_id`, and the downward `IS_COMPOSED_OF*` cascade. The full guide is `docs/user-guides/document-freezing.md`.
+Freezing archives the subgraph of a document to a **snapshot** in the freeze backend and reduces the document in Neo4j to a **stub**. Unlike deletion, it is reversible, and restoring calls no LLM. The three functions are `async`, open and close their own graph connection, and take the selector of `delete_document()`: a mandatory keyword-only `tenant_id`, exactly one of `path` (optionally `version`) or `job_id`, an optional `created_by_user_id`, and the downward `IS_COMPOSED_OF*` cascade. The full guide is `docs/user-guides/document-freezing.md`.
 
 ```python
 from scinr.newton import freeze_document, restore_document, export_document_snapshot
@@ -406,14 +406,24 @@ All exceptions inherit from `ScinrError`, so the entire family can be caught wit
 
 ```
 ScinrError (base)
-├── ConfigurationError   — library misconfigured (LLM missing, bad credentials, invalid storage backend)
+├── ConfigurationError   — library misconfigured (LLM missing, invalid storage backend)
+│   └── GraphConfigurationError — graph backend not configured (Neo4j credentials missing)
 ├── PreconditionError    — pipeline called out of order (e.g. entity extraction before annotation)
 ├── ExtractionError      — LLM extraction failed after all retries exhausted
-├── IngestionError       — Neo4j write failed (version conflict, schema constraint violation)
+├── IngestionError       — ingesting a document failed (e.g. unverifiable raw_file_id); graph-engine failures are GraphError
 ├── ModelError           — Pydantic model cannot be resolved or is invalid (bad catalog.py)
 ├── StorageError         — MongoDB unavailable or misconfigured
 ├── FreezeError          — a document cannot be frozen, restored or snapshotted (already frozen, nothing to restore, snapshot missing or of another tenant)
-└── ConversionError      — file converter failed to process a source file
+├── ConversionError      — file converter failed to process a source file
+├── NavigationError      — invalid graph-navigation input (UnsupportedOperationError, ScopeError)
+└── GraphError           — anything that comes from the graph engine
+    ├── GraphConnectionError     — engine unreachable
+    │   └── GraphAuthenticationError — credentials rejected
+    ├── TransientGraphError      — transient error, retries exhausted
+    ├── GraphResourceError       — engine out of resources (reduce batch size)
+    ├── GraphConstraintError     — a write violated a constraint
+    │   └── DocumentVersionConflict — document version already ingested
+    └── GraphQueryError          — query rejected by the engine
 ```
 
 ---
@@ -487,7 +497,7 @@ result, docs = asyncio.run(run_extraction(input_folder="data/json/", output_fold
 
 **Directory:** `src/scinr/newton/ingest/`  
 **Input:** `data/output/extract-{filename}.json`  
-**Target:** Neo4j database
+**Target:** Neo4j database (through `get_graph_store()`; the Cypher lives in `src/scinr/newton/graph/neo4j/`)
 
 Reads the extracted `Document` JSON and writes it to Neo4j using **`MERGE` statements throughout** — every write is idempotent, so re-running the stage on the same document is always safe. All writes for a single document are wrapped in one transaction.
 

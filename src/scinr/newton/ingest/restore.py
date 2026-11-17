@@ -44,41 +44,30 @@ import json
 import logging
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Hashable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO
 
 import ijson
 
-from scinr.newton.annotation.neo4j_ops import delete_stale_model_decision
 from scinr.newton.config import get_config
-from scinr.newton.entity_extraction.graph_mapper import delete_stale_extraction_result
 from scinr.newton.exceptions import FreezeError
-from scinr.newton.ingest._cascade import DELETE_BATCH_ROWS, DOCUMENTS_PER_QUERY, run_count_query
-from scinr.newton.ingest._gc import sweep_tenant
-from scinr.newton.ingest.config import get_async_driver, get_driver
+from scinr.newton.graph import get_graph_store
+from scinr.newton.graph.base import RestoreWriter
+from scinr.newton.graph.types import DocumentInfo, RestoreCounters
 from scinr.newton.ingest.freeze import (
-    _DOCS_BY_KEY,
     SNAPSHOT_SCHEMA_VERSION,
-    DocumentInfo,
-    cypher_identifier,
     fetch_document_set,
     is_catalog,
     node_identity,
     selector_filters,
     selector_repr,
+    validate_identifier,
 )
-from scinr.newton.ingest.schema import ensure_indexes
 from scinr.newton.results import RestoreResult
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 
 logger = logging.getLogger(__name__)
-
-# Nodes merged across documents of a tenant (business-key uid): on match they
-# only gain the snapshot's provenance.
-_MERGED_LABELS = frozenset({"ModelInstance", "Entity", "LabeledEntity"})
 
 DEFAULT_BATCH_SIZE = 1000
 """Rows per write transaction of the rebuild."""
@@ -217,7 +206,7 @@ def _check_endpoint(endpoint: Any, tenant: str) -> tuple[str, dict[str, Any]]:
     labels = endpoint.get("labels") or []
     primary, key_fields = node_identity(labels)
     for label in labels:
-        cypher_identifier(label)
+        validate_identifier(label)
     key = endpoint["key"]
     if any(key.get(f) is None for f in key_fields):
         raise FreezeError(f"Relationship endpoint without its {key_fields!r} key: {endpoint!r}")
@@ -236,7 +225,7 @@ def _check_relationship(
     between two Documents (folder / version links) one side must be it.
     Returns the (primary label, key) of both endpoints."""
     rel_type = value.get("type")
-    cypher_identifier(rel_type)
+    validate_identifier(rel_type)
     endpoints = [_check_endpoint(value.get(side), tenant) for side in ("from", "to")]
     documents = [
         (key["tenant_id"], key["path"], key["version"])
@@ -294,7 +283,7 @@ def scan_snapshot(
                 if is_catalog(primary) or primary == "Document":
                     raise FreezeError(f"Unexpected {primary} node in snapshot: {value!r}")
                 for label in labels:
-                    cypher_identifier(label)
+                    validate_identifier(label)
                 props = value.get("properties") or {}
                 if props.get("tenant_id") != tenant:
                     raise FreezeError(
@@ -325,7 +314,7 @@ def scan_snapshot(
 
 
 def _selector_matches(props: dict[str, Any], filters: dict[str, Any]) -> bool:
-    """The restore selector (``_build_doc_match`` filters) applied to one
+    """The restore selector (``DocumentSelector`` filters) applied to one
     Document's properties, as stored in a snapshot."""
     if filters["path"] is not None and props.get("path") != filters["path"]:
         return False
@@ -353,145 +342,16 @@ def _with_descendants(
 
 
 # ---------------------------------------------------------------------------
-# Pass 2 — rebuild (async driver, batches)
+# Pass 2 — rebuild (async writer, batches)
 # ---------------------------------------------------------------------------
-
-
-def _key_map(source: str, key_fields: Sequence[str]) -> str:
-    # key_fields come from node_identity() — fixed names, never snapshot data.
-    return ", ".join(f"{name}: {source}.{name}" for name in key_fields)
-
-
-def _union(field_name: str) -> str:
-    return (
-        f"n.{field_name} = reduce(acc = coalesce(n.{field_name}, []), "
-        f"x IN coalesce(row.props.{field_name}, []) | "
-        "CASE WHEN x IN acc THEN acc ELSE acc + x END)"
-    )
-
-
-@lru_cache(maxsize=256)
-def _node_merge_query(labels: tuple[str, ...]) -> str:
-    """``MERGE`` a batch of nodes sharing *labels*; props only on create."""
-    primary, key_fields = node_identity(labels)
-    extra_labels = "".join(
-        f", n:{cypher_identifier(label)}" for label in labels if label != primary
-    )
-    query = (
-        "UNWIND $rows AS row\n"
-        f"MERGE (n:{cypher_identifier(primary)} {{{_key_map('row.key', key_fields)}}})\n"
-        f"ON CREATE SET n += row.props{extra_labels}\n"
-    )
-    if primary in _MERGED_LABELS:
-        query += f"ON MATCH SET {_union('created_by_user_ids')}, {_union('job_ids')}\n"
-    return query
-
-
-@lru_cache(maxsize=1024)
-def _relationship_query(rel_type: str, from_label: str, to_label: str) -> str:
-    """Create a batch of relationships unless an identical one exists.
-
-    Catalog targets are ``MERGE``d by their key (like the pipeline does).
-    """
-    _, from_fields = node_identity([from_label])
-    _, to_fields = node_identity([to_label])
-    rel = cypher_identifier(rel_type)
-    target = "MERGE" if is_catalog(to_label) else "MATCH"
-    return (
-        "UNWIND $rows AS row\n"
-        f"MATCH (a:{cypher_identifier(from_label)} {{{_key_map('row.from', from_fields)}}})\n"
-        f"{target} (b:{cypher_identifier(to_label)} {{{_key_map('row.to', to_fields)}}})\n"
-        "WITH a, b, row\n"
-        f"WHERE NOT EXISTS {{ MATCH (a)-[x:{rel}]->(b) WHERE properties(x) = row.props }}\n"
-        f"CREATE (a)-[r:{rel}]->(b)\n"
-        "SET r = row.props\n"
-    )
-
-
-async def _run_batch(tx, query: str, rows: list[dict[str, Any]]):
-    result = await tx.run(query, rows=rows)
-    summary = await result.consume()
-    return summary.counters
-
-
-async def _delete_stale(tx, node_ids: list[str], model_decisions: bool, extraction_results: bool):
-    if extraction_results:
-        await delete_stale_extraction_result(tx, node_ids)
-    if model_decisions:
-        await delete_stale_model_decision(tx, node_ids)
 
 
 def _sort_key(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
-class _BatchWriter:
-    """Runs write transactions with at most *concurrency* in flight.
-
-    Each batch runs in its own session (an async session is not safe for
-    concurrent use; sessions borrow pooled connections). Batches of the same
-    *lane* run one after the other, lanes in parallel. The producer waits for
-    a free slot **before** handing over a batch, so a fast reader never piles
-    up more than *concurrency* batches in memory.
-    """
-
-    def __init__(self, driver, database: str, concurrency: int) -> None:
-        self._driver = driver
-        self._database = database
-        self._slots = asyncio.Semaphore(concurrency)
-        self._lanes: dict[Hashable, asyncio.Lock] = {}
-        self._tasks: set[asyncio.Task] = set()
-        self._error: BaseException | None = None
-
-    async def _run(
-        self,
-        lane: Hashable,
-        work: Callable[..., Awaitable[Any]],
-        args: tuple,
-        on_done: Callable[[Any], None],
-    ) -> None:
-        try:
-            async with self._lanes.setdefault(lane, asyncio.Lock()):
-                async with self._driver.session(database=self._database) as session:
-                    on_done(await session.execute_write(work, *args))
-        except Exception as exc:
-            # Kept for drain() to raise: the task itself never fails, so a
-            # finished task nobody awaits leaves no "exception never retrieved".
-            if self._error is None:
-                self._error = exc
-        finally:
-            self._slots.release()
-
-    async def submit(
-        self,
-        lane: Hashable,
-        work: Callable[..., Awaitable[Any]],
-        *args,
-        on_done: Callable[[Any], None] = lambda _: None,
-    ) -> None:
-        if self._error is not None:
-            await self.drain()
-        await self._slots.acquire()
-        task = asyncio.create_task(self._run(lane, work, args, on_done))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def drain(self) -> None:
-        """Wait for every batch in flight; re-raise the first failure."""
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self._error is not None:
-            raise self._error
-
-    async def abort(self) -> None:
-        for task in self._tasks:
-            task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
-
 class _Rebuilder:
-    """Groups snapshot elements into batches and hands them to a _BatchWriter.
+    """Groups snapshot elements into batches and hands them to a RestoreWriter.
 
     Node batches are grouped by label set (one lane each: a label set is
     written by one transaction at a time, so labels without a uniqueness
@@ -504,7 +364,7 @@ class _Rebuilder:
     batch so concurrent transactions take their locks in the same order.
     """
 
-    def __init__(self, writer: _BatchWriter, batch_size: int) -> None:
+    def __init__(self, writer: RestoreWriter, batch_size: int) -> None:
         self.writer = writer
         self.batch_size = batch_size
         self.nodes: dict[tuple[str, ...], list[dict[str, Any]]] = {}
@@ -514,14 +374,14 @@ class _Rebuilder:
         self.relationships_created = 0
         self._nodes_in_flight = False
 
-    def _count_nodes(self, rows: int) -> Callable[[Any], None]:
-        def _done(counters) -> None:
+    def _count_nodes(self, rows: int) -> Callable[[RestoreCounters], None]:
+        def _done(counters: RestoreCounters) -> None:
             self.nodes_created += counters.nodes_created
             self.nodes_reused += rows - counters.nodes_created
 
         return _done
 
-    def _count_relationships(self, counters) -> None:
+    def _count_relationships(self, counters: RestoreCounters) -> None:
         self.relationships_created += counters.relationships_created
 
     async def _flush_node_group(self, labels: tuple[str, ...]) -> None:
@@ -529,12 +389,8 @@ class _Rebuilder:
         if rows:
             rows.sort(key=lambda row: _sort_key(row["key"]))
             self._nodes_in_flight = True
-            await self.writer.submit(
-                ("nodes", labels),
-                _run_batch,
-                _node_merge_query(labels),
-                rows,
-                on_done=self._count_nodes(len(rows)),
+            await self.writer.merge_nodes(
+                ("nodes", labels), labels, rows, self._count_nodes(len(rows))
             )
 
     async def _flush_relationship_group(self, group: tuple[str, str, str]) -> None:
@@ -542,12 +398,8 @@ class _Rebuilder:
         if rows:
             rows.sort(key=lambda row: (_sort_key(row["from"]), _sort_key(row["to"])))
             lane = ("catalog",) if is_catalog(group[2]) else ("relationships", group)
-            await self.writer.submit(
-                lane,
-                _run_batch,
-                _relationship_query(*group),
-                rows,
-                on_done=self._count_relationships,
+            await self.writer.create_relationships(
+                lane, group, rows, self._count_relationships
             )
 
     async def _finish_nodes(self) -> None:
@@ -593,7 +445,7 @@ class _Rebuilder:
 
 
 async def _delete_stale_subtrees(
-    writer: _BatchWriter, plans: dict[int, _EntryPlan], batch_size: int
+    writer: RestoreWriter, plans: dict[int, _EntryPlan], batch_size: int
 ) -> None:
     """Stale ModelDecision / ExtractionResult subtrees on kept StructureNodes,
     removed before any snapshot node is merged (a merge could otherwise reuse
@@ -602,12 +454,11 @@ async def _delete_stale_subtrees(
     for plan in plans.values():
         ids = plan.structure_node_ids
         for start in range(0, len(ids), batch_size):
-            await writer.submit(
+            await writer.delete_stale(
                 ("stale",),
-                _delete_stale,
                 ids[start : start + batch_size],
-                plan.delete_stale_model_decisions,
-                plan.delete_stale_extraction_results,
+                model_decisions=plan.delete_stale_model_decisions,
+                extraction_results=plan.delete_stale_extraction_results,
             )
     await writer.drain()
 
@@ -615,13 +466,12 @@ async def _delete_stale_subtrees(
 async def _rebuild_snapshot(
     path: Path,
     plans: dict[int, _EntryPlan],
-    database: str,
     *,
     batch_size: int,
     concurrency: int,
 ) -> dict[str, int]:
     """Second pass: write the planned entries of the snapshot at *path*."""
-    writer = _BatchWriter(get_async_driver(), database, concurrency)
+    writer = get_graph_store().restore.batch_writer(concurrency)
     rebuilder = _Rebuilder(writer, batch_size)
     try:
         started = time.perf_counter()
@@ -680,151 +530,12 @@ def _document_node(props: dict[str, Any]) -> dict[str, Any]:
 # Finishing — temporary links, stubs, snapshot references
 # ---------------------------------------------------------------------------
 
-# A Document never has outgoing HAS_MODEL_DECISION / HAS_EXTRACTION outside
-# a freeze, so any such link on a restored stub is a temporary one. There is
-# one per kept ModelDecision / ExtractionResult, so they go in batches (an
-# auto-commit query, like the deletes of ingest/_cascade.py); grouping by the
-# link makes the query read them all before the first batch commits.
-_TEMPORARY_LINKS_DELETE_QUERY = (
-    _DOCS_BY_KEY
-    + f"""MATCH (d)-[link:HAS_MODEL_DECISION|HAS_EXTRACTION]->()
-WITH link, count(*) AS hits
-CALL (link) {{
-  DELETE link
-}} IN TRANSACTIONS OF {DELETE_BATCH_ROWS} ROWS
-RETURN count(*) AS n
-"""
-)
-
-_RESTORE_FINISH_QUERY = (
-    _DOCS_BY_KEY
-    + """SET d.frozen = false
-REMOVE d.frozen_blob_id, d.frozen_at, d.frozen_keep_structure_nodes,
-       d.frozen_keep_annotations, d.frozen_keep_extraction_results,
-       d.frozen_cleanup_pending
-RETURN count(d) AS n
-"""
-)
-
-# ``latest`` is the newest version of a path: a recreated Document may be an
-# older version than one ingested since, or the newest one again.
-_RECOMPUTE_LATEST_QUERY = """
-UNWIND $paths AS p
-MATCH (d:Document {tenant_id: $tenant_id, path: p})
-WITH p, collect(d) AS versions, max(d.version) AS newest
-UNWIND versions AS d
-SET d.latest = (d.version = newest)
-"""
-
-_EXISTING_DOCUMENTS_QUERY = _DOCS_BY_KEY + "RETURN properties(d) AS properties\n"
-
-_STUBS_OF_BLOB_QUERY = """
-MATCH (d:Document {tenant_id: $tenant_id})
-WHERE d.frozen = true AND d.frozen_blob_id = $blob_id
-RETURN properties(d) AS properties
-"""
-
-_BLOB_REFERENCES_QUERY = """
-MATCH (d:Document {tenant_id: $tenant_id})
-WHERE d.frozen_blob_id = $blob_id
-RETURN count(d) AS n
-"""
-
-
-def _finish_restore(
-    driver, database: str, tenant: str, docs: Sequence[DocumentInfo], recreated_paths: list[str]
-) -> None:
-    """Remove the temporary links and unmark the stubs, ``DOCUMENTS_PER_QUERY``
-    documents at a time, then recompute ``latest`` for the recreated paths.
-
-    Not one transaction: a freeze that kept annotations or extraction results
-    leaves one link per kept node, and deleting those of hundreds of
-    documents at once is what a transaction memory pool cannot hold. A
-    document is unmarked only once its links are gone; if this stops
-    half-way the remaining documents are still frozen stubs, so calling
-    ``restore_document()`` again finishes them.
-    """
-    keys = [doc.key for doc in docs]
-    for start in range(0, len(keys), DOCUMENTS_PER_QUERY):
-        chunk = keys[start : start + DOCUMENTS_PER_QUERY]
-        run_count_query(
-            driver, database, _TEMPORARY_LINKS_DELETE_QUERY, tenant_id=tenant, keys=chunk
-        )
-
-        def _do_unmark(chunk: list[dict[str, Any]] = chunk) -> None:
-            with driver.session(database=database) as session:
-                session.execute_write(
-                    lambda tx: tx.run(_RESTORE_FINISH_QUERY, tenant_id=tenant, keys=chunk).consume()
-                )
-
-        with_neo4j_retry_sync(_do_unmark)
-
-    if recreated_paths:
-
-        def _do_latest() -> None:
-            with driver.session(database=database) as session:
-                session.execute_write(
-                    lambda tx: tx.run(
-                        _RECOMPUTE_LATEST_QUERY, tenant_id=tenant, paths=recreated_paths
-                    ).consume()
-                )
-
-        with_neo4j_retry_sync(_do_latest)
-
-
 _NO_GC = {
     "gc_entity_model_instance_deleted": 0,
     "gc_entity_model_instance_passes": 0,
     "gc_labeled_entity_deleted": 0,
     "gc_labeled_entity_passes": 0,
 }
-
-_STALE_EXTRACTION_RESULTS_QUERY = """
-UNWIND $node_ids AS nid
-MATCH (:StructureNode {id: nid})-[:HAS_EXTRACTION]->(er:ExtractionResult)
-RETURN count(er) AS n
-"""
-
-
-def _has_stale_extraction_results(driver, database: str, plans: Sequence[_EntryPlan]) -> bool:
-    """Whether any kept StructureNode still carries an ExtractionResult the
-    restore is about to delete — the only thing a restore deletes that can
-    orphan an :Entity / :ModelInstance / :LabeledEntity."""
-    for plan in plans:
-        if not plan.delete_stale_extraction_results:
-            continue
-        ids = plan.structure_node_ids
-        for start in range(0, len(ids), DELETE_BATCH_ROWS):
-            batch = ids[start : start + DELETE_BATCH_ROWS]
-            if run_count_query(driver, database, _STALE_EXTRACTION_RESULTS_QUERY, node_ids=batch):
-                return True
-    return False
-
-
-def _read_documents(driver, database: str, query: str, **params) -> list[DocumentInfo]:
-    def _do_read() -> list[DocumentInfo]:
-        with driver.session(database=database) as session:
-            return [
-                DocumentInfo(
-                    path=record["properties"].get("path"),
-                    version=record["properties"].get("version"),
-                    tenant_id=record["properties"].get("tenant_id"),
-                    is_seed=False,
-                    properties=dict(record["properties"]),
-                )
-                for record in session.run(query, **params)
-            ]
-
-    return with_neo4j_retry_sync(_do_read)
-
-
-def _count_blob_references(driver, database: str, tenant: str, blob_id: str) -> int:
-    def _do_count() -> int:
-        with driver.session(database=database) as session:
-            record = session.run(_BLOB_REFERENCES_QUERY, tenant_id=tenant, blob_id=blob_id).single()
-            return record["n"] if record else 0
-
-    return with_neo4j_retry_sync(_do_count)
 
 
 # ---------------------------------------------------------------------------
@@ -997,7 +708,7 @@ async def restore_document(
     snapshot (tenant-scoped) → validate it without writing (tenant of
     header, entries, nodes and Document links) → rebuild in batches → drop
     the temporary Document links, unmark the stubs → sweep the tenant's
-    orphans if stale ExtractionResults had to be deleted (``ingest/_gc.py``) →
+    orphans if stale ExtractionResults had to be deleted (``graph/neo4j/gc.py``) →
     delete snapshots no longer referenced. The duration of each phase is
     logged. Raw files are not part of snapshots: a recreated Document whose
     raw file was deleted keeps its ``raw_file_id`` and a warning is logged.
@@ -1035,6 +746,8 @@ async def restore_document(
         tenant / is malformed, or the backend cannot look snapshots up.
     ConfigurationError
         If the freeze backend resolves to ``"none"``.
+    GraphError
+        If the graph engine fails (after the retries).
     """
     filters = selector_filters(
         "restore_document", path, version, tenant_id, created_by_user_id, job_id
@@ -1056,13 +769,11 @@ async def restore_document(
     not_found = RestoreResult(
         **result_scope, found=False, versions_restored=[], documents_restored=0
     )
-    database = get_config().neo4j_database
-
     from scinr.newton.freeze.factory import get_freeze_storage
 
-    driver = get_driver()
-    try:
-        docs = await asyncio.to_thread(fetch_document_set, driver, database, filters)
+    store = get_graph_store()
+    with store.sync_scope():
+        docs = await asyncio.to_thread(fetch_document_set, filters)
         seeds = [doc for doc in docs if doc.is_seed]
         repository = get_freeze_storage()
         works: list[_BlobWork] = []
@@ -1129,7 +840,7 @@ async def restore_document(
                     )
 
         started = time.perf_counter()
-        await asyncio.to_thread(ensure_indexes, driver, _RESTORE_INDEXES, database=database)
+        await asyncio.to_thread(store.schema.ensure_indexes, _RESTORE_INDEXES)
         timings["indexes"] = time.perf_counter() - started
 
         counters = {"nodes_created": 0, "nodes_reused": 0, "relationships_created": 0}
@@ -1139,12 +850,7 @@ async def restore_document(
             for index, work in enumerate(works):
                 if not work.from_stubs:
                     work.stubs = await asyncio.to_thread(
-                        _read_documents,
-                        driver,
-                        database,
-                        _STUBS_OF_BLOB_QUERY,
-                        tenant_id=tenant,
-                        blob_id=work.blob_id,
+                        store.restore.frozen_stubs_of_blob, tenant, work.blob_id
                     )
                 structure_ids_for = {
                     (doc.path, doc.version)
@@ -1173,22 +879,22 @@ async def restore_document(
                 else:
                     _select_snapshot_targets(work, filters, selector)
                     existing = await asyncio.to_thread(
-                        _read_documents,
-                        driver,
-                        database,
-                        _EXISTING_DOCUMENTS_QUERY,
-                        tenant_id=tenant,
-                        keys=[{"path": p, "version": v} for p, v in work.targets],
+                        store.restore.existing_documents,
+                        tenant,
+                        [{"path": p, "version": v} for p, v in work.targets],
                     )
                     _plan_from_snapshot(work, {(doc.path, doc.version): doc for doc in existing})
                 timings["validate"] += time.perf_counter() - started
 
             # Read before the rebuild deletes them: see the GC below.
             needs_gc = await asyncio.to_thread(
-                _has_stale_extraction_results,
-                driver,
-                database,
-                [plan for work in works for plan in work.plans.values()],
+                store.restore.has_stale_extraction_results,
+                [
+                    plan.structure_node_ids
+                    for work in works
+                    for plan in work.plans.values()
+                    if plan.delete_stale_extraction_results
+                ],
             )
 
             timings["stale_delete"] = timings["rebuild"] = 0.0
@@ -1196,7 +902,6 @@ async def restore_document(
                 written = await _rebuild_snapshot(
                     work.file,
                     work.plans,
-                    database,
                     batch_size=batch_size,
                     concurrency=concurrency,
                 )
@@ -1210,9 +915,7 @@ async def restore_document(
         recreated = [plan.doc for plan in plans if plan.recreate]
         started = time.perf_counter()
         await asyncio.to_thread(
-            _finish_restore,
-            driver,
-            database,
+            store.restore.finish_restore,
             tenant,
             restored,
             sorted({doc.path for doc in recreated}),
@@ -1226,13 +929,7 @@ async def restore_document(
         started = time.perf_counter()
         gc_counts = dict(_NO_GC)
         if needs_gc:
-            gc_counts = await asyncio.to_thread(
-                sweep_tenant,
-                driver,
-                tenant_id=tenant,
-                database=database,
-                caller="restore_document",
-            )
+            gc_counts = await asyncio.to_thread(store.gc.sweep_tenant, tenant, "restore_document")
         timings["gc"] = time.perf_counter() - started
         await _warn_missing_raw_files(recreated, tenant)
 
@@ -1247,7 +944,7 @@ async def restore_document(
                 )
                 continue
             remaining = await asyncio.to_thread(
-                _count_blob_references, driver, database, tenant, work.blob_id
+                store.restore.count_blob_references, tenant, work.blob_id
             )
             if remaining == 0:
                 await repository.delete_snapshot(work.blob_id, tenant_id=tenant)
@@ -1287,5 +984,3 @@ async def restore_document(
             **counters,
             **gc_counts,
         )
-    finally:
-        driver.close()

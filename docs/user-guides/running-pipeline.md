@@ -1042,6 +1042,7 @@ from scinr.newton import (
     configure, run_pipeline,
     ConfigurationError, PreconditionError,
     ExtractionError, IngestionError,
+    DocumentVersionConflict, GraphConnectionError, GraphError,
 )
 
 async def main():
@@ -1065,8 +1066,17 @@ async def main():
         # Entity extraction failure
         print(f"Extraction error: {e}")
     except IngestionError as e:
-        # Neo4j graph write failure
+        # Ingestion failure that is not a graph-engine error (e.g. unverifiable raw_file_id)
         print(f"Ingestion error: {e}")
+    except DocumentVersionConflict as e:
+        # Another run ingested the same document version: retry the ingestion
+        print(f"Version conflict: {e}")
+    except GraphConnectionError as e:
+        # The graph engine is unreachable (or rejected the credentials)
+        print(f"Graph unreachable: {e}")
+    except GraphError as e:
+        # Any other graph-engine failure (transient after retries, constraint, resources, query)
+        print(f"Graph error: {e}")
 
 asyncio.run(main())
 ```

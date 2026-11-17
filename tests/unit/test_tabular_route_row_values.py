@@ -1,7 +1,7 @@
 """
 tests/unit/test_tabular_route_row_values.py — Unit tests for the
 containment-based value merging added to the tabular ingestion pipeline in
-scinr.newton.tabular.neo4j_ops:
+scinr.newton.tabular.rows:
 
 1. _merge_values() — pure merge/dedup-by-containment helper.
 2. _classify_merge_type() — Pydantic annotation classifier (str / list_str /
@@ -20,7 +20,7 @@ import pytest
 from pydantic import BaseModel
 
 from scinr.newton.tabular.models import ColumnFieldMapping, ColumnMapping
-from scinr.newton.tabular.neo4j_ops import (
+from scinr.newton.tabular.rows import (
     _classify_merge_type,
     _instantiate_composite_from_row,
     _merge_values,

@@ -21,7 +21,7 @@ It is an `async` function — `await` it (or wrap it with `asyncio.run()`). It:
    - All `:InfoUnit`, `:ModelDecision`, `:ProposedModel`, `:ProposedField`, and `:ExtractionResult` children
 3. **Garbage-collects** the `:Entity`, `:ModelInstance`, and `:LabeledEntity` nodes of the tenant that the deletion left orphaned.
 
-The function opens and closes its own Neo4j driver — you do not need to manage connections manually.
+The function opens and closes its own graph connection — you do not need to manage connections manually.
 
 ---
 
@@ -207,6 +207,8 @@ The cascade does **not** run in one transaction. A transaction keeps everything 
 
 The cascade is therefore not atomic. If it fails half-way, part of the subtree is gone but the `:Document` nodes are still there, so **calling `delete_document()` again with the same selector deletes what is left**. The storage records were already deleted by then (that step comes first).
 
+`delete_document()` and `collect_orphans()` open one synchronous graph-store scope (one connection) for the whole call. A failure of the graph engine surfaces as a `GraphError` subclass (for example `TransientGraphError` once the retries are exhausted, or `GraphResourceError` when the server runs out of transaction memory), with the driver's exception in `__cause__`.
+
 When a delete query had to be retried, the batches it committed before failing are not counted again, so the `*_deleted` counters of the result are then a lower bound.
 
 ---
@@ -375,9 +377,9 @@ To delete a frozen document completely, `restore_document()` it first and then d
 
 When `version` is specified, only that version's cascade is deleted. However, shared `:LabeledEntity` nodes connected to other versions are preserved by the GC pass (they still have incoming relationships from the remaining versions).
 
-### Driver Management
+### Connection Management
 
-`delete_document()` opens its own Neo4j driver via `get_driver()` and closes it in a `finally` block. You do not need to manage driver lifecycle manually. However, if you are calling `delete_document()` in a tight loop, consider the connection overhead — each call creates and closes a driver.
+`delete_document()` opens a `store.sync_scope()` on the graph store (`get_graph_store()`) and closes it when it finishes, even on failure. You do not need to manage connections manually. However, if you are calling `delete_document()` in a tight loop, consider the connection overhead — each call opens and closes its own connection.
 
 ---
 

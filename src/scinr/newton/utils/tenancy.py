@@ -52,3 +52,18 @@ def tenant_key(tenant_id: str | None) -> str:
     if tenant_id == "":
         raise ValueError("tenant_id must be a non-empty string, or None for public documents.")
     return tenant_id
+
+
+def require_stored_tenant(stored: str | None, node_full_id: str) -> str:
+    """Return the stored tenant key read off a StructureNode, refusing a
+    missing one: hashing a null tenant into a uid would silently create a
+    bucket shared by every such node, outside any tenant.
+
+    Raises:
+        RuntimeError: If *stored* is ``None`` (a node ingested before tenancy).
+    """
+    if stored is None:
+        raise RuntimeError(
+            f"StructureNode {node_full_id!r} has no tenant_id; re-ingest its document."
+        )
+    return stored

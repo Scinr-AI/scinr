@@ -57,7 +57,7 @@ from scinr.newton.utils.document_resolver import LeafDocument
 # ---------------------------------------------------------------------------
 
 
-def _identity_leaves(driver, *, tenant_id, doc_path=None, document_name=None):
+def _identity_leaves(*, tenant_id, doc_path=None, document_name=None):
     """Resolver stub: every selector is already a (root-level) leaf document."""
     selector = doc_path if doc_path is not None else document_name
     return [LeafDocument(selector, selector)]
@@ -118,7 +118,7 @@ def mock_stages(monkeypatch):
 
 
 @pytest.fixture
-def mock_infra(monkeypatch):
+def mock_infra(monkeypatch, fake_graph_store):
     """Patch every Neo4j/driver/theme-registry touchpoint that
     `run_pipeline()` and `_discover_units()` hit directly (outside the
     per-document stage primitives), so tests never open a real Neo4j
@@ -126,10 +126,11 @@ def mock_infra(monkeypatch):
 
     Patches (module-attribute patching on each function's ORIGIN module,
     matching the deferred-import pattern documented on `mock_stages` above):
-      - `scinr.newton.ingest.config.get_driver` / `get_async_driver`
-      - `scinr.newton.ingest.schema.setup_schema`
-      - `scinr.newton.ingest.loader.resolve_batch_version_sync`
-      - `scinr.newton.annotation.neo4j_ops.ensure_catalog_models_once` /
+      - `scinr.newton.graph.neo4j.driver.get_driver` / `get_async_driver`
+      - the graph store (`fake_graph_store`, installed with `set_graph_store()`):
+        `store.schema.setup` and `store.documents.resolve_batch_version`
+        (returns 1) are autospecced mocks, and `sync_scope()` is a no-op
+      - `scinr.newton.annotation.catalog.ensure_catalog_models_once` /
         `ensure_theme_structure_once` (no-op AsyncMocks — see
         `TestCatalogMemoization` below for a test that leaves these REAL and
         mocks one layer deeper instead)
@@ -138,24 +139,21 @@ def mock_infra(monkeypatch):
         (identity: returns `[LeafDocument(document_name, document_name)]`, i.e. "already a leaf",
         emulating `document_names` resolution without touching Neo4j)
     """
-    import scinr.newton.annotation.neo4j_ops as neo4j_ops_mod
-    import scinr.newton.ingest.config as ingest_config_mod
-    import scinr.newton.ingest.loader as ingest_loader_mod
-    import scinr.newton.ingest.schema as ingest_schema_mod
+    import scinr.newton.annotation.catalog as catalog_mod
+    import scinr.newton.graph.neo4j.driver as graph_driver_mod
     import scinr.newton.utils.document_resolver as document_resolver_mod
     import scinr.newton.utils.theme_registry as theme_registry_mod
 
     fake_sync_driver = MagicMock(name="sync_driver")
     fake_async_driver = MagicMock(name="async_driver")
 
-    monkeypatch.setattr(ingest_config_mod, "get_driver", MagicMock(return_value=fake_sync_driver))
+    monkeypatch.setattr(graph_driver_mod, "get_driver", MagicMock(return_value=fake_sync_driver))
     monkeypatch.setattr(
-        ingest_config_mod, "get_async_driver", MagicMock(return_value=fake_async_driver)
+        graph_driver_mod, "get_async_driver", MagicMock(return_value=fake_async_driver)
     )
-    monkeypatch.setattr(ingest_schema_mod, "setup_schema", MagicMock())
-    monkeypatch.setattr(ingest_loader_mod, "resolve_batch_version_sync", MagicMock(return_value=1))
-    monkeypatch.setattr(neo4j_ops_mod, "ensure_catalog_models_once", AsyncMock())
-    monkeypatch.setattr(neo4j_ops_mod, "ensure_theme_structure_once", AsyncMock())
+    fake_graph_store.documents.resolve_batch_version.return_value = 1
+    monkeypatch.setattr(catalog_mod, "ensure_catalog_models_once", AsyncMock())
+    monkeypatch.setattr(catalog_mod, "ensure_theme_structure_once", AsyncMock())
     monkeypatch.setattr(
         theme_registry_mod, "get_theme_registry", MagicMock(return_value=MagicMock())
     )
@@ -164,7 +162,11 @@ def mock_infra(monkeypatch):
         "resolve_leaf_documents",
         MagicMock(side_effect=_identity_leaves),
     )
-    return {"sync_driver": fake_sync_driver, "async_driver": fake_async_driver}
+    return {
+        "sync_driver": fake_sync_driver,
+        "async_driver": fake_async_driver,
+        "graph_store": fake_graph_store,
+    }
 
 
 @pytest.fixture
@@ -190,11 +192,11 @@ def mock_unit_stage_fns(monkeypatch):
         doc.document_name = json_file.stem
         return doc
 
-    async def _default_ingest_one(doc, driver, update_mode=False, shared_version=None, **kwargs):
+    async def _default_ingest_one(doc, update_mode=False, shared_version=None, **kwargs):
         return doc.document_name
 
     async def _default_ingest_one_from_path(
-        path, driver, update_mode=False, shared_version=None, **kwargs
+        path, update_mode=False, shared_version=None, **kwargs
     ):
         return path.stem
 
@@ -911,15 +913,15 @@ class TestFatalErrorAggregation:
 
 class TestCatalogMemoization:
     async def test_ensure_catalog_and_theme_setup_run_at_most_once_per_pipeline_run(
-        self, mock_stages, monkeypatch
+        self, mock_stages, fake_graph_store, monkeypatch
     ):
         """`ensure_catalog_models_once()` / `ensure_theme_structure_once()`
         (the Stage 3/4 pre-warm step run once before the per-document
         fan-out in `run_pipeline()`) must invoke the real, NON-memoized
-        `ensure_catalog_models()` / `ensure_theme_structure()` at most once
+        `store.annotation.ensure_catalog()` / `ensure_themes()` at most once
         each per `run_pipeline()` call, even with several documents
         processed concurrently — that is the entire point of the
-        process-level memoization guard in `annotation/neo4j_ops.py`.
+        process-level memoization guard in `annotation/catalog.py`.
 
         Unlike `mock_infra` above (which replaces the `_once` wrappers
         themselves with no-op mocks, for tests that don't care about this
@@ -930,24 +932,19 @@ class TestCatalogMemoization:
         isolation) since the guard is process-level global state, not reset
         by the `clean_config` autouse fixture.
         """
-        import scinr.newton.annotation.neo4j_ops as neo4j_ops_mod
-        import scinr.newton.ingest.config as ingest_config_mod
+        import scinr.newton.annotation.catalog as catalog_mod
+        import scinr.newton.graph.neo4j.driver as graph_driver_mod
         import scinr.newton.utils.document_resolver as document_resolver_mod
         import scinr.newton.utils.theme_registry as theme_registry_mod
 
-        neo4j_ops_mod.reset_catalog_memoization()
+        catalog_mod.reset_catalog_memoization()
         try:
-            fake_ensure_catalog_models = AsyncMock()
-            fake_ensure_theme_structure = AsyncMock()
-            monkeypatch.setattr(neo4j_ops_mod, "ensure_catalog_models", fake_ensure_catalog_models)
+            fake_catalog_sink = fake_graph_store.annotation.catalog_sink
             monkeypatch.setattr(
-                neo4j_ops_mod, "ensure_theme_structure", fake_ensure_theme_structure
+                graph_driver_mod, "get_driver", MagicMock(return_value=MagicMock())
             )
             monkeypatch.setattr(
-                ingest_config_mod, "get_driver", MagicMock(return_value=MagicMock())
-            )
-            monkeypatch.setattr(
-                ingest_config_mod, "get_async_driver", MagicMock(return_value=MagicMock())
+                graph_driver_mod, "get_async_driver", MagicMock(return_value=MagicMock())
             )
             monkeypatch.setattr(
                 theme_registry_mod, "get_theme_registry", MagicMock(return_value=MagicMock())
@@ -971,11 +968,11 @@ class TestCatalogMemoization:
                 document_names=["doc-a", "doc-b", "doc-c", "doc-d"],
             )
 
-            assert fake_ensure_catalog_models.call_count <= 1
-            assert fake_ensure_theme_structure.call_count <= 1
+            # One sink per setup (catalog, themes), so at most twice per run.
+            assert fake_catalog_sink.call_count <= 2
             assert result.annotation is not None
         finally:
-            neo4j_ops_mod.reset_catalog_memoization()
+            catalog_mod.reset_catalog_memoization()
 
 
 # ---------------------------------------------------------------------------
@@ -1047,7 +1044,7 @@ class TestAnnotationEntityExtractionConcurrency:
     """
 
     async def test_multiple_documents_process_annotation_and_entity_extraction_concurrently(
-        self, monkeypatch
+        self, fake_graph_store, monkeypatch
     ):
         """`parallel_docs` bounds how many `DocumentUnit`s run concurrently;
         for a `document_names`-driven `stages=["annotation",
@@ -1059,9 +1056,8 @@ class TestAnnotationEntityExtractionConcurrency:
         concurrently — both count towards the same cross-document
         concurrency guarantee this test protects).
         """
-        import scinr.newton.annotation.neo4j_ops as annotation_neo4j_ops_mod
-        import scinr.newton.entity_extraction.neo4j_ops as entity_extraction_neo4j_ops_mod
-        import scinr.newton.ingest.config as ingest_config_mod
+        import scinr.newton.annotation.catalog as catalog_mod
+        import scinr.newton.graph.neo4j.driver as graph_driver_mod
         import scinr.newton.utils.document_resolver as document_resolver_mod
         import scinr.newton.utils.theme_registry as theme_registry_mod
 
@@ -1081,11 +1077,11 @@ class TestAnnotationEntityExtractionConcurrency:
             async with lock:
                 in_flight -= 1
 
-        async def _tracking_fetch_nodes(driver, *, tenant_id, doc_path, only_unannotated=False):
+        async def _tracking_fetch_nodes(*, tenant_id, doc_path, only_unannotated=False):
             await _tracked_sleep()
             return []
 
-        async def _tracking_fetch_targets(driver, *, tenant_id, doc_path, only_unextracted=False):
+        async def _tracking_fetch_targets(*, tenant_id, doc_path, only_unextracted=False):
             await _tracked_sleep()
             return []
 
@@ -1107,32 +1103,16 @@ class TestAnnotationEntityExtractionConcurrency:
             AsyncMock(side_effect=_identity_leaves),
         )
         monkeypatch.setattr(
-            ingest_config_mod, "get_driver", MagicMock(return_value=fake_sync_driver)
+            graph_driver_mod, "get_driver", MagicMock(return_value=fake_sync_driver)
         )
         monkeypatch.setattr(
-            ingest_config_mod, "get_async_driver", MagicMock(return_value=fake_async_driver)
+            graph_driver_mod, "get_async_driver", MagicMock(return_value=fake_async_driver)
         )
-        monkeypatch.setattr(
-            annotation_neo4j_ops_mod, "ensure_catalog_models_once", AsyncMock()
-        )
-        monkeypatch.setattr(
-            annotation_neo4j_ops_mod, "ensure_theme_structure_once", AsyncMock()
-        )
-        monkeypatch.setattr(
-            annotation_neo4j_ops_mod,
-            "fetch_nodes_to_annotate",
-            AsyncMock(side_effect=_tracking_fetch_nodes),
-        )
-        monkeypatch.setattr(
-            annotation_neo4j_ops_mod,
-            "fetch_document_context_instructions",
-            AsyncMock(return_value=""),
-        )
-        monkeypatch.setattr(
-            entity_extraction_neo4j_ops_mod,
-            "fetch_extraction_targets",
-            AsyncMock(side_effect=_tracking_fetch_targets),
-        )
+        monkeypatch.setattr(catalog_mod, "ensure_catalog_models_once", AsyncMock())
+        monkeypatch.setattr(catalog_mod, "ensure_theme_structure_once", AsyncMock())
+        fake_graph_store.annotation.fetch_nodes_to_annotate.side_effect = _tracking_fetch_nodes
+        fake_graph_store.annotation.fetch_document_context_instructions.return_value = ""
+        fake_graph_store.extraction.fetch_targets.side_effect = _tracking_fetch_targets
         monkeypatch.setattr(
             theme_registry_mod, "get_theme_registry", MagicMock(return_value=MagicMock())
         )
@@ -1435,11 +1415,9 @@ class TestProgressCallbacks:
     async def test_mixed_folder_resolves_one_batch_version_for_everything(
         self, mock_stages, mock_infra, mock_unit_stage_fns, no_storage, monkeypatch, tmp_path
     ):
-        import scinr.newton.ingest.loader as ingest_loader_mod
-
         self._mixed_folder(tmp_path)
-        resolve = MagicMock(return_value=5)
-        monkeypatch.setattr(ingest_loader_mod, "resolve_batch_version_sync", resolve)
+        resolve = mock_infra["graph_store"].documents.resolve_batch_version
+        resolve.return_value = 5
         mock_stages["run_tabular_pipeline"].return_value = _sr("tabular")
         mock_unit_stage_fns["convert_one"].return_value = ([], [])
 
@@ -1450,7 +1428,7 @@ class TestProgressCallbacks:
         )
 
         resolve.assert_called_once()
-        _driver, paths, update_mode, tenants = resolve.call_args.args
+        paths, tenants, update_mode = resolve.call_args.args
         assert {"a.csv", "sub/b.xlsx", "doc1.txt", "sub/doc2.txt", "sub"} <= set(paths)
         assert update_mode is False
         assert tenants == ["acme"]

@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from scinr.newton.config import get_config, get_llm_semaphore
+from scinr.newton.config import get_llm_semaphore
 
 logger = logging.getLogger(__name__)
 
@@ -120,28 +120,26 @@ async def _run_annotation_parallel(
         Compatible with AnnotationState: keys document_name, doc_path,
         nodes_to_annotate, errors.
     """
-    from scinr.newton.annotation.neo4j_ops import (
+    from scinr.newton.annotation.catalog import (
         ensure_catalog_models_once,
         ensure_theme_structure_once,
-        fetch_document_context_instructions,
-        fetch_nodes_to_annotate,
     )
     from scinr.newton.annotation.nodes import process_single_annotation_node
-    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.graph import get_graph_store
     from scinr.newton.utils.theme_registry import get_theme_registry
     theme_registry = get_theme_registry()
 
-    driver = get_async_driver()
-    await ensure_catalog_models_once(driver)
-    await ensure_theme_structure_once(driver, theme_registry)
-    nodes = await fetch_nodes_to_annotate(
-        driver, tenant_id=tenant_id, doc_path=doc_path, only_unannotated=only_unannotated
+    store = get_graph_store()
+    await ensure_catalog_models_once(theme_registry)
+    await ensure_theme_structure_once(theme_registry)
+    nodes = await store.annotation.fetch_nodes_to_annotate(
+        tenant_id=tenant_id, doc_path=doc_path, only_unannotated=only_unannotated
     )
     if context_instructions_override is not None:
         doc_context = context_instructions_override
     else:
-        doc_context = await fetch_document_context_instructions(
-            driver, tenant_id=tenant_id, doc_path=doc_path
+        doc_context = await store.annotation.fetch_document_context_instructions(
+            tenant_id=tenant_id, doc_path=doc_path
         )
 
     logger.info(
@@ -244,27 +242,21 @@ async def run_annotation_agent(
         raise ValueError("document_name must be a non-empty string.")
 
     from scinr.newton.exceptions import PreconditionError
-    from scinr.newton.ingest.config import get_async_driver
-    from scinr.newton.utils.document_resolver import (
-        latest_document_pattern,
-        resolve_leaf_documents_async,
+    from scinr.newton.graph import get_graph_store
+    from scinr.newton.graph.types import DocumentSelector
+    from scinr.newton.utils.document_resolver import resolve_leaf_documents_async
+
+    selector = DocumentSelector(
+        tenant_id=tenant_id, path=doc_path, document_name=document_name, latest=True
     )
-    doc_pattern, doc_params = latest_document_pattern(
-        "d", tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
-    )
-    cfg = get_config()
-    driver = get_async_driver()
-    async with driver.session(database=cfg.neo4j_database) as _session:
-        _result = await _session.run(f"MATCH {doc_pattern} RETURN count(d) AS n", **doc_params)
-        _pre_row = await _result.single()
-    if _pre_row["n"] == 0:
+    if await get_graph_store().documents.count_latest_documents(selector) == 0:
         raise PreconditionError(
             f"Document '{doc_path or document_name}' (tenant={tenant_id!r}) not found in "
             f"Neo4j (latest=true). Run run_ingestion() before run_annotation_agent()."
         )
 
     leaves = await resolve_leaf_documents_async(
-        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+        tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
     )
     leaf_names = [leaf.name for leaf in leaves]
 
@@ -399,19 +391,18 @@ async def run_manual_annotation(
     from scinr.newton.entity_extraction.model_resolver import resolve_model_class
     resolve_model_class(model_class)
 
-    from scinr.newton.annotation.neo4j_ops import write_manual_annotation
-    from scinr.newton.ingest.config import get_async_driver
+    from scinr.newton.graph import get_graph_store
     from scinr.newton.utils.document_resolver import resolve_leaf_documents_async
 
-    driver = get_async_driver()
+    store = get_graph_store()
     leaves = await resolve_leaf_documents_async(
-        driver, tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+        tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
     )
     total_count = 0
     for leaf in leaves:
         try:
-            count = await write_manual_annotation(
-                driver, leaf.name, model_class, tenant_id=tenant_id, doc_path=leaf.path
+            count = await store.annotation.write_manual_annotation(
+                leaf.name, model_class, tenant_id=tenant_id, doc_path=leaf.path
             )
             total_count += count
             logger.info(

@@ -1,0 +1,1181 @@
+{
+  "extras": {
+    "first": {
+      "errors": [],
+      "nodes": 4
+    },
+    "manual": 4,
+    "only_unannotated": {
+      "nodes": 0
+    },
+    "rerun": {
+      "nodes": 4
+    }
+  },
+  "nodes": [
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Tabular row model with a normalized field.",
+        "name": "GoldenNormRow",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Keyed model used in a list (MERGE path with list index).",
+        "name": "GoldenPart",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Normalized place.",
+        "name": "GoldenPlace",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Product with entities, nested models, lists and both kinds of relationships.",
+        "name": "GoldenProduct",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Plain tabular row model.",
+        "name": "GoldenRow",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Unkeyed nested model (positional uid, CREATE path).",
+        "name": "GoldenSpec",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Keyed model, target of instance relationships.",
+        "name": "GoldenSupplier",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"Triple\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Generic RDF-style extraction for content that does not fit a specific domain model. Extracts all subject-predicate-object statements found in the content.",
+        "name": "Triple",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "A single subject-predicate-object statement.",
+        "name": "TripleItem",
+        "selectable": false
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"annot.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "annot.txt",
+        "path": "annot.txt",
+        "raw_file_id": "<oid:0>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenManufacturer"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenPartCode\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenPartCode"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenProductName"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenSku\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenSku"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenSupplierName\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenSupplierName"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenTag\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenTag"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"006ab600589ffaa8\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "info_unit_id": "006ab600589ffaa8",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "006ab600589ffaa8"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"49631dc3f27095f2\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "info_unit_id": "49631dc3f27095f2",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "49631dc3f27095f2"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"8c8ddb4fec7be1ee\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "info_unit_id": "8c8ddb4fec7be1ee",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "8c8ddb4fec7be1ee"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"e0f17836d694fc28\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "info_unit_id": "e0f17836d694fc28",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "e0f17836d694fc28"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"0022a534b04549d4\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "annot.txt",
+        "matched_model_class": "GoldenSupplier",
+        "propose_new_model": false,
+        "rationale": "Manually assigned override",
+        "source": "manual",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "0022a534b04549d4"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"07a8cc3f38550d45\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "annot.txt",
+        "matched_model_class": "GoldenSupplier",
+        "propose_new_model": false,
+        "rationale": "Manually assigned override",
+        "source": "manual",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "07a8cc3f38550d45"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"0c2ac7fee664ea84\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "annot.txt",
+        "matched_model_class": "GoldenSupplier",
+        "propose_new_model": false,
+        "rationale": "Manually assigned override",
+        "source": "manual",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "0c2ac7fee664ea84"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"30d975e5a8482ab8\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "annot.txt",
+        "matched_model_class": "GoldenSupplier",
+        "propose_new_model": false,
+        "rationale": "Manually assigned override",
+        "source": "manual",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "30d975e5a8482ab8"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"city\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "city",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"place\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "place",
+        "type": "golden_models.GoldenPlace | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"description\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPart",
+        "name": "description",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"part_code\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenPartCode",
+        "is_instance_key": true,
+        "model": "GoldenPart",
+        "name": "part_code",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"canonical\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPlace",
+        "name": "canonical",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"country\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPlace",
+        "name": "country",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"category\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "category",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"manufacturer\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenManufacturer",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "manufacturer",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"parts\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "parts",
+        "type": "list[golden_models.GoldenPart]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"primary_part\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "primary_part",
+        "type": "golden_models.GoldenPart | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"product_name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenProductName",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "product_name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"spec\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "spec",
+        "type": "golden_models.GoldenSpec | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"supplier_codes\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "supplier_codes",
+        "type": "list[str]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"tags\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenTag",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "tags",
+        "type": "list[str]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"item\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenRow",
+        "name": "item",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"qty\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenRow",
+        "name": "qty",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"sku\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenSku",
+        "is_instance_key": false,
+        "model": "GoldenRow",
+        "name": "sku",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"material\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenSpec",
+        "name": "material",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"weight\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenSpec",
+        "name": "weight",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_code\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "is_instance_key": true,
+        "model": "GoldenSupplier",
+        "name": "supplier_code",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenSupplierName",
+        "is_instance_key": false,
+        "model": "GoldenSupplier",
+        "name": "supplier_name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"Triple\", \"name\": \"triples\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "Triple",
+        "name": "triples",
+        "type": "list[scinr.newton.models.default.triple.TripleItem]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"object\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "object",
+        "type": "str"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"predicate\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "predicate",
+        "type": "str"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"subject\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "subject",
+        "type": "str"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::annot.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::annot.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::annot.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::annot.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::annot.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "Theme|{\"path\": \"default\"}",
+      "labels": [
+        "Theme"
+      ],
+      "props": {
+        "name": "default",
+        "path": "default"
+      }
+    },
+    {
+      "key": "Theme|{\"path\": \"golden_theme\"}",
+      "labels": [
+        "Theme"
+      ],
+      "props": {
+        "name": "golden_theme",
+        "path": "golden_theme"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "field_name": "place",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "parts",
+        "is_list": true,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "primary_part",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "spec",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {
+        "field_name": "triples",
+        "is_list": true,
+        "required": true
+      },
+      "to": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"default\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "City.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"city\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "Name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "Normalized place.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"place\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "description": "Part description.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"description\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "description": "Part code.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"part_code\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "props": {
+        "description": "Canonical place name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"canonical\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "props": {
+        "description": "Country.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"country\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Plain scalar.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"category\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Manufacturer.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"manufacturer\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Parts.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"parts\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Main part.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"primary_part\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Product name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"product_name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Specification.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"spec\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Supplier codes.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"supplier_codes\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Tags.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"tags\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "Item.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"item\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "Quantity.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"qty\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "SKU.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"sku\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "props": {
+        "description": "Material.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"material\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "props": {
+        "description": "Weight with units.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"weight\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "description": "Supplier code.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_code\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "description": "Supplier name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"object\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"predicate\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"subject\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {
+        "description": "All subject-predicate-object statements extracted from the content.",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"Triple\", \"name\": \"triples\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"8c8ddb4fec7be1ee\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"49631dc3f27095f2\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"006ab600589ffaa8\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"e0f17836d694fc28\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::misc\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"30d975e5a8482ab8\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"07a8cc3f38550d45\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"0022a534b04549d4\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"0c2ac7fee664ea84\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "Document|{\"path\": \"annot.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::annot.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"annot.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::annot.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "props": {
+        "from_field": "product_name",
+        "to_field": "manufacturer",
+        "via_model": "GoldenProduct"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "type": "MADE_BY"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"0022a534b04549d4\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"07a8cc3f38550d45\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"0c2ac7fee664ea84\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"30d975e5a8482ab8\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "field_name": "part_code"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenPartCode\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "tags"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenTag\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "field_name": "sku"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenSku\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "field_name": "supplier_name"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenSupplierName\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "composite": false,
+        "join_via": "{\"supplier_codes\": \"supplier_code\"}",
+        "via_field": "supplier_codes"
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "SUPPLIED_BY"
+    }
+  ]
+}

@@ -16,12 +16,21 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import create_autospec
 
 import pytest
 
 from scinr.newton.exceptions import FreezeError
+from scinr.newton.graph import reset_graph_store, set_graph_store
+from scinr.newton.graph.base import SchemaOps
+from scinr.newton.graph.neo4j import deletion as neo_deletion
+from scinr.newton.graph.neo4j import driver as neo_driver
+from scinr.newton.graph.neo4j import freeze as neo_freeze
+from scinr.newton.graph.neo4j import gc as neo_gc
+from scinr.newton.graph.neo4j import restore as neo_restore
+from scinr.newton.graph.neo4j.store import Neo4jGraphStore
 from scinr.newton.ingest import restore
-from scinr.newton.ingest.freeze import SNAPSHOT_SCHEMA_VERSION, cypher_identifier
+from scinr.newton.ingest.freeze import SNAPSHOT_SCHEMA_VERSION, validate_identifier
 from scinr.newton.ingest.restore import iter_snapshot, restore_document
 from scinr.newton.results import RestoreResult
 
@@ -121,13 +130,13 @@ class _SyncTx:
 
     def run(self, query: str, **params) -> _SyncResult:
         self.driver.calls.append((query, params))
-        if query == restore._RESTORE_FINISH_QUERY:
+        if query == neo_restore._RESTORE_FINISH_QUERY:
             for key in params["keys"]:
                 blob = self.driver.blob_of.get((key["path"], key["version"]))
                 if blob is not None:
                     self.driver.frozen_blobs[blob] -= 1
             return _SyncResult([{"n": len(params["keys"])}])
-        if query == restore._RECOMPUTE_LATEST_QUERY:
+        if query == neo_restore._RECOMPUTE_LATEST_QUERY:
             return _SyncResult([])
         raise AssertionError(f"Unexpected tx.run: {query}")
 
@@ -148,13 +157,13 @@ class _SyncSession:
             return _SyncResult(self.driver.docs)
         if "borrados" in query:  # GC: auto-commit (CALL ... IN TRANSACTIONS)
             return _SyncResult([{"borrados": 0}])
-        if query == restore._TEMPORARY_LINKS_DELETE_QUERY:
+        if query == neo_restore._TEMPORARY_LINKS_DELETE_QUERY:
             return _SyncResult([{"n": 0}])
-        if query == restore._STALE_EXTRACTION_RESULTS_QUERY:
+        if query == neo_restore._STALE_EXTRACTION_RESULTS_QUERY:
             return _SyncResult([{"n": self.driver.stale_extraction_results}])
-        if query == restore._BLOB_REFERENCES_QUERY:
+        if query == neo_restore._BLOB_REFERENCES_QUERY:
             return _SyncResult([{"n": self.driver.frozen_blobs.get(params["blob_id"], 0)}])
-        if query == restore._STUBS_OF_BLOB_QUERY:
+        if query == neo_restore._STUBS_OF_BLOB_QUERY:
             return _SyncResult(
                 [
                     {"properties": d["properties"]}
@@ -163,7 +172,7 @@ class _SyncSession:
                     and d["properties"].get("frozen_blob_id") == params["blob_id"]
                 ]
             )
-        if query == restore._EXISTING_DOCUMENTS_QUERY:
+        if query == neo_restore._EXISTING_DOCUMENTS_QUERY:
             wanted = {(k["path"], k["version"]) for k in params["keys"]}
             return _SyncResult(
                 [
@@ -314,26 +323,36 @@ class _FakeFreezeRepo:
 
 @pytest.fixture(autouse=True)
 def _stub_config(monkeypatch):
-    monkeypatch.setattr(restore, "get_config", lambda: SimpleNamespace(neo4j_database="neo4j"))
+    """The Neo4j operations call get_config().neo4j_database for each session; these
+    tests never call configure(), so stub the reference imported into those modules."""
+    fake_cfg = SimpleNamespace(neo4j_database="neo4j")
+    for module in (restore, neo_restore, neo_freeze, neo_deletion, neo_gc):
+        monkeypatch.setattr(module, "get_config", lambda: fake_cfg)
 
 
 @pytest.fixture
 def env(monkeypatch):
+    """restore_document() through the real ``Neo4jGraphStore`` over fake drivers
+    (the schema group is a mock: ``ensure_indexes`` is recorded, not run)."""
+
     def _setup(docs: list[dict], snapshots: dict, existing: set[str] | None = None):
         sync, adrv = _SyncDriver(docs), _AsyncDriver(existing)
         repo = _FakeFreezeRepo(snapshots)
-        monkeypatch.setattr(restore, "get_driver", lambda: sync)
-        monkeypatch.setattr(restore, "get_async_driver", lambda: adrv)
+        monkeypatch.setattr(neo_driver, "get_driver", lambda: sync)
+        monkeypatch.setattr(neo_restore, "get_async_driver", lambda: adrv)
         monkeypatch.setattr("scinr.newton.freeze.factory.get_freeze_storage", lambda: repo)
         indexes: list[tuple] = []
-        monkeypatch.setattr(
-            restore,
-            "ensure_indexes",
-            lambda driver, names, *, database: indexes.append((driver, names, database)) or 0,
-        )
+        schema = create_autospec(SchemaOps, instance=True)
+        schema.ensure_indexes.side_effect = lambda names: indexes.append(names) or 0
+        store = Neo4jGraphStore()
+        store._schema = schema
+        set_graph_store(store)
         return SimpleNamespace(sync=sync, adrv=adrv, repo=repo, indexes=indexes)
 
-    return _setup
+    try:
+        yield _setup
+    finally:
+        reset_graph_store()
 
 
 # ---------------------------------------------------------------------------
@@ -433,9 +452,9 @@ class TestRestoreDocument:
         # Temporary links → unmark → reference count, all on the tenant. No
         # GC: this restore deleted nothing, so it cannot have orphaned anything.
         sync_queries = e.sync.queries()
-        finish = sync_queries.index(restore._RESTORE_FINISH_QUERY)
-        assert sync_queries[finish - 1] == restore._TEMPORARY_LINKS_DELETE_QUERY
-        assert sync_queries[finish + 1 :] == [restore._BLOB_REFERENCES_QUERY]
+        finish = sync_queries.index(neo_restore._RESTORE_FINISH_QUERY)
+        assert sync_queries[finish - 1] == neo_restore._TEMPORARY_LINKS_DELETE_QUERY
+        assert sync_queries[finish + 1 :] == [neo_restore._BLOB_REFERENCES_QUERY]
         assert not any("borrados" in q for q in sync_queries)
         assert result.gc_entity_model_instance_passes == 0
         assert result.gc_labeled_entity_passes == 0
@@ -455,7 +474,7 @@ class TestRestoreDocument:
 
         assert result.documents_restored == 1
         assert result.nodes_created == 6
-        assert "d.frozen_cleanup_pending" in restore._RESTORE_FINISH_QUERY.split("REMOVE")[1]
+        assert "d.frozen_cleanup_pending" in neo_restore._RESTORE_FINISH_QUERY.split("REMOVE")[1]
         assert e.repo.deleted == [("blob-1", "acme")]
 
     async def test_node_rows_split_key_and_props(self, env):
@@ -527,7 +546,7 @@ class TestRestoreDocument:
         StructureNodes (the freeze removed that family, so they were written
         since); otherwise it just creates."""
         snapshot = {"blob-1": ("acme", _snapshot(_entry("a.pdf", 1, "a1")))}
-        stale, first_merge = restore._STALE_EXTRACTION_RESULTS_QUERY, "UNWIND $rows"
+        stale, first_merge = neo_restore._STALE_EXTRACTION_RESULTS_QUERY, "UNWIND $rows"
 
         # The usual case: the kept StructureNodes carry no ExtractionResult.
         e = env([_stub("a.pdf", 1, ksn=True)], dict(snapshot))
@@ -545,7 +564,7 @@ class TestRestoreDocument:
         assert result.gc_entity_model_instance_passes == 1
         # They are counted before the rebuild deletes them.
         assert e.adrv.calls  # the rebuild ran
-        assert stale in e.sync.queries()[: e.sync.queries().index(restore._RESTORE_FINISH_QUERY)]
+        assert stale in e.sync.queries()[: e.sync.queries().index(neo_restore._RESTORE_FINISH_QUERY)]
         assert any(q.startswith(first_merge) for q in _async_queries(e))
 
         # StructureNodes kept and ExtractionResults kept too: none is stale,
@@ -562,7 +581,7 @@ class TestRestoreDocument:
         """The temporary links (one per kept ModelDecision / ExtractionResult)
         are deleted in batches, a chunk of documents at a time, and each chunk
         is unmarked only after its links are gone."""
-        total = restore.DOCUMENTS_PER_QUERY + 1
+        total = neo_restore.DOCUMENTS_PER_QUERY + 1
         e = env(
             [_stub(f"d{i}.pdf", 1, ka=True, ker=True) for i in range(total)],
             {
@@ -579,16 +598,16 @@ class TestRestoreDocument:
         finish = [
             (q, len(p["keys"]))
             for q, p in e.sync.calls
-            if q in (restore._TEMPORARY_LINKS_DELETE_QUERY, restore._RESTORE_FINISH_QUERY)
+            if q in (neo_restore._TEMPORARY_LINKS_DELETE_QUERY, neo_restore._RESTORE_FINISH_QUERY)
         ]
-        links, unmark = restore._TEMPORARY_LINKS_DELETE_QUERY, restore._RESTORE_FINISH_QUERY
+        links, unmark = neo_restore._TEMPORARY_LINKS_DELETE_QUERY, neo_restore._RESTORE_FINISH_QUERY
         assert finish == [
-            (links, restore.DOCUMENTS_PER_QUERY),
-            (unmark, restore.DOCUMENTS_PER_QUERY),
+            (links, neo_restore.DOCUMENTS_PER_QUERY),
+            (unmark, neo_restore.DOCUMENTS_PER_QUERY),
             (links, 1),
             (unmark, 1),
         ]
-        assert f"IN TRANSACTIONS OF {restore.DELETE_BATCH_ROWS} ROWS" in links
+        assert f"IN TRANSACTIONS OF {neo_restore.DELETE_BATCH_ROWS} ROWS" in links
         assert "collect(" not in links
         assert "DELETE link" not in unmark
 
@@ -604,8 +623,7 @@ class TestRestoreDocument:
     async def test_ensures_the_lookup_indexes_first(self, env):
         e = env([_stub("a.pdf", 1)], {"blob-1": ("acme", _snapshot(_entry("a.pdf", 1, "a1")))})
         await restore_document("a.pdf", tenant_id="acme")
-        [(driver, names, database)] = e.indexes
-        assert driver is e.sync and database == "neo4j"
+        [names] = e.indexes
         assert "idx_model_decision_uid" in names and "idx_catalog_model_name" in names
 
     @pytest.mark.parametrize("kwargs", [{"batch_size": 0}, {"concurrency": 0}])
@@ -668,7 +686,7 @@ class TestRestoreDocument:
         e.adrv.fail_on = "`InfoUnit`"
         with pytest.raises(RuntimeError, match="batch failed"):
             await restore_document("a.pdf", tenant_id="acme", concurrency=4)
-        assert restore._RESTORE_FINISH_QUERY not in e.sync.queries()
+        assert neo_restore._RESTORE_FINISH_QUERY not in e.sync.queries()
         assert e.repo.deleted == []
         assert e.adrv.in_flight == 0
         assert not any("CREATE (a)-[r:" in q for q in _async_queries(e))
@@ -701,7 +719,7 @@ class TestRestoreDocument:
         with pytest.raises(FreezeError, match=match):
             await restore_document("a.pdf", tenant_id="acme")
         assert e.adrv.calls == []
-        assert restore._RESTORE_FINISH_QUERY not in e.sync.queries()
+        assert neo_restore._RESTORE_FINISH_QUERY not in e.sync.queries()
         assert e.repo.deleted == []
 
     async def test_malformed_json_writes_nothing(self, env):
@@ -760,7 +778,7 @@ class TestRestoreDocument:
         assert result.versions_restored == [1]
         assert result.documents_restored == 2
         assert result.frozen_blob_ids == ["blob-1"]
-        finish = next(p for q, p in e.sync.calls if q == restore._RESTORE_FINISH_QUERY)
+        finish = next(p for q, p in e.sync.calls if q == neo_restore._RESTORE_FINISH_QUERY)
         assert finish["keys"] == [{"path": "folder", "version": 1}, {"path": "folder/leaf", "version": 1}]
         assert e.repo.reads == [("blob-1", "acme")]
 
@@ -796,84 +814,6 @@ class TestRestoreDocument:
         assert e.sync.calls == []
 
 
-class TestQueries:
-    def test_merged_labels_union_provenance(self):
-        q = restore._node_merge_query(("Entity",))
-        assert "MERGE (n:`Entity` {uid: row.key.uid})" in q
-        assert "CASE WHEN x IN acc THEN acc ELSE acc + x END" in q
-
-    def test_catalog_key_with_two_fields(self):
-        q = restore._relationship_query("HAS_FIELD", "CatalogModel", "ModelField")
-        assert "MERGE (b:`ModelField` {name: row.to.name, model: row.to.model})" in q
-
-    def test_unknown_labels_are_rejected(self):
-        with pytest.raises(FreezeError):
-            restore._node_merge_query(("Mystery",))
-
-
-class TestEnsureIndexes:
-    class _Session:
-        def __init__(self, outer) -> None:
-            self.outer = outer
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def execute_write(self, fn):
-            return fn(self)
-
-        def run(self, query, **params):
-            outer = self.outer
-            if outer.error is not None:
-                raise outer.error
-            outer.queries.append((query, params))
-            added = 1 if query.startswith("CREATE INDEX") and outer.missing else 0
-            return SimpleNamespace(
-                consume=lambda: SimpleNamespace(counters=SimpleNamespace(indexes_added=added))
-            )
-
-    class _Driver:
-        def __init__(self, missing: bool, error: Exception | None = None) -> None:
-            self.missing = missing
-            self.error = error
-            self.queries: list[tuple[str, dict]] = []
-
-        def session(self, **kwargs):
-            return TestEnsureIndexes._Session(self)
-
-    def test_existing_indexes_do_not_wait(self):
-        from scinr.newton.ingest.schema import ensure_indexes
-
-        driver = self._Driver(missing=False)
-        assert ensure_indexes(driver, restore._RESTORE_INDEXES, database="neo4j") == 0
-        assert len(driver.queries) == len(restore._RESTORE_INDEXES)
-        assert all(q.startswith("CREATE INDEX") and "IF NOT EXISTS" in q for q, _ in driver.queries)
-
-    def test_created_indexes_are_awaited(self):
-        from scinr.newton.ingest.schema import ensure_indexes
-
-        driver = self._Driver(missing=True)
-        created = ensure_indexes(driver, ("idx_model_decision_uid",), database="neo4j")
-        assert created == 1
-        assert driver.queries[-1] == ("CALL db.awaitIndexes($timeout)", {"timeout": 300})
-
-    def test_failure_is_logged_not_raised(self, caplog):
-        from scinr.newton.ingest.schema import ensure_indexes
-
-        driver = self._Driver(missing=True, error=RuntimeError("no schema privilege"))
-        assert ensure_indexes(driver, ("idx_model_decision_uid",), database="neo4j") == 0
-        assert "Could not ensure indexes" in caplog.text
-
-    def test_unknown_name_is_rejected(self):
-        from scinr.newton.ingest.schema import ensure_indexes
-
-        with pytest.raises(ValueError, match="Unknown index"):
-            ensure_indexes(self._Driver(missing=False), ("nope",), database="neo4j")
-
-
 def _folder_snapshot(**header) -> dict:
     folder = _entry("folder", 1, "f")
     leaf = _entry("folder/leaf", 1, "l")
@@ -907,7 +847,7 @@ class TestRestoreWithoutStub:
         doc_i = next(i for i, q in enumerate(queries) if "MERGE (n:`Document`" in q)
         first_rel = next(i for i, q in enumerate(queries) if "CREATE (a)-[r:" in q)
         assert doc_i < first_rel
-        latest = next(p for q, p in e.sync.calls if q == restore._RECOMPUTE_LATEST_QUERY)
+        latest = next(p for q, p in e.sync.calls if q == neo_restore._RECOMPUTE_LATEST_QUERY)
         assert latest == {"tenant_id": "acme", "paths": ["a.pdf"]}
         # A freeze snapshot nobody references any more is deleted.
         assert result.snapshots_deleted == 1 and e.repo.deleted == [("blob-1", "acme")]
@@ -1063,11 +1003,11 @@ class TestRestoreWithoutStub:
 
 
 @pytest.mark.parametrize("name", ["HAS_CHILD", "5_YEAR_PERIOD_CALCULATED_FROM", "_x"])
-def test_cypher_identifier_accepts_names_the_extraction_writes(name):
-    assert cypher_identifier(name) == f"`{name}`"
+def test_validate_identifier_accepts_names_the_extraction_writes(name):
+    assert validate_identifier(name) == name
 
 
 @pytest.mark.parametrize("name", ["", "HAS CHILD", "x`y", None])
-def test_cypher_identifier_rejects_unsafe_names(name):
+def test_validate_identifier_rejects_unsafe_names(name):
     with pytest.raises(FreezeError, match="Invalid label"):
-        cypher_identifier(name)
+        validate_identifier(name)

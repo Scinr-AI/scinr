@@ -1028,10 +1028,16 @@ def configure(
         pass  # theme_registry may not be initialized yet
 
     try:
-        from scinr.newton.ingest.config import _reset_async_driver_singleton
+        from scinr.newton.graph.neo4j.driver import _reset_async_driver_singleton
         _reset_async_driver_singleton()
     except Exception:
         pass  # ingest module may not be initialized yet
+
+    try:
+        from scinr.newton.graph import reset_graph_store
+        reset_graph_store()
+    except Exception:
+        pass  # graph package may not be initialized yet
 
     try:
         from scinr.newton.storage.mongodb.client import reset_client
@@ -1040,7 +1046,7 @@ def configure(
         pass  # storage mongodb module may not be initialized yet
 
     try:
-        from scinr.newton.annotation.neo4j_ops import reset_catalog_memoization
+        from scinr.newton.annotation.catalog import reset_catalog_memoization
         reset_catalog_memoization()
     except Exception:
         pass  # annotation module may not be initialized yet

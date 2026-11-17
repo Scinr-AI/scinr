@@ -36,7 +36,7 @@ from scinr.newton.utils.document_resolver import LeafDocument
 
 class TestRunManualAnnotationSingleDocumentSuccess:
     async def test_awaits_write_manual_annotation_and_returns_its_count(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, fake_graph_store
     ) -> None:
         """A single leaf document must have `write_manual_annotation()`
         properly *awaited* (not merely called) and its returned `int` count
@@ -51,8 +51,8 @@ class TestRunManualAnnotationSingleDocumentSuccess:
         (the `TypeError` from `total_count += <coroutine>` is caught and
         logged as an ERROR instead of propagating).
         """
-        driver_dummy = MagicMock(name="async_driver")
-        write_mock = AsyncMock(return_value=5)
+        write_mock = fake_graph_store.annotation.write_manual_annotation
+        write_mock.return_value = 5
 
         with (
             patch(
@@ -60,16 +60,8 @@ class TestRunManualAnnotationSingleDocumentSuccess:
                 MagicMock(return_value=object),
             ),
             patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=driver_dummy),
-            ),
-            patch(
                 "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
                 AsyncMock(return_value=[LeafDocument("MyDoc", "MyDoc")]),
-            ),
-            patch(
-                "scinr.newton.annotation.neo4j_ops.write_manual_annotation",
-                write_mock,
             ),
             caplog.at_level(logging.ERROR, logger="scinr.newton.annotation.agent"),
         ):
@@ -77,7 +69,7 @@ class TestRunManualAnnotationSingleDocumentSuccess:
 
         assert result == 5
         write_mock.assert_awaited_once_with(
-            driver_dummy, "MyDoc", "SomeModelClass", tenant_id=None, doc_path="MyDoc"
+            "MyDoc", "SomeModelClass", tenant_id=None, doc_path="MyDoc"
         )
 
         error_records = [
@@ -92,23 +84,19 @@ class TestRunManualAnnotationSingleDocumentSuccess:
 
 
 class TestRunManualAnnotationFolderMultipleLeaves:
-    async def test_sums_counts_across_all_leaves(self) -> None:
+    async def test_sums_counts_across_all_leaves(self, fake_graph_store) -> None:
         """When `document_name` resolves to multiple leaf documents, the
         per-leaf counts returned by `write_manual_annotation()` must be
         summed correctly, and each leaf must be called with its own name and
         selected by its own path within the tenant.
         """
-        driver_dummy = MagicMock(name="async_driver")
-        write_mock = AsyncMock(side_effect=[3, 7])
+        write_mock = fake_graph_store.annotation.write_manual_annotation
+        write_mock.side_effect = [3, 7]
 
         with (
             patch(
                 "scinr.newton.entity_extraction.model_resolver.resolve_model_class",
                 MagicMock(return_value=object),
-            ),
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=driver_dummy),
             ),
             patch(
                 "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
@@ -119,10 +107,6 @@ class TestRunManualAnnotationFolderMultipleLeaves:
                     ]
                 ),
             ),
-            patch(
-                "scinr.newton.annotation.neo4j_ops.write_manual_annotation",
-                write_mock,
-            ),
         ):
             result = await run_manual_annotation(
                 "SomeFolder", "SomeModelClass", tenant_id="acme"
@@ -131,10 +115,10 @@ class TestRunManualAnnotationFolderMultipleLeaves:
         assert result == 10
         assert write_mock.await_count == 2
         write_mock.assert_any_await(
-            driver_dummy, "Leaf1", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf1"
+            "Leaf1", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf1"
         )
         write_mock.assert_any_await(
-            driver_dummy, "Leaf2", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf2"
+            "Leaf2", "SomeModelClass", tenant_id="acme", doc_path="SomeFolder/Leaf2"
         )
 
 
@@ -145,7 +129,7 @@ class TestRunManualAnnotationFolderMultipleLeaves:
 
 class TestRunManualAnnotationPerLeafFailureIsolation:
     async def test_one_failing_leaf_does_not_abort_remaining_leaves(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, fake_graph_store
     ) -> None:
         """A genuine failure in `write_manual_annotation()` for one leaf
         (e.g., a Neo4j error) must be caught and logged, while subsequent
@@ -153,17 +137,13 @@ class TestRunManualAnnotationPerLeafFailureIsolation:
         to the final total. No exception should propagate out of
         `run_manual_annotation()`.
         """
-        driver_dummy = MagicMock(name="async_driver")
-        write_mock = AsyncMock(side_effect=[Exception("boom"), 4])
+        write_mock = fake_graph_store.annotation.write_manual_annotation
+        write_mock.side_effect = [Exception("boom"), 4]
 
         with (
             patch(
                 "scinr.newton.entity_extraction.model_resolver.resolve_model_class",
                 MagicMock(return_value=object),
-            ),
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=driver_dummy),
             ),
             patch(
                 "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
@@ -173,10 +153,6 @@ class TestRunManualAnnotationPerLeafFailureIsolation:
                         LeafDocument("Leaf2", "SomeFolder/Leaf2"),
                     ]
                 ),
-            ),
-            patch(
-                "scinr.newton.annotation.neo4j_ops.write_manual_annotation",
-                write_mock,
             ),
             caplog.at_level(logging.ERROR, logger="scinr.newton.annotation.agent"),
         ):
@@ -204,9 +180,11 @@ class TestWriteManualAnnotationIsCoroutineFunction:
         without anyone updating its (currently `await`-ing) caller in
         `run_manual_annotation()`.
         """
-        from scinr.newton.annotation.neo4j_ops import write_manual_annotation
+        from scinr.newton.graph.base import AnnotationOps
+        from scinr.newton.graph.neo4j.annotation import Neo4jAnnotationOps
 
-        assert inspect.iscoroutinefunction(write_manual_annotation) is True
+        assert inspect.iscoroutinefunction(AnnotationOps.write_manual_annotation) is True
+        assert inspect.iscoroutinefunction(Neo4jAnnotationOps.write_manual_annotation) is True
 
 
 if __name__ == "__main__":

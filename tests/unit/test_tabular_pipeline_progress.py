@@ -49,17 +49,8 @@ class _Emitter:
         ]
 
 
-def _fake_driver():
-    record = {"max_version": None}
-    session = MagicMock()
-    session.run.return_value.single.return_value = record
-    driver = MagicMock()
-    driver.session.return_value.__enter__.return_value = session
-    return driver
-
-
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, fake_graph_store):
     """Mocks every external dependency of run_tabular_pipeline()."""
 
     async def _noop(*a, **k):
@@ -67,13 +58,10 @@ def env(monkeypatch):
 
     cfg = MagicMock()
     cfg.neo4j_database = "neo4j"
-    monkeypatch.setattr(tabular_stage, "get_driver", _fake_driver)
-    monkeypatch.setattr(tabular_stage, "get_async_driver", lambda: object())
-    monkeypatch.setattr(tabular_stage, "setup_schema", lambda d: None)
-    resolve = MagicMock(return_value=1)
-    monkeypatch.setattr("scinr.newton.ingest.loader.resolve_batch_version_sync", resolve)
-    monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_catalog_models_once", _noop)
-    monkeypatch.setattr("scinr.newton.annotation.neo4j_ops.ensure_theme_structure_once", _noop)
+    resolve = fake_graph_store.documents.resolve_batch_version
+    resolve.return_value = 1
+    monkeypatch.setattr("scinr.newton.annotation.catalog.ensure_catalog_models_once", _noop)
+    monkeypatch.setattr("scinr.newton.annotation.catalog.ensure_theme_structure_once", _noop)
     monkeypatch.setattr("scinr.newton.utils.theme_registry.get_theme_registry", lambda: object())
 
     raw_repo = MagicMock()
@@ -84,7 +72,12 @@ def env(monkeypatch):
         return_value={"errors": [], "ingested_table_node_ids": ["t-1"]}
     )
     monkeypatch.setattr("scinr.newton.tabular.agent.run_tabular_agent", agent)
-    return {"agent": agent, "raw_repo": raw_repo, "resolve": resolve}
+    return {
+        "agent": agent,
+        "raw_repo": raw_repo,
+        "resolve": resolve,
+        "graph_store": fake_graph_store,
+    }
 
 
 def _csv(path: Path, text: str = "a,b\n1,2\n") -> Path:
@@ -258,7 +251,7 @@ async def test_standalone_resolves_version_with_shared_helper(tmp_path, env):
     )
 
     env["resolve"].assert_called_once()
-    _driver, paths, update_mode, tenants = env["resolve"].call_args.args
+    paths, tenants, update_mode = env["resolve"].call_args.args
     assert set(paths) == {"A/data.csv", "A"}
     assert update_mode is True
     assert tenants == ["acme"]

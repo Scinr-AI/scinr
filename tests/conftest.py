@@ -65,6 +65,28 @@ def clean_config():
 
 
 # ---------------------------------------------------------------------------
+# Graph store
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_graph_store():
+    """Install a ``FakeGraphStore`` as the process-wide graph store.
+
+    The store is discarded when the test ends, so no test sees another's fake.
+    """
+    from scinr.newton.graph import reset_graph_store, set_graph_store
+    from tests.unit._graph_fakes import FakeGraphStore
+
+    store = FakeGraphStore()
+    set_graph_store(store)
+    try:
+        yield store
+    finally:
+        reset_graph_store()
+
+
+# ---------------------------------------------------------------------------
 # CSV / XLSX file factories
 # ---------------------------------------------------------------------------
 

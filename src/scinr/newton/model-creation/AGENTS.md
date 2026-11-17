@@ -356,11 +356,11 @@ tabular column-mapper can target as `str` or `list[str]` — never `int`, `float
 
 **`@model_validator` / `@field_validator` will NEVER run for these fields — do not use them
 for type coercion here.** All row instantiation in the tabular pipeline goes through
-`model_construct(**kwargs)` (`src/scinr/newton/tabular/neo4j_ops.py`, primary/composite/
+`model_construct(**kwargs)` (`src/scinr/newton/tabular/rows.py`, primary/composite/
 component instance creation), and `model_construct()` explicitly **bypasses Pydantic's
 entire validation machinery** — every `field_validator` and every `model_validator`, in
 `mode="before"`, `"after"`, or `"wrap"`, is skipped unconditionally. There is no later
-point in the tabular flow (Neo4j write via `graph_mapper.py`, or the `NormalizationEngine`
+point in the tabular flow (Neo4j write via `store.extraction` (`graph/neo4j/extraction.py`), or the `NormalizationEngine`
 for a plain scalar field) that re-validates the value either. A validator you add to a
 model used by the tabular pipeline will look correct, pass tests that call the model
 normally (e.g. `BatchRecord(year="2023")`), and then silently never execute in production

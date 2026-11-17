@@ -15,7 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from scinr.newton.ingest import _cascade, _gc, deletion
+from scinr.newton.graph import reset_graph_store, set_graph_store
+from scinr.newton.graph.neo4j import _shared
+from scinr.newton.graph.neo4j import deletion as neo_deletion
+from scinr.newton.graph.neo4j import driver as neo_driver
+from scinr.newton.graph.neo4j import gc as neo_gc
+from scinr.newton.graph.neo4j.store import Neo4jGraphStore
 from scinr.newton.ingest.deletion import GC_MAX_PASSES, collect_orphans, delete_document
 from scinr.newton.results import DeletedDocument, DeletionResult, OrphanCollectionResult
 from scinr.newton.storage.base import RawFileRepository
@@ -52,7 +57,7 @@ class _FakeTx:
 
     def run(self, query: str, **params) -> _FakeResult:
         self.driver.calls.append(("tx.run", query, params))
-        if query == _cascade.DOCUMENTS_DELETE_QUERY:
+        if query == neo_deletion.DOCUMENTS_DELETE_QUERY:
             return _FakeResult([{"n": len(params["keys"])}])
         if query in _ORPHAN_DELETE_QUERIES:
             # The orphans read just before are deleted (re-checked).
@@ -93,11 +98,11 @@ class _FakeSession:
             return _FakeResult(
                 [{"tenant_id": "__public__", **row} for row in self.driver.raw_file_id_rows]
             )
-        if deletion._DOCUMENT_KEYS_TAIL in query:
+        if neo_deletion._DOCUMENT_KEYS_TAIL in query:
             return _FakeResult(self.driver.document_rows_for(params))
-        if query == deletion._MARK_PENDING_QUERY:
+        if query == neo_deletion._MARK_PENDING_QUERY:
             return _FakeResult([{"n": len(params["keys"])}])
-        if query == _gc.GC_SEEDS_QUERY:
+        if query == neo_gc.GC_SEEDS_QUERY:
             return _FakeResult(self.driver.seed_rows)
         if query in _CANDIDATE_QUERIES:
             # One batch of GC candidates: the orphans among them, each with
@@ -116,9 +121,9 @@ class _FakeSession:
             if self.driver.cascade_error is not None:
                 raise self.driver.cascade_error
             return _FakeResult([{"n": self.driver.step_counts.get(_STEP_COUNTERS[query], 0)}])
-        if query == _gc.GC_ENTITY_MODEL_INSTANCE_QUERY:
+        if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY:
             return _FakeResult([{"borrados": self.driver.pop_gc_emi()}])
-        if query == _gc.GC_LABELED_ENTITY_QUERY:
+        if query == neo_gc.GC_LABELED_ENTITY_QUERY:
             return _FakeResult([{"borrados": self.driver.pop_gc_le()}])
         raise AssertionError(f"Unexpected session.run query: {query}")
 
@@ -215,19 +220,19 @@ class _FakeDriver:
 
 
 # Step query -> counter it feeds (None for the steps without one).
-_STEP_COUNTERS = {query: counter for counter, query in _cascade.subtree_steps()}
+_STEP_COUNTERS = {query: counter for counter, query in neo_deletion.subtree_steps()}
 
 # Scoped GC: each batch of candidates is read (which are orphans, and what do
 # they point at), then the orphans are deleted.
 _CANDIDATE_QUERIES = (
-    _gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
-    _gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
+    neo_gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY,
+    neo_gc.GC_LABELED_ENTITY_ORPHANS_QUERY,
 )
 _ORPHAN_DELETE_QUERIES = (
-    _gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
-    _gc.GC_LABELED_ENTITY_DELETE_QUERY,
+    neo_gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY,
+    neo_gc.GC_LABELED_ENTITY_DELETE_QUERY,
 )
-_SWEEP_QUERIES = (_gc.GC_ENTITY_MODEL_INSTANCE_QUERY, _gc.GC_LABELED_ENTITY_QUERY)
+_SWEEP_QUERIES = (neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY, neo_gc.GC_LABELED_ENTITY_QUERY)
 
 
 def _keys_calls(driver: _FakeDriver) -> list[tuple[str, dict]]:
@@ -235,7 +240,7 @@ def _keys_calls(driver: _FakeDriver) -> list[tuple[str, dict]]:
     return [
         (query, params)
         for kind, query, params in driver.calls
-        if kind == "session.run" and deletion._DOCUMENT_KEYS_TAIL in query
+        if kind == "session.run" and neo_deletion._DOCUMENT_KEYS_TAIL in query
     ]
 
 
@@ -251,7 +256,7 @@ def _document_delete_calls(driver: _FakeDriver) -> list[dict]:
     return [
         params
         for kind, query, params in driver.calls
-        if kind == "tx.run" and query == _cascade.DOCUMENTS_DELETE_QUERY
+        if kind == "tx.run" and query == neo_deletion.DOCUMENTS_DELETE_QUERY
     ]
 
 
@@ -260,11 +265,11 @@ def _cascade_indices(driver: _FakeDriver) -> list[int]:
     return [
         index
         for index, (kind, query, _) in enumerate(driver.calls)
-        if (kind == "session.run" and deletion._DOCUMENT_KEYS_TAIL in query)
-        or (kind == "session.run" and query == deletion._MARK_PENDING_QUERY)
-        or (kind == "session.run" and query == _gc.GC_SEEDS_QUERY)
+        if (kind == "session.run" and neo_deletion._DOCUMENT_KEYS_TAIL in query)
+        or (kind == "session.run" and query == neo_deletion._MARK_PENDING_QUERY)
+        or (kind == "session.run" and query == neo_gc.GC_SEEDS_QUERY)
         or (kind == "session.run" and query in _STEP_COUNTERS)
-        or (kind == "tx.run" and query == _cascade.DOCUMENTS_DELETE_QUERY)
+        or (kind == "tx.run" and query == neo_deletion.DOCUMENTS_DELETE_QUERY)
     ]
 
 
@@ -274,7 +279,7 @@ def _gc_calls(driver: _FakeDriver) -> list[tuple[str, dict]]:
     return [
         (query, params)
         for kind, query, params in driver.calls
-        if query == _gc.GC_SEEDS_QUERY
+        if query == neo_gc.GC_SEEDS_QUERY
         or query in _CANDIDATE_QUERIES
         or query in _ORPHAN_DELETE_QUERIES
         or query in _SWEEP_QUERIES
@@ -288,7 +293,7 @@ def _sweep_calls(driver: _FakeDriver) -> list[tuple[str, dict]]:
 def _candidate_calls(driver: _FakeDriver) -> list[tuple[str, list[str]]]:
     """("emi" | "le", ids) of every batch of candidates checked, in order."""
     return [
-        ("emi" if query == _gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY else "le", params["ids"])
+        ("emi" if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY else "le", params["ids"])
         for query, params in _gc_calls(driver)
         if query in _CANDIDATE_QUERIES
     ]
@@ -301,21 +306,33 @@ def _orphan_delete_calls(driver: _FakeDriver) -> list[list[str]]:
 
 @pytest.fixture(autouse=True)
 def _stub_deletion_config(monkeypatch):
-    """delete_document()'s helpers call get_config().neo4j_database to pick the
-    Neo4j database for each session. These unit tests never call configure(),
-    so stub the get_config reference imported into the deletion module with a
-    minimal fake exposing just neo4j_database.
+    """The Neo4j deletion and GC operations call get_config().neo4j_database to
+    pick the database for each session. These unit tests never call configure(),
+    so stub the get_config reference imported into those modules with a minimal
+    fake exposing just neo4j_database.
     """
     fake_cfg = SimpleNamespace(neo4j_database="neo4j")
-    monkeypatch.setattr(deletion, "get_config", lambda: fake_cfg)
+    monkeypatch.setattr(neo_deletion, "get_config", lambda: fake_cfg)
+    monkeypatch.setattr(neo_gc, "get_config", lambda: fake_cfg)
+
+
+@pytest.fixture(autouse=True)
+def _neo4j_graph_store():
+    """These tests exercise delete_document() through the real ``Neo4jGraphStore``
+    over the fake driver below (no backend is configured in unit tests)."""
+    set_graph_store(Neo4jGraphStore())
+    try:
+        yield
+    finally:
+        reset_graph_store()
 
 
 @pytest.fixture
 def patch_driver(monkeypatch):
-    """Monkeypatch scinr.newton.ingest.deletion.get_driver to return a given fake driver."""
+    """Monkeypatch the driver factory of the Neo4j store to return a given fake driver."""
 
     def _patch(fake_driver: _FakeDriver) -> _FakeDriver:
-        monkeypatch.setattr(deletion, "get_driver", lambda: fake_driver)
+        monkeypatch.setattr(neo_driver, "get_driver", lambda: fake_driver)
         return fake_driver
 
     return _patch
@@ -551,15 +568,15 @@ class TestDeleteDocumentCascade:
         expected = {"tenant_id": "__public__", "keys": [{"path": "docs/a", "version": 1}]}
         # The documents are marked before anything is deleted.
         first = fake_driver.calls[_cascade_indices(fake_driver)[1]]
-        assert first == ("session.run", deletion._MARK_PENDING_QUERY, expected)
-        assert "SET d.deletion_pending = true" in deletion._MARK_PENDING_QUERY
+        assert first == ("session.run", neo_deletion._MARK_PENDING_QUERY, expected)
+        assert "SET d.deletion_pending = true" in neo_deletion._MARK_PENDING_QUERY
         steps = _step_calls(fake_driver)
-        assert [query for query, _ in steps] == [query for _, query in _cascade.subtree_steps()]
+        assert [query for query, _ in steps] == [query for _, query in neo_deletion.subtree_steps()]
         assert all(params == expected for _, params in steps)
         assert _document_delete_calls(fake_driver) == [expected]
 
     async def test_counters_are_summed_across_document_chunks(self, patch_driver):
-        total = _cascade.DOCUMENTS_PER_QUERY + 1
+        total = _shared.DOCUMENTS_PER_QUERY + 1
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -576,7 +593,7 @@ class TestDeleteDocumentCascade:
         # Two chunks of documents: every step runs once per chunk.
         assert len(_step_calls(fake_driver)) == 2 * len(_STEP_COUNTERS)
         assert [len(params["keys"]) for _, params in _step_calls(fake_driver)[:: len(_STEP_COUNTERS)]] == [
-            _cascade.DOCUMENTS_PER_QUERY,
+            _shared.DOCUMENTS_PER_QUERY,
             1,
         ]
         assert result.structure_nodes_deleted == 4
@@ -605,7 +622,7 @@ class TestDeleteDocumentCascade:
         delete_index = next(
             i
             for i, (kind, query, _) in enumerate(fake_driver.calls)
-            if query == _cascade.DOCUMENTS_DELETE_QUERY
+            if query == neo_deletion.DOCUMENTS_DELETE_QUERY
         )
         step_indices = [i for i, (_, query, _) in enumerate(fake_driver.calls) if query in _STEP_COUNTERS]
         assert max(step_indices) < delete_index
@@ -698,7 +715,7 @@ class TestDeleteDocumentCascade:
             )
         )
 
-        with caplog.at_level("WARNING", logger="scinr.newton.ingest.deletion"):
+        with caplog.at_level("WARNING", logger="scinr.newton.graph.neo4j.deletion"):
             result = await delete_document("docs/a", tenant_id="acme")
 
         [params] = _document_delete_calls(fake_driver)
@@ -822,7 +839,7 @@ class TestDeleteDocumentCascade:
         assert _document_delete_calls(fake_driver) == [
             {"tenant_id": "__public__", "keys": [{"path": "docs/structureless", "version": 1}]}
         ]
-        assert "HAS_STRUCTURE" not in _cascade.DOCUMENTS_DELETE_QUERY
+        assert "HAS_STRUCTURE" not in neo_deletion.DOCUMENTS_DELETE_QUERY
         assert result.documents_deleted == 1
 
 
@@ -874,7 +891,7 @@ class TestDeleteDocumentGarbageCollection:
 
         result = await delete_document("docs/e", version=1, tenant_id=None)
 
-        assert [query for query, _ in _gc_calls(fake_driver)] == [_gc.GC_SEEDS_QUERY]
+        assert [query for query, _ in _gc_calls(fake_driver)] == [neo_gc.GC_SEEDS_QUERY]
         assert result.gc_entity_model_instance_deleted == 0
         assert result.gc_entity_model_instance_passes == 0
         assert result.gc_labeled_entity_deleted == 0
@@ -885,7 +902,7 @@ class TestDeleteDocumentGarbageCollection:
     ):
         """Once an ExtractionResult is gone nothing says what it pointed at:
         each chunk of documents is asked before its steps run."""
-        total = _cascade.DOCUMENTS_PER_QUERY + 1
+        total = _shared.DOCUMENTS_PER_QUERY + 1
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -899,14 +916,14 @@ class TestDeleteDocumentGarbageCollection:
         await delete_document("folder", tenant_id="acme")
 
         order = [
-            "seeds" if query == _gc.GC_SEEDS_QUERY else "step"
+            "seeds" if query == neo_gc.GC_SEEDS_QUERY else "step"
             for _, query, _ in fake_driver.calls
-            if query == _gc.GC_SEEDS_QUERY or query in _STEP_COUNTERS
+            if query == neo_gc.GC_SEEDS_QUERY or query in _STEP_COUNTERS
         ]
         steps = ["step"] * len(_STEP_COUNTERS)
         assert order == ["seeds", *steps, "seeds", *steps]
-        seed_keys = [p["keys"] for q, p in _gc_calls(fake_driver) if q == _gc.GC_SEEDS_QUERY]
-        assert [len(keys) for keys in seed_keys] == [_cascade.DOCUMENTS_PER_QUERY, 1]
+        seed_keys = [p["keys"] for q, p in _gc_calls(fake_driver) if q == neo_gc.GC_SEEDS_QUERY]
+        assert [len(keys) for keys in seed_keys] == [_shared.DOCUMENTS_PER_QUERY, 1]
 
     async def test_orphans_are_collected_before_the_documents_are_deleted(self, patch_driver):
         """The Documents carry the mark that makes an interrupted run
@@ -922,12 +939,12 @@ class TestDeleteDocumentGarbageCollection:
         await delete_document("docs/e", version=1, tenant_id=None)
 
         queries = [query for _, query, _ in fake_driver.calls]
-        assert queries.index(_gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY) < queries.index(
-            _cascade.DOCUMENTS_DELETE_QUERY
+        assert queries.index(neo_gc.GC_ENTITY_MODEL_INSTANCE_DELETE_QUERY) < queries.index(
+            neo_deletion.DOCUMENTS_DELETE_QUERY
         )
 
     async def test_candidates_go_in_bounded_transactions(self, patch_driver):
-        total = 2 * _cascade.DELETE_BATCH_ROWS + 1
+        total = 2 * _shared.DELETE_BATCH_ROWS + 1
         ids = [f"mi-{i:05d}" for i in range(total)]
         fake_driver = patch_driver(
             _FakeDriver(
@@ -939,7 +956,7 @@ class TestDeleteDocumentGarbageCollection:
 
         result = await delete_document("docs/e", version=1, tenant_id=None)
 
-        sizes = [_cascade.DELETE_BATCH_ROWS, _cascade.DELETE_BATCH_ROWS, 1]
+        sizes = [_shared.DELETE_BATCH_ROWS, _shared.DELETE_BATCH_ROWS, 1]
         assert [len(batch) for _, batch in _candidate_calls(fake_driver)] == sizes
         assert [len(batch) for batch in _orphan_delete_calls(fake_driver)] == sizes
         assert result.gc_entity_model_instance_deleted == total
@@ -950,8 +967,8 @@ class TestDeleteDocumentGarbageCollection:
     ):
         """The candidates are held in memory: past GC_FLUSH_CANDIDATES they
         are collected at the end of the chunk instead of at the end."""
-        monkeypatch.setattr(_gc, "GC_FLUSH_CANDIDATES", 1)
-        total = _cascade.DOCUMENTS_PER_QUERY + 1
+        monkeypatch.setattr(neo_gc, "GC_FLUSH_CANDIDATES", 1)
+        total = _shared.DOCUMENTS_PER_QUERY + 1
         fake_driver = patch_driver(
             _FakeDriver(
                 existence_rows=[{"version": 1}],
@@ -966,7 +983,7 @@ class TestDeleteDocumentGarbageCollection:
         await delete_document("folder", tenant_id="acme")
 
         order = [
-            "seeds" if query == _gc.GC_SEEDS_QUERY else "candidates"
+            "seeds" if query == neo_gc.GC_SEEDS_QUERY else "candidates"
             for query, _ in _gc_calls(fake_driver)
         ]
         assert order == ["seeds", "candidates", "seeds", "candidates"]
@@ -1022,10 +1039,10 @@ class TestDeleteDocumentGarbageCollection:
             assert "DETACH DELETE" not in read
             assert "[(mi)-->(c) WHERE" in read and "labels(c)" in read
             assert delete.rstrip().endswith("DETACH DELETE mi\nRETURN count(mi) AS n")
-        assert "[*1.." in _gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY
-        assert "NOT EXISTS { (mi)<--() }" in _gc.GC_LABELED_ENTITY_ORPHANS_QUERY
-        assert "MATCH (er)-->(c)" in _gc.GC_SEEDS_QUERY
-        assert "labels(c)" in _gc.GC_SEEDS_QUERY
+        assert "[*1.." in neo_gc.GC_ENTITY_MODEL_INSTANCE_ORPHANS_QUERY
+        assert "NOT EXISTS { (mi)<--() }" in neo_gc.GC_LABELED_ENTITY_ORPHANS_QUERY
+        assert "MATCH (er)-->(c)" in neo_gc.GC_SEEDS_QUERY
+        assert "labels(c)" in neo_gc.GC_SEEDS_QUERY
 
 
 class TestDeleteDocumentResumed:
@@ -1048,10 +1065,10 @@ class TestDeleteDocumentResumed:
             result = await delete_document("docs/e", version=1, tenant_id="acme")
 
         assert [query for query, _ in _gc_calls(fake_driver)] == [
-            _gc.GC_ENTITY_MODEL_INSTANCE_QUERY,
-            _gc.GC_ENTITY_MODEL_INSTANCE_QUERY,
-            _gc.GC_LABELED_ENTITY_QUERY,
-            _gc.GC_LABELED_ENTITY_QUERY,
+            neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY,
+            neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY,
+            neo_gc.GC_LABELED_ENTITY_QUERY,
+            neo_gc.GC_LABELED_ENTITY_QUERY,
         ]
         assert all(params == {"tenant_id": "acme"} for _, params in _sweep_calls(fake_driver))
         assert result.gc_entity_model_instance_deleted == 5
@@ -1065,14 +1082,14 @@ class TestDeleteDocumentResumed:
         await delete_document("docs/e", version=1, tenant_id=None)
 
         queries = [query for _, query, _ in fake_driver.calls]
-        assert queries.index(_gc.GC_LABELED_ENTITY_QUERY) < queries.index(
-            _cascade.DOCUMENTS_DELETE_QUERY
+        assert queries.index(neo_gc.GC_LABELED_ENTITY_QUERY) < queries.index(
+            neo_deletion.DOCUMENTS_DELETE_QUERY
         )
 
     def test_the_mark_of_an_interrupted_freeze_counts_too(self):
         assert (
             "coalesce(doc.deletion_pending, doc.frozen_cleanup_pending, false) AS interrupted"
-            in deletion._DOCUMENT_KEYS_TAIL
+            in neo_deletion._DOCUMENT_KEYS_TAIL
         )
 
     async def test_gc_pass_stops_at_first_zero(self, patch_driver):
@@ -1091,7 +1108,7 @@ class TestDeleteDocumentResumed:
         assert result.gc_entity_model_instance_passes == 3
 
         emi_run_count = sum(
-            1 for query, _ in _sweep_calls(fake_driver) if query == _gc.GC_ENTITY_MODEL_INSTANCE_QUERY
+            1 for query, _ in _sweep_calls(fake_driver) if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY
         )
         assert emi_run_count == 3
 
@@ -1111,7 +1128,7 @@ class TestDeleteDocumentResumed:
         assert result.gc_entity_model_instance_deleted == GC_MAX_PASSES
 
         emi_run_count = sum(
-            1 for query, _ in _sweep_calls(fake_driver) if query == _gc.GC_ENTITY_MODEL_INSTANCE_QUERY
+            1 for query, _ in _sweep_calls(fake_driver) if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY
         )
         assert emi_run_count == GC_MAX_PASSES
 
@@ -1137,7 +1154,7 @@ class TestDeleteDocumentResumed:
         # Order: all Entity|ModelInstance passes must precede all
         # LabeledEntity passes.
         labels = [
-            "emi" if query == _gc.GC_ENTITY_MODEL_INSTANCE_QUERY else "le"
+            "emi" if query == neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY else "le"
             for query, _ in _sweep_calls(fake_driver)
         ]
         assert labels == ["emi", "emi", "emi", "le", "le"]
@@ -1175,11 +1192,11 @@ class TestCollectOrphans:
             gc_labeled_entity_passes=3,
         )
         assert [(kind, query) for kind, query, _ in fake_driver.calls] == [
-            ("session.run", _gc.GC_ENTITY_MODEL_INSTANCE_QUERY),
-            ("session.run", _gc.GC_ENTITY_MODEL_INSTANCE_QUERY),
-            ("session.run", _gc.GC_LABELED_ENTITY_QUERY),
-            ("session.run", _gc.GC_LABELED_ENTITY_QUERY),
-            ("session.run", _gc.GC_LABELED_ENTITY_QUERY),
+            ("session.run", neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY),
+            ("session.run", neo_gc.GC_ENTITY_MODEL_INSTANCE_QUERY),
+            ("session.run", neo_gc.GC_LABELED_ENTITY_QUERY),
+            ("session.run", neo_gc.GC_LABELED_ENTITY_QUERY),
+            ("session.run", neo_gc.GC_LABELED_ENTITY_QUERY),
         ]
         assert all(params == {"tenant_id": "acme"} for _, _, params in fake_driver.calls)
         assert fake_driver.closed is True
@@ -1793,47 +1810,3 @@ class TestDeleteDocumentTenantScope:
         with pytest.raises(ValueError, match="empty list"):
             await delete_document(tenant_id="acme", **kw)
         assert fake_driver.calls == []
-
-
-class TestBuildDocMatch:
-    """Unit tests for deletion._build_doc_match() — the dynamic WHERE builder."""
-
-    def test_only_supplied_filters_become_conditions(self):
-        match, params = deletion._build_doc_match(
-            {"path": None, "version": None, "tenant_id": "__public__",
-             "created_by_user_id": None, "job_id": ["j1"]}
-        )
-        assert params == {"tenant_id": "__public__", "job_id": ["j1"]}
-        assert (
-            match.strip()
-            == "MATCH (d:Document)\nWHERE d.tenant_id = $tenant_id AND d.job_id IN $job_id"
-        )
-
-    def test_multiple_filters_are_anded_in_fixed_order(self):
-        match, params = deletion._build_doc_match(
-            {"path": "p", "version": 2, "tenant_id": "t",
-             "created_by_user_id": ["u", "v"], "job_id": None}
-        )
-        assert params == {"tenant_id": "t", "path": "p", "version": 2, "created_by_user_id": ["u", "v"]}
-        assert (
-            "WHERE d.tenant_id = $tenant_id AND d.path = $path AND d.version = $version"
-            " AND d.created_by_user_id IN $created_by_user_id"
-            in match
-        )
-
-    def test_tenant_is_mandatory(self):
-        with pytest.raises(ValueError):
-            deletion._build_doc_match({"path": "p", "tenant_id": None})
-        with pytest.raises(ValueError):
-            deletion._build_doc_match({"path": "p"})
-
-    def test_no_is_null_disjunction_is_ever_emitted(self):
-        match, _ = deletion._build_doc_match({"path": "p", "tenant_id": "t"})
-        assert "IS NULL" not in match
-        assert " OR " not in match
-
-    def test_falsy_but_non_none_values_are_kept(self):
-        match, params = deletion._build_doc_match({"path": "", "version": 0, "tenant_id": "t"})
-        assert params == {"tenant_id": "t", "path": "", "version": 0}
-        assert "d.path = $path" in match
-        assert "d.version = $version" in match

@@ -11,9 +11,16 @@ from scinr.newton.config import (
 from scinr.newton.exceptions import (
     ConfigurationError,
     ConversionError,
+    DocumentVersionConflict,
     ExtractionError,
     FreezeError,
+    GraphAuthenticationError,
+    GraphConfigurationError,
     GraphConnectionError,
+    GraphConstraintError,
+    GraphError,
+    GraphQueryError,
+    GraphResourceError,
     ImageStorageError,
     IngestionError,
     ModelError,
@@ -21,6 +28,7 @@ from scinr.newton.exceptions import (
     PreconditionError,
     ScinrError,
     StorageError,
+    TransientGraphError,
     UnsupportedOperationError,
 )
 from scinr.newton.ingest.deletion import collect_orphans, delete_document
@@ -64,7 +72,7 @@ from scinr.newton.stages import (
 )
 from scinr.newton.tabular.normalization import NormalizationEngine
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     # Configuration
@@ -90,6 +98,14 @@ __all__ = [
     "GraphConnectionError",
     "UnsupportedOperationError",
     "FreezeError",
+    "GraphConfigurationError",
+    "GraphError",
+    "GraphAuthenticationError",
+    "TransientGraphError",
+    "GraphResourceError",
+    "GraphConstraintError",
+    "DocumentVersionConflict",
+    "GraphQueryError",
     # Result dataclasses
     "DocumentResult",
     "StageResult",

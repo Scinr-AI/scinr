@@ -1,6 +1,6 @@
 # scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.5.0)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.6.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
@@ -60,7 +60,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs
 - **Optional storage layer** — MongoDB backend for raw file + page storage; pipeline runs without it
-- **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + `neo4j_retry` (deadlock-safe writes)
+- **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + Neo4j retry (`graph/neo4j/retry.py`, deadlock-safe writes)
 
 ---
 
@@ -364,7 +364,8 @@ scinr/
             ├── stages/             ← Stage runner functions
             ├── converters/         ← Stage 0: file → paged JSON
             ├── extraction/         ← Stage 1: paged JSON → Document tree
-            ├── ingest/             ← Stage 2: Document tree → Neo4j; delete / freeze / restore
+            ├── graph/              ← GraphStore: every write to the graph (Neo4j implementation in graph/neo4j/)
+            ├── ingest/             ← Stage 2: Document tree → graph; delete / freeze / restore
             ├── annotation/         ← Stage 3: LangGraph annotation agent
             ├── entity_extraction/  ← Stage 4: LangGraph entity extraction
             ├── tabular/            ← Tabular bypass pipeline

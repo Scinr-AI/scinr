@@ -36,7 +36,7 @@ class Neo4jGraphNavigator(
     Construct via :func:`scinr.newton.navigation.get_graph_navigator` /
     :func:`scinr.newton.navigation.graph_navigator` rather than directly. When
     ``driver`` is not supplied it reuses the shared async driver from
-    ``ingest.config.get_async_driver()`` and never closes it; pass an explicit
+    ``graph.neo4j.driver.get_async_driver()`` and never closes it; pass an explicit
     ``driver`` to own the connection lifecycle.
 
     Args:

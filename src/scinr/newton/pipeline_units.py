@@ -372,20 +372,19 @@ async def _discover_pre_ingested_units(
 
     Uses ``scinr.newton.utils.document_resolver.resolve_leaf_documents()``
     (a sync Neo4j query) run off the event loop via ``asyncio.to_thread()``.
-    A single sync ``Driver`` is opened for the whole call and closed at the
-    end (never left open). Leaves are deduplicated by path preserving
+    One synchronous graph connection (``store.sync_scope()``) is shared by the
+    whole call and closed at the end (never left open). Leaves are deduplicated by path preserving
     first-occurrence order across all input names.
     """
-    from scinr.newton.ingest.config import get_driver
+    from scinr.newton.graph import get_graph_store
     from scinr.newton.utils.document_resolver import resolve_leaf_documents
 
-    driver = get_driver()
-    try:
+    with get_graph_store().sync_scope():
         seen: set[str] = set()
         units: list[DocumentUnit] = []
         for name in document_names:
             leaves = await asyncio.to_thread(
-                lambda n=name: resolve_leaf_documents(driver, tenant_id=tenant_id, document_name=n)
+                lambda n=name: resolve_leaf_documents(tenant_id=tenant_id, document_name=n)
             )
             for leaf in leaves:
                 if leaf.path in seen:
@@ -401,8 +400,6 @@ async def _discover_pre_ingested_units(
                     )
                 )
         return units
-    finally:
-        driver.close()
 
 
 def _discover_document_names_dir_units(document_names_dir: str) -> list[DocumentUnit]:
@@ -413,7 +410,7 @@ def _discover_document_names_dir_units(document_names_dir: str) -> list[Document
     guard as the former ``run_pipeline()`` block this replaces. The unit's
     ``doc_path`` is the path ingestion stored the document under
     (``doc_path`` or, when absent, ``document_name`` — as in
-    ``ingest.nodes.insert_document_graph``); units are deduplicated by it. Does **not**
+    ``graph.neo4j.documents.insert_document_graph``); units are deduplicated by it. Does **not**
     touch Neo4j (see module docstring "Known design discrepancy" note):
     unlike ``document_names``, documents returned here are NOT confirmed.
     """
@@ -546,7 +543,7 @@ async def _discover_units(
 def build_all_paths_for_versioning(units: Sequence[DocumentUnit]) -> list[str]:
     """Flatten discovered *units* into the ``all_paths`` list (leaves +
     ancestor folders) expected by
-    ``scinr.newton.ingest.loader.resolve_batch_version_sync()``.
+    ``GraphStore.documents.resolve_batch_version()``.
 
     Delegates to ``ingest.loader._extract_all_paths()`` to avoid duplicating
     its ancestor-folder-expansion logic.

@@ -10,8 +10,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from scinr.newton.ingest.config import get_async_driver, get_driver
-from scinr.newton.ingest.schema import setup_schema
+from scinr.newton.graph import get_graph_store
 from scinr.newton.progress import _NULL_EMITTER, _ProgressEmitter
 from scinr.newton.results import DocumentResult, StageResult
 from scinr.newton.tabular.agent import decide_content_type
@@ -97,7 +96,7 @@ async def run_tabular_pipeline(
     StageResult
         Stage result with per-document ingestion counts and errors.
     """
-    from scinr.newton.annotation.neo4j_ops import (
+    from scinr.newton.annotation.catalog import (
         ensure_catalog_models_once,
         ensure_theme_structure_once,
     )
@@ -142,38 +141,31 @@ async def run_tabular_pipeline(
     file_infos = [_file_to_doc_path(f) for f in tabular_files]
     all_doc_paths = list({dp for _, dp in file_infos})
 
-    driver = get_driver()
+    store = get_graph_store()
     doc_results: list[DocumentResult] = []
-    try:
-        setup_schema(driver)
+    with store.sync_scope():
+        store.schema.setup()
 
-        # Fix: ensure_catalog_models and ensure_theme_structure are async and need AsyncDriver
-        logger.info("Getting async neo4j driver")
-        
-        async_driver = get_async_driver()
-        
         logger.info("Ensuring catalog models are loaded")
-        
-        await ensure_catalog_models_once(async_driver)
-        
+
+        await ensure_catalog_models_once(theme_registry)
+
         logger.info("Ensuring themes are loaded")
-        
-    
-        await ensure_theme_structure_once(async_driver, theme_registry)
+
+        await ensure_theme_structure_once(theme_registry)
         logger.info("Setup of theme and catalog complete")
         if batch_version is not None:
             resolved_version = batch_version
         else:
-            from scinr.newton.ingest.loader import _extract_all_paths, resolve_batch_version_sync
+            from scinr.newton.ingest.loader import _extract_all_paths
 
             logger.info("Verifying previous documents")
             # Versions are numbered per tenant (tenant_id None -> public scope).
             resolved_version = await asyncio.to_thread(
-                resolve_batch_version_sync,
-                driver,
+                store.documents.resolve_batch_version,
                 _extract_all_paths(all_doc_paths),
-                update_mode,
                 [tenant_id],
+                update_mode,
             )
 
         logger.info("run_tabular_pipeline: batch version=%d (update_mode=%s)", resolved_version, update_mode)
@@ -253,44 +245,39 @@ async def run_tabular_pipeline(
                             document_name=doc_name, nodes_processed=0, nodes_failed=0
                         )
 
-                    _driver = get_driver()
-                    try:
-                        raw_file_id = None
-                        if _raw_file_repo is not None:
-                            try:
-                                _content_type = decide_content_type(f.suffix.lower())
-                                folder_path_str = str(f.parent.relative_to(input_path)) if f.parent != input_path else ""
-                                raw_file_id = await _raw_file_repo.store_file(
-                                    path=f,
-                                    filename=f.name,
-                                    content_type=_content_type,
-                                    folder_path=folder_path_str,
-                                    tenant_id=tenant_id,
-                                    created_by_user_id=created_by_user_id,
-                                    job_id=job_id,
-                                )
-                            except Exception as store_exc:
-                                logger.warning(
-                                    "run_tabular_pipeline: failed to store raw file '%s': %s",
-                                    f.name, store_exc,
-                                )
+                    raw_file_id = None
+                    if _raw_file_repo is not None:
+                        try:
+                            _content_type = decide_content_type(f.suffix.lower())
+                            folder_path_str = str(f.parent.relative_to(input_path)) if f.parent != input_path else ""
+                            raw_file_id = await _raw_file_repo.store_file(
+                                path=f,
+                                filename=f.name,
+                                content_type=_content_type,
+                                folder_path=folder_path_str,
+                                tenant_id=tenant_id,
+                                created_by_user_id=created_by_user_id,
+                                job_id=job_id,
+                            )
+                        except Exception as store_exc:
+                            logger.warning(
+                                "run_tabular_pipeline: failed to store raw file '%s': %s",
+                                f.name, store_exc,
+                            )
 
-                        final_state = await run_tabular_agent(
-                            file_path=f,
-                            document_name=doc_name,
-                            doc_path=doc_path,
-                            driver=_driver,
-                            resolved_version=resolved_version,
-                            update_mode=update_mode,
-                            raw_file_id=raw_file_id,
-                            tenant_id=tenant_id,
-                            created_by_user_id=created_by_user_id,
-                            job_id=job_id,
-                            delimiter=tabular_delimiter,
-                            scans=scans,
-                        )
-                    finally:
-                        _driver.close()
+                    final_state = await run_tabular_agent(
+                        file_path=f,
+                        document_name=doc_name,
+                        doc_path=doc_path,
+                        resolved_version=resolved_version,
+                        update_mode=update_mode,
+                        raw_file_id=raw_file_id,
+                        tenant_id=tenant_id,
+                        created_by_user_id=created_by_user_id,
+                        job_id=job_id,
+                        delimiter=tabular_delimiter,
+                        scans=scans,
+                    )
                 except Exception as exc:
                     logger.exception("run_tabular_pipeline: failed to process '%s': %s", f.name, exc)
                     return _fail(str(exc))
@@ -350,8 +337,6 @@ async def run_tabular_pipeline(
 
         written = sum(1 for r in doc_results if r.nodes_processed > 0)
         logger.info("run_tabular_pipeline: complete. %d/%d file(s) written.", written, len(tabular_files))
-    finally:
-        driver.close()
 
     total_failed = sum(r.nodes_failed for r in doc_results)
     duration = time.monotonic() - t0

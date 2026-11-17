@@ -10,7 +10,6 @@ is injected as the human turn at call time.
 
 from scinr.newton.prompts.system_prompt import _EXTRACTION_PROMPT_PREFIX  # shared prefix
 
-
 _EXTRACTION_PROMPT_SUFFIX_GENERIC = """
 ## Extraction Protocol
 

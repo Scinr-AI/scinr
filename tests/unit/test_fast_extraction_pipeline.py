@@ -35,7 +35,6 @@ def _base_kwargs(**overrides: object) -> dict:
     kwargs = dict(
         effective_stages=["extraction"],
         document_semaphore=asyncio.Semaphore(2),
-        sync_driver=None,
         shared_ingest_version=None,
         converter_output_dir=None,
         extraction_output_dir=None,

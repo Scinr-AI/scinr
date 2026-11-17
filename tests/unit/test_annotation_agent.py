@@ -1,7 +1,7 @@
 """
 tests/unit/test_annotation_agent.py — Regression tests for the event-loop-
 blocking fix in scinr.newton.annotation.agent /
-scinr.newton.annotation.neo4j_ops, and for
+scinr.newton.graph.neo4j.annotation, and for
 scinr.newton.utils.document_resolver's new async leaf-resolution helper.
 
 Mirrors tests/unit/test_entity_extraction_agent.py's mocking strategy and
@@ -25,43 +25,8 @@ from scinr.newton.annotation.agent import (
 from scinr.newton.utils.document_resolver import LeafDocument
 
 # ---------------------------------------------------------------------------
-# Helpers — fake async Neo4j driver/session (async context manager protocol)
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeAsyncResult:
-    """Mimics neo4j.AsyncResult for the precondition-check query."""
-
-    def __init__(self, record: dict) -> None:
-        self._record = record
-
-    async def single(self):
-        return self._record
-
-
-class _FakeAsyncSession:
-    """Mimics neo4j.AsyncSession — answers every `.run(...)` with `n=1`,
-    enough for `run_annotation_agent()`'s single precondition check
-    (document exists) to pass regardless of the exact query text.
-    """
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc_info):
-        return False
-
-    async def run(self, query, **kwargs):
-        return _FakeAsyncResult({"n": 1})
-
-
-class _FakeAsyncDriver:
-    """Mimics neo4j.AsyncDriver — `.session()` is a plain (non-async) method
-    that returns a fresh async-context-manager session each call.
-    """
-
-    def session(self, **kwargs):
-        return _FakeAsyncSession()
 
 
 class _ConcurrencyTracker:
@@ -90,7 +55,7 @@ class _ConcurrencyTracker:
 
 
 class TestRunAnnotationParallelConcurrency:
-    async def test_two_concurrent_calls_overlap_during_fetch(self):
+    async def test_two_concurrent_calls_overlap_during_fetch(self, fake_graph_store):
         """Two concurrent `_run_annotation_parallel()` calls must overlap
         their `fetch_nodes_to_annotate()` awaits — proving it no longer
         blocks the event loop synchronously.
@@ -104,30 +69,21 @@ class TestRunAnnotationParallelConcurrency:
         """
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_fetch(driver, *, tenant_id, doc_path, only_unannotated=False):
+        async def _tracking_fetch(*, tenant_id, doc_path, only_unannotated=False):
             await tracker.track()
             return []
 
+        fake_graph_store.annotation.fetch_nodes_to_annotate.side_effect = _tracking_fetch
+        fake_graph_store.annotation.fetch_document_context_instructions.return_value = ""
+
         with (
             patch(
-                "scinr.newton.annotation.neo4j_ops.ensure_catalog_models_once",
+                "scinr.newton.annotation.catalog.ensure_catalog_models_once",
                 AsyncMock(),
             ),
             patch(
-                "scinr.newton.annotation.neo4j_ops.ensure_theme_structure_once",
+                "scinr.newton.annotation.catalog.ensure_theme_structure_once",
                 AsyncMock(),
-            ),
-            patch(
-                "scinr.newton.annotation.neo4j_ops.fetch_nodes_to_annotate",
-                AsyncMock(side_effect=_tracking_fetch),
-            ),
-            patch(
-                "scinr.newton.annotation.neo4j_ops.fetch_document_context_instructions",
-                AsyncMock(return_value=""),
-            ),
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=MagicMock(name="async_driver")),
             ),
             patch(
                 "scinr.newton.utils.theme_registry.get_theme_registry",
@@ -152,7 +108,7 @@ class TestRunAnnotationParallelConcurrency:
 
 
 class TestRunAnnotationAgentPreconditionConcurrency:
-    async def test_two_concurrent_calls_overlap_during_leaf_resolution(self):
+    async def test_two_concurrent_calls_overlap_during_leaf_resolution(self, fake_graph_store):
         """Two concurrent `run_annotation_agent()` calls must overlap during
         `resolve_leaf_documents_async()` — proving the precondition-
         check / leaf-resolution plumbing (async driver session,
@@ -164,19 +120,14 @@ class TestRunAnnotationAgentPreconditionConcurrency:
         code, not the downstream per-node annotation logic (already covered
         by `TestRunAnnotationParallelConcurrency` above).
         """
+        fake_graph_store.documents.count_latest_documents.return_value = 1
         tracker = _ConcurrencyTracker()
 
-        async def _tracking_resolve(driver, *, tenant_id, doc_path=None, document_name=None):
+        async def _tracking_resolve(*, tenant_id, doc_path=None, document_name=None):
             await tracker.track()
             return [LeafDocument(document_name, document_name)]
 
-        fake_driver = _FakeAsyncDriver()
-
         with (
-            patch(
-                "scinr.newton.ingest.config.get_async_driver",
-                MagicMock(return_value=fake_driver),
-            ),
             patch(
                 "scinr.newton.utils.document_resolver.resolve_leaf_documents_async",
                 AsyncMock(side_effect=_tracking_resolve),
@@ -202,6 +153,22 @@ class TestRunAnnotationAgentPreconditionConcurrency:
             {"document_name": "docB", "nodes_to_annotate": [], "errors": []},
         ]
         assert tracker.max_in_flight == 2
+
+
+class TestRunAnnotationAgentPrecondition:
+    async def test_missing_document_raises_precondition_error(self, fake_graph_store):
+        from scinr.newton.exceptions import PreconditionError
+        from scinr.newton.graph.types import DocumentSelector
+
+        fake_graph_store.documents.count_latest_documents.return_value = 0
+
+        with pytest.raises(PreconditionError, match="not found in Neo4j"):
+            await run_annotation_agent("docA", tenant_id="acme", doc_path="F/docA")
+
+        fake_graph_store.documents.count_latest_documents.assert_awaited_once_with(
+            DocumentSelector(tenant_id="acme", path="F/docA", document_name="docA", latest=True)
+        )
+        fake_graph_store.documents.resolve_leaf_documents_async.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

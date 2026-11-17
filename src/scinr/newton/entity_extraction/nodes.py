@@ -16,13 +16,12 @@ from scinr.newton.entity_extraction.graph_mapper import (
     write_triple_subgraph,
 )
 from scinr.newton.entity_extraction.model_resolver import resolve_model_class
-from scinr.newton.entity_extraction.neo4j_ops import mark_info_units_extracted_async
 from scinr.newton.entity_extraction.prompts import (
     build_extraction_human_message,
     build_extraction_system_prompt,
 )
 from scinr.newton.entity_extraction.schema_composer import compose_extraction_schema
-from scinr.newton.ingest.config import get_async_driver
+from scinr.newton.graph import get_graph_store
 from scinr.newton.utils.llm_repair import extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
 from scinr.newton.utils.neo4j_concurrency import get_neo4j_semaphore
@@ -170,20 +169,17 @@ async def _extract_entities(
 # ── Private helper: write entities ───────────────────────────────────────────
 
 async def _write_entities(
-    driver,
     target: dict,
     extraction: Any,
     document_name: str,
 ) -> str | None:
     """Write the extracted entities subgraph to Neo4j.
 
-    Dispatches to write_triple_subgraph when model_class is None (Triple fallback),
-    or write_extraction_subgraph for all domain-specific extractions.
+    Dispatches to ``graph_mapper.write_triple_subgraph`` when model_class is None (Triple fallback),
+    or ``graph_mapper.write_extraction_subgraph`` for all domain-specific extractions.
 
     Parameters
     ----------
-    driver:
-        Async Neo4j driver instance.
     target:
         ExtractionTarget dict with keys: node_full_id, model_class,
         complementary_models.
@@ -205,7 +201,6 @@ async def _write_entities(
         if primary_model_class is None:
             extraction_uid = _make_uid("extraction_result", node_full_id, "triple")
             await write_triple_subgraph(
-                driver=driver,
                 node_full_id=node_full_id,
                 triple_instance=extraction,
                 document_name=document_name,
@@ -224,7 +219,6 @@ async def _write_entities(
                 if c.get("model_class")
             ]
             await write_extraction_subgraph(
-                driver=driver,
                 node_full_id=node_full_id,
                 composite_instance=extraction,
                 primary_model_class=primary_model_class,
@@ -246,13 +240,11 @@ async def _write_entities(
 
 # ── Private helper: mark extracted ───────────────────────────────────────────
 
-async def _mark_extracted(driver, node_full_id: str) -> str | None:
+async def _mark_extracted(node_full_id: str) -> str | None:
     """Mark all InfoUnits of the node as extracted.
 
     Parameters
     ----------
-    driver:
-        Async Neo4j driver instance.
     node_full_id:
         Full StructureNode.id as stored in Neo4j.
 
@@ -262,7 +254,7 @@ async def _mark_extracted(driver, node_full_id: str) -> str | None:
         Error message on failure, None on success.
     """
     try:
-        await mark_info_units_extracted_async(driver, node_full_id)
+        await get_graph_store().extraction.mark_info_units_extracted(node_full_id)
         return None
     except Exception as exc:
         logger.error(
@@ -295,7 +287,7 @@ async def process_single_extraction_target(
     Parameters
     ----------
     target:
-        ExtractionTarget dict as returned by fetch_extraction_targets.
+        ExtractionTarget dict as returned by ``store.extraction.fetch_targets``.
     document_name:
         Neo4j Document.name — passed through to write functions.
     bedrock_semaphore:
@@ -307,7 +299,6 @@ async def process_single_extraction_target(
         ``{"node_full_id": str, "extraction": Any | None, "error": str | None}``
     """
     node_full_id = target["node_full_id"]
-    driver = get_async_driver()
     neo4j_semaphore = get_neo4j_semaphore()
 
     # The LLM slot is taken FIRST so that the composed schema, prompt and messages
@@ -330,10 +321,10 @@ async def process_single_extraction_target(
 
     # ── Write entities (bounded by Neo4j semaphore) ───────────────────────────
     async with neo4j_semaphore:
-        write_error = await _write_entities(driver, target, extraction, document_name)
+        write_error = await _write_entities(target, extraction, document_name)
     # ── Mark extracted (bounded by Neo4j semaphore) ───────────────────────────
     async with neo4j_semaphore:
-        mark_error = await _mark_extracted(driver, node_full_id)
+        mark_error = await _mark_extracted(node_full_id)
 
     error = write_error or mark_error
     return {"node_full_id": node_full_id, "extraction": extraction, "error": error}

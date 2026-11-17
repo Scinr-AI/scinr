@@ -31,17 +31,15 @@ async def load_sheets(state: TabularState) -> dict:
     Also ensures catalog models and theme structure exist in Neo4j (idempotent),
     mirroring the annotation pipeline's load_nodes() behaviour.
     """
-    from scinr.newton.annotation.neo4j_ops import (
+    from scinr.newton.annotation.catalog import (
         ensure_catalog_models_once,
         ensure_theme_structure_once,
     )
-    from scinr.newton.ingest.config import get_async_driver
     from scinr.newton.utils.theme_registry import get_theme_registry
     theme_registry = get_theme_registry()
 
-    driver = get_async_driver()           # singleton — NO cerrar
-    await ensure_catalog_models_once(driver)
-    await ensure_theme_structure_once(driver, theme_registry)
+    await ensure_catalog_models_once(theme_registry)
+    await ensure_theme_structure_once(theme_registry)
 
     file_path = Path(state["file_path"])
     scans = state.get("prefetched_scans")
@@ -423,9 +421,8 @@ async def map_columns(state: TabularState) -> dict:
 
 
 async def write_tabular(state: TabularState) -> dict:
-    """Write Table + Row subgraph to Neo4j for the current sheet. Advances sheet index."""
-    from scinr.newton.ingest.config import get_async_driver  # ← async driver singleton
-    from scinr.newton.tabular.neo4j_ops import write_tabular_subgraph
+    """Write Table + Row subgraph to the graph for the current sheet. Advances sheet index."""
+    from scinr.newton.tabular.graph_writer import write_tabular_subgraph
 
     sheet = state["current_sheet"]
     decision = state["current_decision"]
@@ -440,7 +437,6 @@ async def write_tabular(state: TabularState) -> dict:
         )
         return {"current_sheet_index": new_index}
 
-    driver = get_async_driver()                         # ← singleton, NO cerrar
     sheet_path = Path(sheet["file_path"])
     sheet_name = sheet["sheet_name"]
 
@@ -451,8 +447,7 @@ async def write_tabular(state: TabularState) -> dict:
     sheet_page_ids = state.get("sheet_page_ids", [])
     sheet_page_id = sheet_page_ids[idx] if idx < len(sheet_page_ids) else ""
     try:
-        table_id = await write_tabular_subgraph(        # ← await
-            driver=driver,
+        table_id = await write_tabular_subgraph(
             doc_path=state["doc_path"],
             document_name=state["document_name"],
             resolved_version=state["resolved_version"],
@@ -479,7 +474,6 @@ async def write_tabular(state: TabularState) -> dict:
         errors = list(state.get("errors", []))
         errors.append(f"write_tabular failed for sheet {idx}: {exc}")
         return {"current_sheet_index": new_index, "errors": errors}
-    # ← NO finally driver.close() — es singleton
 
 
 # ── Conditional edge router ───────────────────────────────────────────────────

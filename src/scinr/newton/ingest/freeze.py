@@ -38,31 +38,25 @@ import re
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from scinr.newton.config import get_config
 from scinr.newton.exceptions import FreezeError
-from scinr.newton.ingest._cascade import (
-    DELETE_BATCH_ROWS,
-    DOCS_BY_KEY,
-    SUBTREE_COUNTER_FIELDS,
-    run_count_query,
-    run_subtree_steps,
-    subtree_steps,
+from scinr.newton.graph import get_graph_store
+from scinr.newton.graph.types import (
+    DocumentInfo,
+    DocumentSelector,
+    ExportReader,
+    KeepFlags,
 )
-from scinr.newton.ingest._gc import GC_REACHABILITY_MAX_HOPS, OrphanCollector, sweep_tenant
 from scinr.newton.ingest._json_stream import (
     DictSnapshotWriter,
     JsonSnapshotWriter,
     SnapshotWriter,
 )
-from scinr.newton.ingest.config import get_driver
-from scinr.newton.ingest.deletion import _as_list, _build_doc_match
+from scinr.newton.ingest.deletion import _as_list
 from scinr.newton.results import FreezeResult
-from scinr.newton.utils.neo4j_retry import with_neo4j_retry_sync
 from scinr.newton.utils.tenancy import tenant_key
 
 logger = logging.getLogger(__name__)
@@ -99,7 +93,7 @@ UID_LABELS = (
     "LabeledEntity",
 )
 
-# Leading digits are allowed: the name is always backquoted, and the extraction
+# Leading digits are allowed: the backend always quotes the name, and the extraction
 # stage writes model-defined rel types such as `5_YEAR_...` that way.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -129,11 +123,14 @@ def is_catalog(primary_label: str) -> bool:
     return primary_label in CATALOG_KEY_FIELDS
 
 
-def cypher_identifier(name: str) -> str:
-    """Backquote a label / relationship type after validating it."""
+def validate_identifier(name: str) -> str:
+    """Return *name* if it is a valid label / relationship type, else raise :class:`FreezeError`.
+
+    The backend decides how to quote it (``graph/neo4j/restore.py`` backquotes).
+    """
     if not isinstance(name, str) or not _IDENTIFIER_RE.match(name):
         raise FreezeError(f"Invalid label or relationship type in snapshot: {name!r}.")
-    return f"`{name}`"
+    return name
 
 
 def _ref(primary_label: str, key: dict[str, Any]) -> str:
@@ -158,7 +155,7 @@ def selector_filters(
     created_by_user_id: str | Sequence[str] | None,
     job_id: str | Sequence[str] | None,
 ) -> dict[str, Any]:
-    """Validate the selector arguments and return the ``_build_doc_match`` filters.
+    """Validate the selector arguments and return the ``DocumentSelector`` filters.
 
     Same rules as ``delete_document()``: exactly one of *path* / *job_id*
     (``ValueError``), empty lists rejected, *tenant_id* converted to the
@@ -182,83 +179,27 @@ def selector_repr(filters: dict[str, Any]) -> str:
     return ", ".join(f"{k}={v!r}" for k, v in filters.items() if v is not None)
 
 
-# Matched Documents (``is_seed``) plus their IS_COMPOSED_OF* descendants,
-# each once. Appended to the _build_doc_match() prefix (tenant always set).
-_DOCUMENT_SET_TAIL = """
-OPTIONAL MATCH (d)-[:IS_COMPOSED_OF*]->(cd:Document)
-WITH collect(DISTINCT d) AS seeds, collect(DISTINCT cd) AS descendants
-UNWIND seeds + descendants AS doc
-WITH DISTINCT doc, seeds
-RETURN properties(doc) AS properties, doc IN seeds AS is_seed
-ORDER BY doc.path, doc.version
-"""
+_FREEZE_COUNTER_FIELDS = (
+    "structure_nodes_deleted",
+    "structure_nodes_kept",
+    "info_units_deleted",
+    "model_decisions_deleted",
+    "model_decisions_kept",
+    "proposed_models_deleted",
+    "proposed_fields_deleted",
+    "extraction_results_deleted",
+    "extraction_results_kept",
+)
 
 
-# (keep_structure_nodes, keep_annotations, keep_extraction_results)
-KeepFlags = tuple[bool, bool, bool]
-
-
-@dataclass(frozen=True)
-class DocumentInfo:
-    """One :Document of the resolved set (matched or descendant)."""
-
-    path: str
-    version: int
-    tenant_id: str
-    is_seed: bool
-    properties: dict[str, Any]
-
-    @property
-    def frozen(self) -> bool:
-        return bool(self.properties.get("frozen"))
-
-    @property
-    def frozen_blob_id(self) -> str | None:
-        return self.properties.get("frozen_blob_id")
-
-    @property
-    def cleanup_pending(self) -> bool:
-        """Marked frozen by a freeze that did not get to delete the whole subtree."""
-        return self.frozen and bool(self.properties.get("frozen_cleanup_pending"))
-
-    @property
-    def keep_flags(self) -> KeepFlags:
-        """The ``keep_*`` flags the stub was frozen with."""
-        return (
-            bool(self.properties.get("frozen_keep_structure_nodes")),
-            bool(self.properties.get("frozen_keep_annotations")),
-            bool(self.properties.get("frozen_keep_extraction_results")),
-        )
-
-    @property
-    def key(self) -> dict[str, Any]:
-        return {"path": self.path, "version": self.version}
-
-
-def fetch_document_set(driver, database: str, filters: dict[str, Any]) -> list[DocumentInfo]:
+def fetch_document_set(filters: dict[str, Any]) -> list[DocumentInfo]:
     """Resolve the selector to the matched Documents and their descendants.
 
     A descendant of another tenant (a data relationship crossing tenants —
     impossible under the write invariant) raises :class:`FreezeError`.
     """
-    match_clause, params = _build_doc_match(filters)
+    docs = get_graph_store().freeze.fetch_document_set(DocumentSelector(**filters))
     tenant = filters["tenant_id"]
-
-    def _do_query() -> list[DocumentInfo]:
-        with driver.session(database=database) as session:
-            result = session.run(match_clause + _DOCUMENT_SET_TAIL, **params)
-            return [
-                DocumentInfo(
-                    path=record["properties"].get("path"),
-                    version=record["properties"].get("version"),
-                    tenant_id=record["properties"].get("tenant_id"),
-                    is_seed=record["is_seed"],
-                    properties=dict(record["properties"]),
-                )
-                for record in result
-            ]
-
-    docs = with_neo4j_retry_sync(_do_query)
     for doc in docs:
         if doc.tenant_id != tenant:
             raise FreezeError(
@@ -271,94 +212,8 @@ def fetch_document_set(driver, database: str, filters: dict[str, Any]) -> list[D
 
 
 # ---------------------------------------------------------------------------
-# Snapshot export — Neo4j → writer, streaming
+# Snapshot export — graph (through the ExportReader) → writer, streaming
 # ---------------------------------------------------------------------------
-
-_CATALOG_PREDICATE = " OR ".join(f"n:{label}" for label in CATALOG_KEY_FIELDS)
-
-# Every node of one document's subtree, once: the whole HAS_STRUCTURE /
-# HAS_CHILD tree (unbounded — a strict hierarchy), what hangs from each
-# StructureNode (InfoUnit, ModelDecision and its children, ExtractionResult),
-# and everything reachable from each ExtractionResult through any outgoing
-# relationship within GC_REACHABILITY_MAX_HOPS hops (ModelInstance / Entity /
-# LabeledEntity may form cycles), catalog nodes excluded.
-_SUBTREE_NODES_FRAGMENT = f"""
-MATCH (d:Document {{tenant_id: $tenant_id, path: $path, version: $version}})
-CALL (d) {{
-  MATCH (d)-[:HAS_STRUCTURE]->(:StructureNode)-[:HAS_CHILD*0..]->(s:StructureNode)
-  WITH DISTINCT s
-  CALL (s) {{
-    RETURN s AS n
-    UNION
-    MATCH (s)-[:HAS_INFO_UNIT]->(n:InfoUnit)
-    RETURN n
-    UNION
-    MATCH (s)-[:HAS_MODEL_DECISION]->(n:ModelDecision)
-    RETURN n
-    UNION
-    MATCH (s)-[:HAS_MODEL_DECISION]->(:ModelDecision)
-          -[:HAS_PROPOSED_MODEL|HAS_COMPLEMENTARY_MATCH|HAS_SUPPLEMENTARY_FIELD]->(n)
-    RETURN n
-    UNION
-    MATCH (s)-[:HAS_MODEL_DECISION]->(:ModelDecision)-[:HAS_PROPOSED_MODEL]->(:ProposedModel)
-          -[:HAS_PROPOSED_FIELD]->(n:ProposedField)
-    RETURN n
-    UNION
-    MATCH (s)-[:HAS_EXTRACTION]->(n:ExtractionResult)
-    RETURN n
-    UNION
-    MATCH (s)-[:HAS_EXTRACTION]->(:ExtractionResult)-[*1..{GC_REACHABILITY_MAX_HOPS}]->(n)
-    WHERE NOT ({_CATALOG_PREDICATE})
-    RETURN n
-  }}
-  RETURN n
-}}
-WITH DISTINCT n
-"""
-
-_SUBTREE_NODES_EXPORT_QUERY = (
-    _SUBTREE_NODES_FRAGMENT + "RETURN labels(n) AS labels, properties(n) AS properties\n"
-)
-
-# Only the properties any business key is made of (never the whole node).
-_KEY_PROJECTION = "{.id, .uid, .name, .model, .label, .path, .tenant_id, .version}"
-
-# Outgoing relationships of every subtree node. Targets outside the entry's
-# node set (beyond the hop bound, other documents) are dropped in Python;
-# catalog targets are kept as references.
-_SUBTREE_RELATIONSHIPS_EXPORT_QUERY = (
-    _SUBTREE_NODES_FRAGMENT
-    + f"""MATCH (n)-[r]->(m)
-RETURN type(r) AS type,
-       labels(n) AS from_labels, n {_KEY_PROJECTION} AS from_key,
-       labels(m) AS to_labels, m {_KEY_PROJECTION} AS to_key,
-       properties(r) AS properties
-"""
-)
-
-# The Document's own relationships: HAS_STRUCTURE into its tree, and its
-# links to other Documents of the tenant (folder IS_COMPOSED_OF, version chain
-# HAS_NEWER_VERSION) in both directions — what restore_document() needs to
-# re-link a Document it has to recreate (deleted, or restored from a backup).
-_DOCUMENT_RELATIONSHIPS_EXPORT_QUERY = f"""
-MATCH (d:Document {{tenant_id: $tenant_id, path: $path, version: $version}})
-CALL (d) {{
-  MATCH (d)-[r:HAS_STRUCTURE]->(m:StructureNode)
-  RETURN d AS n, r, m
-  UNION
-  MATCH (d)-[r:IS_COMPOSED_OF|HAS_NEWER_VERSION]->(m:Document)
-  WHERE m.tenant_id = $tenant_id
-  RETURN d AS n, r, m
-  UNION
-  MATCH (n:Document)-[r:IS_COMPOSED_OF|HAS_NEWER_VERSION]->(d)
-  WHERE n.tenant_id = $tenant_id
-  RETURN n, r, d AS m
-}}
-RETURN type(r) AS type,
-       labels(n) AS from_labels, n {_KEY_PROJECTION} AS from_key,
-       labels(m) AS to_labels, m {_KEY_PROJECTION} AS to_key,
-       properties(r) AS properties
-"""
 
 
 def _endpoint(labels: Sequence[str], key_props: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -367,14 +222,13 @@ def _endpoint(labels: Sequence[str], key_props: dict[str, Any]) -> tuple[str, di
     return primary, {"labels": _ordered_labels(labels, primary), "key": key}
 
 
-def _export_document(session, writer: SnapshotWriter, doc: DocumentInfo, tenant: str) -> int:
+def _export_document(reader: ExportReader, writer: SnapshotWriter, doc: DocumentInfo, tenant: str) -> int:
     """Write one ``documents[]`` entry; return the number of nodes written."""
-    params = {"tenant_id": tenant, "path": doc.path, "version": doc.version}
     writer.begin_document(doc.properties)
 
     emitted: set[str] = set()
-    for record in session.run(_SUBTREE_NODES_EXPORT_QUERY, **params):
-        labels, props = record["labels"], record["properties"]
+    for raw in reader.subtree_nodes(doc):
+        labels, props = raw.labels, raw.properties
         primary, key_fields = node_identity(labels)
         if props.get("tenant_id") != tenant:
             raise FreezeError(
@@ -398,24 +252,27 @@ def _export_document(session, writer: SnapshotWriter, doc: DocumentInfo, tenant:
             }
         )
 
-    for query in (_DOCUMENT_RELATIONSHIPS_EXPORT_QUERY, _SUBTREE_RELATIONSHIPS_EXPORT_QUERY):
-        for record in session.run(query, **params):
-            _, source = _endpoint(record["from_labels"], record["from_key"])
-            to_primary, target = _endpoint(record["to_labels"], record["to_key"])
-            # The Document's own relationships are all kept; subtree ones only
-            # towards the entry's nodes or catalog nodes.
+    # The Document's own relationships are all kept; subtree ones only towards
+    # the entry's nodes or catalog nodes.
+    for subtree_only, relationships in (
+        (False, reader.document_relationships(doc)),
+        (True, reader.subtree_relationships(doc)),
+    ):
+        for rel in relationships:
+            _, source = _endpoint(rel.from_labels, rel.from_key)
+            to_primary, target = _endpoint(rel.to_labels, rel.to_key)
             if (
-                query is _SUBTREE_RELATIONSHIPS_EXPORT_QUERY
+                subtree_only
                 and not is_catalog(to_primary)
                 and _ref(to_primary, target["key"]) not in emitted
             ):
                 continue
             writer.write_relationship(
                 {
-                    "type": record["type"],
+                    "type": rel.type,
                     "from": source,
                     "to": target,
-                    "properties": dict(record["properties"]),
+                    "properties": dict(rel.properties),
                 }
             )
 
@@ -424,8 +281,7 @@ def _export_document(session, writer: SnapshotWriter, doc: DocumentInfo, tenant:
 
 
 def _stream_snapshot(
-    driver,
-    database: str,
+    reader: ExportReader,
     docs: Sequence[DocumentInfo],
     header: dict[str, Any],
     writer: SnapshotWriter,
@@ -434,40 +290,35 @@ def _stream_snapshot(
     tenant = header["tenant_id"]
     nodes = 0
     writer.begin(header)
-    with driver.session(database=database) as session:
-        for doc in docs:
-            nodes += _export_document(session, writer, doc, tenant)
+    for doc in docs:
+        nodes += _export_document(reader, writer, doc, tenant)
     writer.end()
     return nodes
 
 
-def _write_snapshot_file(
-    driver, database: str, docs: Sequence[DocumentInfo], header: dict[str, Any], dest: Path
-) -> None:
+def _write_snapshot_file(docs: Sequence[DocumentInfo], header: dict[str, Any], dest: Path) -> None:
     """Stream the snapshot to *dest*. A retried attempt starts the file over;
     a failed export removes the partial file."""
 
-    def _do_write() -> int:
+    def _attempt(reader: ExportReader) -> int:
         with dest.open("w", encoding="utf-8") as fh:
-            return _stream_snapshot(driver, database, docs, header, JsonSnapshotWriter(fh))
+            return _stream_snapshot(reader, docs, header, JsonSnapshotWriter(fh))
 
     try:
-        nodes = with_neo4j_retry_sync(_do_write)
+        nodes = get_graph_store().freeze.export_snapshot(docs, header["tenant_id"], _attempt)
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
     logger.debug("Snapshot written to %s (%d documents, %d nodes)", dest, len(docs), nodes)
 
 
-def _build_snapshot_dict(
-    driver, database: str, docs: Sequence[DocumentInfo], header: dict[str, Any]
-) -> dict[str, Any]:
-    def _do_build() -> dict[str, Any]:
+def _build_snapshot_dict(docs: Sequence[DocumentInfo], header: dict[str, Any]) -> dict[str, Any]:
+    def _attempt(reader: ExportReader) -> dict[str, Any]:
         writer = DictSnapshotWriter()
-        _stream_snapshot(driver, database, docs, header, writer)
+        _stream_snapshot(reader, docs, header, writer)
         return writer.snapshot
 
-    return with_neo4j_retry_sync(_do_build)
+    return get_graph_store().freeze.export_snapshot(docs, header["tenant_id"], _attempt)
 
 
 def _snapshot_header(
@@ -492,8 +343,6 @@ def _document_metadata(doc: DocumentInfo) -> dict[str, Any]:
 
 
 async def _export_to_storage(
-    driver,
-    database: str,
     docs: Sequence[DocumentInfo],
     header: dict[str, Any],
     *,
@@ -505,7 +354,7 @@ async def _export_to_storage(
     job_id: str | Sequence[str] | None,
     timings: dict[str, float] | None = None,
 ) -> str:
-    """Neo4j → temporary file → freeze backend; return the ``frozen_blob_id``.
+    """Graph → temporary file → freeze backend; return the ``frozen_blob_id``.
 
     The backend is resolved first, so a ``ConfigurationError`` (backend
     ``"none"``) is raised before reading the graph. With *timings*, the
@@ -520,7 +369,7 @@ async def _export_to_storage(
     tmp_path = Path(tmp_name)
     try:
         started = time.perf_counter()
-        await asyncio.to_thread(_write_snapshot_file, driver, database, docs, header, tmp_path)
+        await asyncio.to_thread(_write_snapshot_file, docs, header, tmp_path)
         uploading = time.perf_counter()
         blob_id = await repository.store_snapshot(
             tmp_path,
@@ -557,103 +406,10 @@ def _format_timings(timings: dict[str, float]) -> str:
 # Graph mutation — freeze (§7.3) and backup marking
 # ---------------------------------------------------------------------------
 
-# Every query below starts from explicit (tenant_id, path, version) keys:
-# the document set resolved (and exported) before any mutation.
-_DOCS_BY_KEY = DOCS_BY_KEY
-
-# In-transaction guard: every document still there and none frozen yet
-# (a concurrent freeze between the existence check and the mutation).
-_FREEZE_GUARD_QUERY = (
-    _DOCS_BY_KEY
-    + "RETURN count(d) AS found, count(CASE WHEN d.frozen = true THEN 1 END) AS frozen\n"
-)
-
-# frozen_cleanup_pending stays until the subtree is gone (see _reduce_to_stubs).
-_MARK_FROZEN_QUERY = (
-    _DOCS_BY_KEY
-    + """SET d.frozen = true,
-    d.frozen_blob_id = $blob_id,
-    d.frozen_at = $frozen_at,
-    d.frozen_keep_structure_nodes = $keep_structure_nodes,
-    d.frozen_keep_annotations = $keep_annotations,
-    d.frozen_keep_extraction_results = $keep_extraction_results,
-    d.frozen_cleanup_pending = true
-RETURN count(d) AS n
-"""
-)
-
-_CLEAR_PENDING_QUERY = (
-    _DOCS_BY_KEY + "REMOVE d.frozen_cleanup_pending, d.deletion_pending\nRETURN count(d) AS n\n"
-)
-
-_MARK_BACKUP_QUERY = (
-    _DOCS_BY_KEY
-    + """SET d.last_backup_blob_id = $blob_id, d.last_backup_at = $backup_at
-RETURN count(d) AS n
-"""
-)
-
-_FREEZE_COUNTER_FIELDS = SUBTREE_COUNTER_FIELDS
-
-
-def _mark_frozen(
-    driver,
-    database: str,
-    tenant: str,
-    docs: Sequence[DocumentInfo],
-    *,
-    blob_id: str,
-    frozen_at: str,
-    keep_flags: KeepFlags,
-) -> None:
-    """Mark the stubs — in one write transaction, **before** anything is deleted.
-
-    The subtree is then deleted in batches (``_reduce_to_stubs``), which is
-    not atomic: marking first means that whatever happens next, every
-    document already points at the snapshot that holds its whole subtree.
-    """
-    keys = [doc.key for doc in docs]
-    base = {"tenant_id": tenant, "keys": keys}
-    keep_structure_nodes, keep_annotations, keep_extraction_results = keep_flags
-
-    def _do_mark() -> None:
-        with driver.session(database=database) as session:
-            with session.begin_transaction() as tx:
-                try:
-                    guard = tx.run(_FREEZE_GUARD_QUERY, **base).single()
-                    if guard["found"] != len(keys) or guard["frozen"]:
-                        raise FreezeError(
-                            "The documents to freeze changed during the export "
-                            f"(expected {len(keys)} unfrozen, found {guard['found']} "
-                            f"with {guard['frozen']} already frozen); nothing was mutated."
-                        )
-                    tx.run(
-                        _MARK_FROZEN_QUERY,
-                        **base,
-                        blob_id=blob_id,
-                        frozen_at=frozen_at,
-                        keep_structure_nodes=keep_structure_nodes,
-                        keep_annotations=keep_annotations,
-                        keep_extraction_results=keep_extraction_results,
-                    ).single()
-                    tx.commit()
-                except Exception:
-                    tx.rollback()
-                    logger.exception(
-                        "freeze_document: stub marking rolled back (tenant=%r, keys=%r)",
-                        tenant,
-                        keys,
-                    )
-                    raise
-
-    with_neo4j_retry_sync(_do_mark)
-
 
 def _reduce_to_stubs(
-    driver,
-    database: str,
     tenant: str,
-    groups: dict[KeepFlags, list[dict[str, Any]]],
+    groups: dict[KeepFlags, list[DocumentInfo]],
     *,
     interrupted: bool,
     timings: dict[str, float],
@@ -661,14 +417,14 @@ def _reduce_to_stubs(
     """Delete the subtree of the marked stubs, collect the orphans and clear
     ``frozen_cleanup_pending``.
 
-    *groups* maps each ``keep_*`` combination to the keys frozen with it.
-    Everything runs in bounded transactions (``ingest/_cascade.py``) and only
+    *groups* maps each ``keep_*`` combination to the documents frozen with it.
+    Everything runs in bounded transactions (``store.freeze``) and only
     touches what is still there, so after a failure the same call finishes
     the job. The pending mark goes last — after the GC — so a failed GC is
     retried too.
 
     The orphans are collected among what the deleted :ExtractionResult nodes
-    pointed at (``OrphanCollector``). Those candidates only live in this
+    pointed at (``store.gc.collector``). Those candidates only live in this
     process: with *interrupted* — some document was left half-way by an
     earlier freeze or delete, whose candidates are lost — the whole tenant is
     swept instead.
@@ -676,24 +432,21 @@ def _reduce_to_stubs(
     The seconds of each phase are written to *timings* (``delete``, ``gc``,
     ``clear_pending``) as it ends, so a failure leaves the finished ones.
     """
+    store = get_graph_store()
     counters = dict.fromkeys(_FREEZE_COUNTER_FIELDS, 0)
     started = time.perf_counter()
     orphans = None
     if not interrupted:
-        orphans = OrphanCollector(
-            driver, tenant_id=tenant, database=database, caller="freeze_document"
-        )
-    for keep_flags, keys in groups.items():
+        orphans = store.gc.collector(tenant, "freeze_document")
+    for keep_flags, docs in groups.items():
         keep_extraction_results = keep_flags[2]
-        counts = run_subtree_steps(
-            driver,
-            database,
+        counts = store.freeze.reduce_to_stubs(
             tenant,
-            keys,
-            subtree_steps(*keep_flags),
-            caller="freeze_document",
+            docs,
+            keep_flags,
             # Kept ExtractionResults orphan nothing.
-            orphans=None if keep_extraction_results else orphans,
+            None if keep_extraction_results else orphans,
+            caller="freeze_document",
         )
         for name, value in counts.items():
             counters[name] += value
@@ -703,42 +456,12 @@ def _reduce_to_stubs(
         orphans.collect()
         gc_counts = orphans.counts()
     else:
-        gc_counts = sweep_tenant(
-            driver, tenant_id=tenant, database=database, caller="freeze_document"
-        )
+        gc_counts = store.gc.sweep_tenant(tenant, "freeze_document")
     timings["gc"] = time.perf_counter() - started
     started = time.perf_counter()
-    keys = [key for group in groups.values() for key in group]
-    for start in range(0, len(keys), DELETE_BATCH_ROWS):
-        run_count_query(
-            driver,
-            database,
-            _CLEAR_PENDING_QUERY,
-            tenant_id=tenant,
-            keys=keys[start : start + DELETE_BATCH_ROWS],
-        )
+    store.freeze.clear_cleanup_pending(tenant, [doc for group in groups.values() for doc in group])
     timings["clear_pending"] = time.perf_counter() - started
     return counters, gc_counts
-
-
-def _mark_backup(
-    driver, database: str, tenant: str, docs: Sequence[DocumentInfo], blob_id: str, backup_at: str
-) -> None:
-    keys = [doc.key for doc in docs]
-
-    def _do_mark() -> None:
-        with driver.session(database=database) as session:
-            session.execute_write(
-                lambda tx: tx.run(
-                    _MARK_BACKUP_QUERY,
-                    tenant_id=tenant,
-                    keys=keys,
-                    blob_id=blob_id,
-                    backup_at=backup_at,
-                ).consume()
-            )
-
-    with_neo4j_retry_sync(_do_mark)
 
 
 def _refuse_frozen(docs: Sequence[DocumentInfo], func_name: str) -> None:
@@ -798,6 +521,8 @@ async def export_document_snapshot(
     ValueError
         Invalid selector, unknown *destination*, or *file_path* missing /
         given without ``destination="file"``.
+    GraphError
+        If the graph engine fails (after the retries).
     """
     if destination not in ("dict", "file", "storage"):
         raise ValueError(f"Unknown destination {destination!r}: use 'dict', 'file' or 'storage'.")
@@ -806,25 +531,21 @@ async def export_document_snapshot(
     filters = selector_filters(
         "export_document_snapshot", path, version, tenant_id, created_by_user_id, job_id
     )
-    database = get_config().neo4j_database
-
-    driver = get_driver()
-    try:
-        docs = await asyncio.to_thread(fetch_document_set, driver, database, filters)
+    store = get_graph_store()
+    with store.sync_scope():
+        docs = await asyncio.to_thread(fetch_document_set, filters)
         if not docs:
             raise FreezeError(f"export_document_snapshot: no Document found for {selector_repr(filters)}.")
         _refuse_frozen(docs, "export_document_snapshot")
         header = _snapshot_header(filters["tenant_id"], _now_iso(), None, "export")
 
         if destination == "dict":
-            return await asyncio.to_thread(_build_snapshot_dict, driver, database, docs, header)
+            return await asyncio.to_thread(_build_snapshot_dict, docs, header)
         if destination == "file":
             dest = Path(file_path)
-            await asyncio.to_thread(_write_snapshot_file, driver, database, docs, header, dest)
+            await asyncio.to_thread(_write_snapshot_file, docs, header, dest)
             return dest
         return await _export_to_storage(
-            driver,
-            database,
             docs,
             header,
             mode="export",
@@ -834,8 +555,6 @@ async def export_document_snapshot(
             created_by_user_id=created_by_user_id,
             job_id=job_id,
         )
-    finally:
-        driver.close()
 
 
 async def freeze_document(
@@ -873,13 +592,13 @@ async def freeze_document(
     4. Otherwise mark every Document ``frozen=true`` with ``frozen_blob_id``,
        ``frozen_at``, the ``frozen_keep_*`` flags and
        ``frozen_cleanup_pending=true`` (one transaction), and then, in
-       bounded transactions (``ingest/_cascade.py``): re-link kept
+       bounded transactions (``graph/neo4j/deletion.py``): re-link kept
        ModelDecision / ExtractionResult nodes to their Document when their
        StructureNode goes, and delete the subtree (InfoUnits always;
        StructureNodes, annotations and extraction results unless kept). The
        Document nodes themselves stay.
     5. Delete the :Entity / :ModelInstance / :LabeledEntity nodes of the
-       tenant this freeze leaves orphaned (``ingest/_gc.py``), and remove
+       tenant this freeze leaves orphaned (``graph/neo4j/gc.py``), and remove
        ``frozen_cleanup_pending``. Only what hung from the deleted
        :ExtractionResult nodes is checked, not the whole tenant (that is
        ``collect_orphans()``); a call that finishes an interrupted freeze
@@ -924,6 +643,8 @@ async def freeze_document(
         tenant invariant.
     ConfigurationError
         If the freeze backend resolves to ``"none"``.
+    GraphError
+        If the graph engine fails (after the retries).
     """
     filters = selector_filters("freeze_document", path, version, tenant_id, created_by_user_id, job_id)
     if not delete_after_export and (
@@ -944,11 +665,9 @@ async def freeze_document(
         "tenant_id": tenant_id,
         "created_by_user_id": created_by_user_id,
     }
-    database = get_config().neo4j_database
-
-    driver = get_driver()
-    try:
-        docs = await asyncio.to_thread(fetch_document_set, driver, database, filters)
+    store = get_graph_store()
+    with store.sync_scope():
+        docs = await asyncio.to_thread(fetch_document_set, filters)
         if not docs:
             logger.warning("freeze_document: no Document found for %s; nothing to freeze.", selector)
             return FreezeResult(
@@ -981,8 +700,6 @@ async def freeze_document(
                 mode,
             )
             blob_id = await _export_to_storage(
-                driver,
-                database,
                 fresh,
                 header,
                 mode=mode,
@@ -1002,9 +719,7 @@ async def freeze_document(
 
             started = time.perf_counter()
             if not delete_after_export:
-                await asyncio.to_thread(
-                    _mark_backup, driver, database, tenant, fresh, blob_id, timestamp
-                )
+                await asyncio.to_thread(store.freeze.mark_backup, tenant, fresh, blob_id, timestamp)
                 timings["mark"] = time.perf_counter() - started
                 logger.info(
                     "freeze_document: backup complete for %s. documents_backed_up=%d timings: %s",
@@ -1022,9 +737,7 @@ async def freeze_document(
                 )
 
             await asyncio.to_thread(
-                _mark_frozen,
-                driver,
-                database,
+                store.freeze.mark_frozen,
                 tenant,
                 fresh,
                 blob_id=blob_id,
@@ -1044,16 +757,14 @@ async def freeze_document(
                 seeds = [doc for doc in resumed if doc.is_seed]
                 blob_id = (seeds or resumed)[0].frozen_blob_id
 
-        groups: dict[KeepFlags, list[dict[str, Any]]] = {}
+        groups: dict[KeepFlags, list[DocumentInfo]] = {}
         for doc in fresh:
-            groups.setdefault(keep_flags, []).append(doc.key)
+            groups.setdefault(keep_flags, []).append(doc)
         for doc in resumed:
-            groups.setdefault(doc.keep_flags, []).append(doc.key)
+            groups.setdefault(doc.keep_flags, []).append(doc)
         try:
             counters, gc_counts = await asyncio.to_thread(
                 _reduce_to_stubs,
-                driver,
-                database,
                 tenant,
                 groups,
                 interrupted=bool(resumed)
@@ -1093,5 +804,3 @@ async def freeze_document(
             **counters,
             **gc_counts,
         )
-    finally:
-        driver.close()

@@ -7,6 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
+The pipeline no longer talks to Neo4j directly: every write to the graph (and
+the internal reads that go with it) goes through a `GraphStore` interface with
+one implementation, `Neo4jGraphStore`, that runs the same Cypher as before.
+Engine errors now leave as a neutral exception hierarchy. The exported API of
+`scinr.newton` keeps its signatures; it only gains the new exceptions. See the
+new [Graph Store](docs/api/graph-store.md) reference and the
+[Graph layer](docs/architecture.md#8d-graph-layer-graphstore) section of the
+architecture.
+
+### Breaking changes
+
+#### Exceptions
+
+New hierarchy (`scinr.newton.exceptions`, all exported from `scinr.newton`):
+`GraphError` and its subclasses `GraphConnectionError`, `GraphAuthenticationError`,
+`TransientGraphError`, `GraphResourceError`, `GraphConstraintError`,
+`DocumentVersionConflict` and `GraphQueryError`, plus `GraphConfigurationError`
+(a `ConfigurationError`). Each class has a single parent. The driver's own
+exceptions never leave the library: the message is kept and the original is in
+`__cause__`. What to catch now:
+
+| Before | Now | `except` to write |
+|---|---|---|
+| Version conflict on ingestion: `IngestionError` | `DocumentVersionConflict` (no longer an `IngestionError`) | `except DocumentVersionConflict` (or `GraphConstraintError` / `GraphError`) |
+| Missing Neo4j credentials: `ValueError` | `GraphConfigurationError` (no longer a `ValueError`), same message | `except GraphConfigurationError` or `except ConfigurationError` |
+| `GraphConnectionError` was a `NavigationError` | It is a `GraphError` | `except (NavigationError, GraphConnectionError)` where the connection failure was expected as a `NavigationError`; or `except GraphError` |
+| `neo4j.exceptions.*` from any write path | The `GraphError` classes: `GraphAuthenticationError`, `GraphConnectionError` (service unavailable, session expired), `GraphResourceError` (out of memory: shrink the batch), `TransientGraphError` (retries exhausted), `GraphConstraintError`, `GraphQueryError` | `except GraphError` (or the subclass) instead of `except neo4j.exceptions.Neo4jError` / `DriverError` |
+
+`GraphNavigator` keeps its translation (`ServiceUnavailable` to
+`GraphConnectionError`, anything else to `NavigationError`).
+
+#### Internal modules and functions
+
+None of these is part of `scinr.newton.__all__`, except where noted.
+
+- **Modules moved**: `scinr.newton.ingest.config` (`get_driver`, `get_async_driver`) is now
+  `scinr.newton.graph.neo4j.driver`, and `scinr.newton.utils.neo4j_retry` is now
+  `scinr.newton.graph.neo4j.retry`. The old modules are gone (no re-export). If you
+  patch these in tests, patch the new module where it is looked up.
+- **Internal functions that took a Neo4j `driver` no longer do** (the graph is
+  reached through `get_graph_store()`; synchronous code shares one connection per
+  `store.sync_scope()`, otherwise each call opens and closes its own). Exported
+  ones first:
+  - `scinr.newton.stages.preflight_check_replaces(replaces_name, *, tenant_id=None)`
+    and `scinr.newton.stages.apply_replacement(replaces_name, new_root_doc_names, *,
+    tenant_id=None, replaced_path=None)` lost their leading `driver` argument.
+  - `ingest.loader`: `load_file`, `load_files`, `load_documents`, `load_folder`,
+    `ingest_one` and `ingest_one_from_path` lost `driver`; `resolve_batch_version_sync(driver, ...)`
+    and `_resolve_batch_version(session, ...)` are gone (use
+    `get_graph_store().documents.resolve_batch_version(paths, tenants, update_mode)`).
+  - `utils.document_resolver`: `resolve_leaf_documents` and `resolve_leaf_documents_async`
+    lost `driver`; `latest_document_pattern` is gone (build a
+    `graph.types.DocumentSelector(latest=True, ...)`).
+  - `tabular.agent`: `run_tabular_agent` and `run_tabular_agent_sync` lost `driver`.
+  - `pipeline._process_document_unit` lost `sync_driver`.
+  - Moved: `ingest.schema` (`setup_schema`, `ensure_indexes`, the DDL lists) is now
+    `graph.neo4j.schema` (`get_graph_store().schema.setup()` / `.ensure_indexes(names)`);
+    the Cypher of `ingest.nodes` (`insert_document_graph`, `insert_document`,
+    `get_next_version`, ...) is now `graph.neo4j.documents`. `ingest.nodes` keeps
+    `make_structure_node_id`, `ROLE_TO_LABEL` and `_make_uid`. `LeafDocument` lives in
+    `graph.types` (still importable from `utils.document_resolver`).
+  - `annotation.neo4j_ops` is gone. The Cypher (`fetch_nodes_to_annotate`,
+    `fetch_node_context`, `fetch_document_context_instructions`, `write_annotation`,
+    `write_manual_annotation`, `ensure_catalog_models`, `ensure_theme_structure`,
+    `instance_key_index_name`) is now `graph.neo4j.annotation.Neo4jAnnotationOps`
+    (`get_graph_store().annotation`), and those methods lost their leading `driver`
+    argument. The catalog and theme setup is split: the traversal of the models
+    (`ensure_catalog_models(registry, sink)` and `ensure_theme_structure(registry, sink)`)
+    lives in `annotation.catalog` and writes through a `graph.sinks.CatalogSink`
+    (eleven methods, one per statement), which `get_graph_store().annotation.catalog_sink()`
+    opens as an async context manager over one session. The model introspection
+    helpers (`_field_type_str`, `_extract_model_refs`, `_collect_all_model_classes`,
+    `_validate_rel_type`) and `reset_catalog_memoization` moved to
+    `annotation.catalog`; `ensure_catalog_models_once` and `ensure_theme_structure_once`
+    live there too and now take the theme registry instead of a driver.
+  - `delete_stale_model_decision` and `delete_stale_extraction_result` are now in
+    `graph.neo4j._shared` (they still take the caller's session or transaction).
+  - `entity_extraction.neo4j_ops` is gone: `fetch_extraction_targets(driver, ...)` and
+    `mark_info_units_extracted_async(driver, ...)` are now
+    `get_graph_store().extraction.fetch_targets(...)` and `.mark_info_units_extracted(node_full_id)`
+    (`graph.neo4j.extraction.Neo4jExtractionOps`). `write_extraction_subgraph` and
+    `write_triple_subgraph` (in `entity_extraction.graph_mapper`) lost their leading
+    `driver` argument and are Cypher-free: they walk the extracted instance (timestamp,
+    uids, entity registry) and write through a `graph.sinks.ExtractionSink` (seventeen
+    methods, one per statement, in the same order and with the same retries), which
+    `get_graph_store().extraction.sink()` opens as an async context manager over one
+    session (`graph.neo4j.extraction.Neo4jExtractionSink`). `store.extraction` exposes
+    `sink()`, `fetch_targets()` and `mark_info_units_extracted()`. The Cypher helpers
+    moved with the writers (`_provenance_set_clause` is now
+    `graph.neo4j._shared.provenance_set_clause`, `_require_stored_tenant` is now
+    `utils.tenancy.require_stored_tenant`). `graph_mapper` also keeps the Cypher-free
+    Pydantic helpers. `entity_extraction.nodes._write_entities` and `_mark_extracted`
+    lost `driver`.
+  - `ingest._cascade` and `ingest._gc` are gone. The Cypher of `ingest.deletion`
+    (the `MATCH` of the selection, the existence, raw-file and `deletion_pending`
+    queries) and of `_cascade` (`subtree_steps`, `run_subtree_steps`,
+    `delete_documents`, the subtree queries) is now `graph.neo4j.deletion`
+    (`Neo4jDeletionOps`, `get_graph_store().deletion`: `fetch_document_keys(selector)`,
+    `fetch_existing_versions(selector)`, `fetch_raw_file_ids(selector)`,
+    `mark_deletion_pending(tenant, keys)`, `cascade_delete(tenant, keys, collector, *, caller)`
+    and `delete_documents(tenant, keys)`); `OrphanCollector`, `sweep_tenant` and
+    `run_gc_pass` are now `graph.neo4j.gc` (`Neo4jGcOps`, `get_graph_store().gc`:
+    `collector(tenant, caller)`, `sweep_tenant(tenant_id, caller)`,
+    `run_pass(kind, tenant_id, caller)`). `run_count_query`, `DOCS_BY_KEY`,
+    `DELETE_BATCH_ROWS` and `DOCUMENTS_PER_QUERY` are in `graph.neo4j._shared`, and
+    `GC_MAX_PASSES` in `graph.types` (still importable from `ingest.deletion`).
+    `_build_doc_match(filters)` is split: `ingest.deletion` validates the filters
+    and builds a `graph.types.DocumentSelector`; `graph.neo4j.deletion.doc_match(selector)`
+    builds the `MATCH`. `delete_document()` and `collect_orphans()` open a
+    `store.sync_scope()` instead of their own driver.
+  - Freeze and restore: the Cypher of `ingest.freeze` (document-set query, export reads,
+    `frozen` / backup marks, reduction to stubs) is now `graph.neo4j.freeze.Neo4jFreezeOps`
+    (`get_graph_store().freeze`: `fetch_document_set(selector)`,
+    `export_snapshot(docs, tenant, attempt)`, `mark_frozen(...)`, `mark_backup(...)`,
+    `reduce_to_stubs(tenant, docs, keep_flags, collector, *, caller)` and
+    `clear_cleanup_pending(tenant, docs)`), and that of `ingest.restore` (`_BatchWriter`,
+    the batch executors, the finishing queries) is `graph.neo4j.restore.Neo4jRestoreOps`
+    (`get_graph_store().restore`: `batch_writer(concurrency)`, `existing_documents`,
+    `frozen_stubs_of_blob`, `finish_restore`, `count_blob_references`,
+    `has_stale_extraction_results`). `ingest.freeze.fetch_document_set(filters)` lost its
+    `driver` / `database` arguments; `DocumentInfo` and `KeepFlags` live in `graph.types`
+    (still importable from `ingest.freeze`); `cypher_identifier` is split into
+    `ingest.freeze.validate_identifier` (validation) and `graph.neo4j.restore.cypher_identifier`
+    (quoting). `freeze_document()`, `export_document_snapshot()` and `restore_document()`
+    open a `store.sync_scope()` instead of their own driver. The snapshot format
+    (`SNAPSHOT_SCHEMA_VERSION = 1`) is unchanged.
+  - `tabular.neo4j_ops` is gone. `delete_tabular_subgraph(driver, ...)` is now
+    `get_graph_store().tabular.delete_tabular_subgraph(...)`
+    (`graph.neo4j.tabular.Neo4jTabularOps`) without the `driver` argument.
+    `write_tabular_subgraph(driver, ...)` is no longer a store method: it is the Cypher-free
+    domain function `tabular.graph_writer.write_tabular_subgraph(...)` (no `driver`
+    argument; it also holds the normalization passes, the row batches and the bounded
+    row writes), which writes through a `graph.sinks.TabularSink` (four methods:
+    `create_table`, `write_row_batch`, `replace_raw_extraction_result` and
+    `link_raw_column_value`, with the same transactions, sessions and retries as before)
+    that `get_graph_store().tabular.sink()` opens as an async context manager
+    (`graph.neo4j.tabular.Neo4jTabularSink`). `TableNode.doc_key` is the
+    `(tenant_id, path, version)` of the owning document. The
+    Cypher-free row logic (`_route_row_values`, `compute_row_normalization_keys`,
+    `RowNormalizationKey`, `_build_normalization_dedup_map`, the composite
+    instantiators, `_sanitize_rel_type`, `_ROW_BATCH_SIZE`, `RowBatchFactory`...) is in
+    `tabular.rows`. `tabular.nodes.write_tabular` no longer opens a driver.
+
 ### Fixed
 - **A mixed tabular + document run no longer splits shared folders across two
   versions.** `run_pipeline` resolved the tabular and the document batch
@@ -17,6 +162,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or delete the surplus folder version.
 
 ### Added
+- `scinr.newton.graph`: the `GraphStore` interface (`graph/base.py`), its domain
+  types, `get_graph_store()` / `set_graph_store()` / `reset_graph_store()` and a
+  `Neo4jGraphStore` with `sync_scope()` and every group of operations
+  (`schema`, `documents`, `annotation`, `extraction`, `tabular`, `deletion`, `gc`,
+  `freeze`, `restore`). `configure()` discards the
+  process-wide store. See the new [Graph Store](docs/api/graph-store.md) reference.
 - `run_tabular_pipeline(..., batch_version=None)`: batch version already resolved
   by the caller. When omitted it is resolved with `resolve_batch_version_sync`
   (the query that duplicated it in `stages/tabular.py` is gone).

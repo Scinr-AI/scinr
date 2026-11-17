@@ -2,97 +2,47 @@
 utils/document_resolver.py — Resolves document hierarchies via IS_COMPOSED_OF.
 
 Given a root document of one tenant, returns all leaf documents reachable
-through the IS_COMPOSED_OF relationship in Neo4j. Leaf documents are those
+through the IS_COMPOSED_OF relationship in the graph. Leaf documents are those
 that have no outgoing IS_COMPOSED_OF relationships.
 
 The root is selected within a single tenant (``None`` = public), by path or —
 for callers that only know a display name — by name. Leaves are returned as
 :class:`LeafDocument` ``(name, path)`` pairs so that later stages select each
 leaf by ``(tenant_id, path)`` rather than by its non-unique name.
+
+The graph query lives in the graph store
+(``get_graph_store().documents.resolve_leaf_documents``); this module builds the
+:class:`~scinr.newton.graph.types.DocumentSelector` and applies the fallback for
+a root that is not in the graph.
 """
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple
 
-from neo4j import AsyncDriver, Driver
-
-from scinr.newton.config import get_config
-from scinr.newton.utils.tenancy import tenant_key
+from scinr.newton.graph import get_graph_store
+from scinr.newton.graph.types import DocumentSelector, LeafDocument
 
 logger = logging.getLogger(__name__)
 
-
-class LeafDocument(NamedTuple):
-    """A leaf document to process: its display ``name`` and its ``path`` (the
-    selector, together with the tenant, of its ``latest`` :Document)."""
-
-    name: str
-    path: str
+__all__ = ["LeafDocument", "resolve_leaf_documents", "resolve_leaf_documents_async"]
 
 
-def latest_document_pattern(
-    alias: str,
-    *,
-    tenant_id: str | None,
-    doc_path: str | None = None,
-    document_name: str | None = None,
-) -> tuple[str, dict]:
-    """Cypher node pattern (and its parameters) matching the ``latest``
-    :Document(s) of *tenant_id* (``None`` = public) at *doc_path*, or — when
-    only *document_name* is given — every one with that name.
-
-    Returns e.g. ``("(d:Document {tenant_id: $tenant_id, path: $doc_selector,
-    latest: true})", {"tenant_id": "acme", "doc_selector": "A/b"})``.
-
-    Raises:
-        ValueError: If neither *doc_path* nor *document_name* is given, or
-            *tenant_id* is invalid (see ``utils.tenancy.tenant_key``).
-    """
+def _selector(
+    tenant_id: str | None, doc_path: str | None, document_name: str | None
+) -> DocumentSelector:
     if doc_path is None and document_name is None:
         raise ValueError("Either doc_path or document_name is required.")
-    # Hard-coded property name, never user input.
-    prop, value = ("path", doc_path) if doc_path is not None else ("name", document_name)
-    pattern = f"({alias}:Document {{tenant_id: $tenant_id, {prop}: $doc_selector, latest: true}})"
-    return pattern, {"tenant_id": tenant_key(tenant_id), "doc_selector": value}
-
-
-# Root and leaves are both pinned to the tenant: IS_COMPOSED_OF never crosses
-# tenants by construction (each tenant has its own folders), the leaf filter
-# is defence in depth.
-_LEAVES_QUERY = """
-MATCH {root}
-OPTIONAL MATCH (root)-[:IS_COMPOSED_OF*1..]->(leaf:Document {{tenant_id: $tenant_id, latest: true}})
-WHERE NOT (leaf)-[:IS_COMPOSED_OF]->(:Document)
-WITH root, collect(DISTINCT leaf) AS leaves
-RETURN CASE
-  WHEN size(leaves) > 0 THEN [l IN leaves | {{name: l.name, path: l.path}}]
-  ELSE [{{name: root.name, path: root.path}}]
-END AS docs
-ORDER BY root.path
-"""
-
-
-def _query_and_params(
-    tenant_id: str | None, doc_path: str | None, document_name: str | None
-) -> tuple[str, dict]:
-    root, params = latest_document_pattern(
-        "root", tenant_id=tenant_id, doc_path=doc_path, document_name=document_name
+    return DocumentSelector(
+        tenant_id=tenant_id, path=doc_path, document_name=document_name, latest=True
     )
-    return _LEAVES_QUERY.format(root=root), params
 
 
-def _collect(
-    records: list[list[dict]],
+def _with_fallback(
+    leaves: list[LeafDocument],
     tenant_id: str | None,
     doc_path: str | None,
     document_name: str | None,
 ) -> list[LeafDocument]:
-    leaves: dict[str, LeafDocument] = {}
-    for docs in records:
-        for d in docs:
-            leaves.setdefault(d["path"], LeafDocument(d["name"], d["path"]))
-
     selector = f"path={doc_path!r}" if doc_path is not None else f"name={document_name!r}"
     if not leaves:
         logger.warning(
@@ -104,20 +54,18 @@ def _collect(
         path = doc_path if doc_path is not None else document_name
         return [LeafDocument(name, path)]
 
-    result = list(leaves.values())
-    if len(result) > 1:
+    if len(leaves) > 1:
         logger.info(
             "Document %s (tenant=%r) resolved to %d leaf documents: %s",
             selector,
             tenant_id,
-            len(result),
-            [leaf.path for leaf in result],
+            len(leaves),
+            [leaf.path for leaf in leaves],
         )
-    return result
+    return leaves
 
 
 def resolve_leaf_documents(
-    driver: Driver,
     *,
     tenant_id: str | None,
     doc_path: str | None = None,
@@ -136,11 +84,12 @@ def resolve_leaf_documents(
 
     A root with no children is its own (single) leaf.
 
-    The traversal is performed entirely in Cypher (variable-length path match),
-    so it handles arbitrarily deep hierarchies without Python-level recursion.
+    The traversal is performed entirely in the graph engine (variable-length
+    path match), so it handles arbitrarily deep hierarchies without
+    Python-level recursion. It uses the connection of the surrounding
+    ``store.sync_scope()``, or opens and closes its own.
 
     Args:
-        driver: An open Neo4j driver instance.
         tenant_id: Owner of the documents, ``None`` for public documents.
         doc_path: Path of the root document (preferred selector).
         document_name: Display name of the root document(s), used when
@@ -154,27 +103,23 @@ def resolve_leaf_documents(
     Raises:
         ValueError: If neither *doc_path* nor *document_name* is given, or
             *tenant_id* is invalid (see ``utils.tenancy.tenant_key``).
+        GraphError: If the graph engine fails.
     """
-    query, params = _query_and_params(tenant_id, doc_path, document_name)
-    cfg = get_config()
-    with driver.session(database=cfg.neo4j_database) as session:
-        result = session.run(query, **params)
-        records = [row["docs"] for row in result.data()]
-    return _collect(records, tenant_id, doc_path, document_name)
+    leaves = get_graph_store().documents.resolve_leaf_documents(
+        _selector(tenant_id, doc_path, document_name)
+    )
+    return _with_fallback(leaves, tenant_id, doc_path, document_name)
 
 
 async def resolve_leaf_documents_async(
-    driver: AsyncDriver,
     *,
     tenant_id: str | None,
     doc_path: str | None = None,
     document_name: str | None = None,
 ) -> list[LeafDocument]:
     """Async version of :func:`resolve_leaf_documents` (same arguments,
-    semantics and return value), for the singleton async driver."""
-    query, params = _query_and_params(tenant_id, doc_path, document_name)
-    cfg = get_config()
-    async with driver.session(database=cfg.neo4j_database) as session:
-        result = await session.run(query, **params)
-        records = [row["docs"] for row in await result.data()]
-    return _collect(records, tenant_id, doc_path, document_name)
+    semantics and return value), for the shared async connection."""
+    leaves = await get_graph_store().documents.resolve_leaf_documents_async(
+        _selector(tenant_id, doc_path, document_name)
+    )
+    return _with_fallback(leaves, tenant_id, doc_path, document_name)

@@ -9,7 +9,6 @@ Shares _EXTRACTION_PROMPT_PREFIX with system_prompt.py (dispatcher).
 
 from scinr.newton.prompts.system_prompt import _EXTRACTION_PROMPT_PREFIX  # noqa: F401
 
-
 _EXTRACTION_PROMPT_SUFFIX = """<extraction_protocol>
 Execute these steps in strict order for every call. No step may be skipped.
 

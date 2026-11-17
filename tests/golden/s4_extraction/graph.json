@@ -1,0 +1,2537 @@
+{
+  "extras": {
+    "first": {
+      "targets": 4
+    },
+    "rerun": {
+      "targets": 4
+    }
+  },
+  "nodes": [
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Tabular row model with a normalized field.",
+        "name": "GoldenNormRow",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Keyed model used in a list (MERGE path with list index).",
+        "name": "GoldenPart",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Normalized place.",
+        "name": "GoldenPlace",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Product with entities, nested models, lists and both kinds of relationships.",
+        "name": "GoldenProduct",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Plain tabular row model.",
+        "name": "GoldenRow",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Unkeyed nested model (positional uid, CREATE path).",
+        "name": "GoldenSpec",
+        "selectable": false
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Keyed model, target of instance relationships.",
+        "name": "GoldenSupplier",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"Triple\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "Generic RDF-style extraction for content that does not fit a specific domain model. Extracts all subject-predicate-object statements found in the content.",
+        "name": "Triple",
+        "selectable": true
+      }
+    },
+    {
+      "key": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "labels": [
+        "CatalogModel"
+      ],
+      "props": {
+        "description": "A single subject-predicate-object statement.",
+        "name": "TripleItem",
+        "selectable": false
+      }
+    },
+    {
+      "key": "ComplementaryMatch|{\"uid\": \"0c20a38f8e174214\"}",
+      "labels": [
+        "ComplementaryMatch"
+      ],
+      "props": {
+        "coverage_note": "GoldenSupplier covers the supplier data.",
+        "model_class": "GoldenSupplier",
+        "tenant_id": "golden-a",
+        "uid": "0c20a38f8e174214"
+      }
+    },
+    {
+      "key": "ComplementaryMatch|{\"uid\": \"8c131c30cbe37b8b\"}",
+      "labels": [
+        "ComplementaryMatch"
+      ],
+      "props": {
+        "coverage_note": "GoldenSupplier covers the supplier data.",
+        "model_class": "GoldenSupplier",
+        "tenant_id": "golden-a",
+        "uid": "8c131c30cbe37b8b"
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"extract.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "extract.txt",
+        "path": "extract.txt",
+        "raw_file_id": "<oid:0>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "Document|{\"path\": \"extract2.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "labels": [
+        "Document"
+      ],
+      "props": {
+        "is_folder": false,
+        "latest": true,
+        "load_date": "<ts>",
+        "name": "extract2.txt",
+        "path": "extract2.txt",
+        "raw_file_id": "<oid:1>",
+        "tenant_id": "golden-a",
+        "version": 1
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenManufacturer"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenPartCode\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenPartCode"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenProductName"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenSku\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenSku"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenSupplierName\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenSupplierName"
+      }
+    },
+    {
+      "key": "EntityLabel|{\"label\": \"GoldenTag\"}",
+      "labels": [
+        "EntityLabel"
+      ],
+      "props": {
+        "label": "GoldenTag"
+      }
+    },
+    {
+      "key": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "labels": [
+        "Entity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "normalized_value": "acme corp",
+        "tenant_id": "golden-a",
+        "uid": "168bfb7b8e1b7bcd",
+        "value": "Acme Corp"
+      }
+    },
+    {
+      "key": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "labels": [
+        "Entity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "normalized_value": "manual",
+        "tenant_id": "golden-a",
+        "uid": "815ba70fb62e6367",
+        "value": "Manual"
+      }
+    },
+    {
+      "key": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "labels": [
+        "Entity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "normalized_value": "widget",
+        "tenant_id": "golden-a",
+        "uid": "852119620eca2586",
+        "value": "Widget"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"410415965d57fe60\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract.txt",
+        "model_class": "Triple",
+        "node_full_id": "golden-a::extract.txt::1::misc",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "410415965d57fe60"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"68bd2aefd920ecf0\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract.txt",
+        "model_class": "Triple",
+        "node_full_id": "golden-a::extract.txt::1::sec_1",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "68bd2aefd920ecf0"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"7e140ab283f13127\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract.txt",
+        "model_class": "GoldenProduct",
+        "node_full_id": "golden-a::extract.txt::1::sec_1/prod_a",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "7e140ab283f13127"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"98d97e91d0b83d6a\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract2.txt",
+        "model_class": "Triple",
+        "node_full_id": "golden-a::extract2.txt::1::misc",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "98d97e91d0b83d6a"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"a5200a3630e9b3ce\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract2.txt",
+        "model_class": "GoldenProduct",
+        "node_full_id": "golden-a::extract2.txt::1::sec_1/prod_a",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "a5200a3630e9b3ce"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"abce5a7dc83ff7f0\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract2.txt",
+        "model_class": "Triple",
+        "node_full_id": "golden-a::extract2.txt::1::sec_1",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "abce5a7dc83ff7f0"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract2.txt",
+        "model_class": "GoldenProduct",
+        "node_full_id": "golden-a::extract2.txt::1::sec_1/combo",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "b6485791473e4a02",
+        "warranty_period": "2 years"
+      }
+    },
+    {
+      "key": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "labels": [
+        "ExtractionResult"
+      ],
+      "props": {
+        "document_name": "extract.txt",
+        "model_class": "GoldenProduct",
+        "node_full_id": "golden-a::extract.txt::1::sec_1/combo",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "d060bec52efaa083",
+        "warranty_period": "2 years"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"224cbd8e21fa6927\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "extracted": "<ts>",
+        "info_unit_id": "224cbd8e21fa6927",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "224cbd8e21fa6927"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"23488bc745f7226c\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "extracted": "<ts>",
+        "info_unit_id": "23488bc745f7226c",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "23488bc745f7226c"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"2be79cf6e7582739\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Catalogue of widgets, revision 1.",
+        "extracted": "<ts>",
+        "info_unit_id": "2be79cf6e7582739",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Overview",
+        "uid": "2be79cf6e7582739"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"2cc1ac916e4385b7\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Steel widget made by Acme.",
+        "extracted": "<ts>",
+        "info_unit_id": "2cc1ac916e4385b7",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget A",
+        "uid": "2cc1ac916e4385b7"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"2d92c20604eef87d\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "extracted": "<ts>",
+        "info_unit_id": "2d92c20604eef87d",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "2d92c20604eef87d"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"3a5fb229099831d5\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "extracted": "<ts>",
+        "info_unit_id": "3a5fb229099831d5",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "3a5fb229099831d5"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"60cecb0c93c0af5c\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Unrelated remarks.",
+        "extracted": "<ts>",
+        "info_unit_id": "60cecb0c93c0af5c",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Notes",
+        "uid": "60cecb0c93c0af5c"
+      }
+    },
+    {
+      "key": "InfoUnit|{\"uid\": \"658e95b59b05db54\"}",
+      "labels": [
+        "InfoUnit"
+      ],
+      "props": {
+        "description": "Widget with supplier S-1.",
+        "extracted": "<ts>",
+        "info_unit_id": "658e95b59b05db54",
+        "order": 0,
+        "tenant_id": "golden-a",
+        "title": "Widget B",
+        "uid": "658e95b59b05db54"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenManufacturer",
+        "normalized_value": "acme corp",
+        "tenant_id": "golden-a",
+        "uid": "04c0936b127ec479",
+        "value": "Acme Corp"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"056746fb44933fcc\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenPartCode",
+        "normalized_value": "p-1",
+        "tenant_id": "golden-a",
+        "uid": "056746fb44933fcc",
+        "value": "P-1"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"0aee879a0ae5f60c\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenSupplierName",
+        "normalized_value": "supply co",
+        "tenant_id": "golden-a",
+        "uid": "0aee879a0ae5f60c",
+        "value": "Supply Co"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"37b4ec420f9aa12b\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenProductName",
+        "normalized_value": "widget a",
+        "tenant_id": "golden-a",
+        "uid": "37b4ec420f9aa12b",
+        "value": "Widget A"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"680480ee708906ea\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenTag",
+        "normalized_value": "steel",
+        "tenant_id": "golden-a",
+        "uid": "680480ee708906ea",
+        "value": "steel"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"b4212e8e4c2db4c5\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenPartCode",
+        "normalized_value": "p-0",
+        "tenant_id": "golden-a",
+        "uid": "b4212e8e4c2db4c5",
+        "value": "P-0"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"c143d2fe22da4bc0\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenTag",
+        "normalized_value": "small",
+        "tenant_id": "golden-a",
+        "uid": "c143d2fe22da4bc0",
+        "value": "small"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"c1b2d091f97edd9d\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenPartCode",
+        "normalized_value": "p-2",
+        "tenant_id": "golden-a",
+        "uid": "c1b2d091f97edd9d",
+        "value": "P-2"
+      }
+    },
+    {
+      "key": "LabeledEntity|{\"uid\": \"c33b1825cc300f5f\"}",
+      "labels": [
+        "LabeledEntity"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "label": "GoldenProductName",
+        "normalized_value": "widget b",
+        "tenant_id": "golden-a",
+        "uid": "c33b1825cc300f5f",
+        "value": "Widget B"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"1d96a9f48ce3763b\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "low",
+        "coverage_gaps": [],
+        "document_name": "extract.txt",
+        "propose_new_model": false,
+        "rationale": "No catalog model fits this node.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "1d96a9f48ce3763b"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"37d4ffbebbee01ec\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [
+          "Warranty period"
+        ],
+        "document_name": "extract.txt",
+        "matched_model_class": "GoldenProduct",
+        "propose_new_model": false,
+        "rationale": "The node matches GoldenProduct.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "37d4ffbebbee01ec"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"71f645906b90c6f3\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "low",
+        "coverage_gaps": [],
+        "document_name": "extract2.txt",
+        "propose_new_model": false,
+        "rationale": "No catalog model fits this node.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "71f645906b90c6f3"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"7231448a043856ab\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "low",
+        "coverage_gaps": [],
+        "document_name": "extract.txt",
+        "propose_new_model": false,
+        "rationale": "No catalog model fits this node.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "7231448a043856ab"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"7f21f1a2e5b5b128\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "extract2.txt",
+        "matched_model_class": "GoldenProduct",
+        "propose_new_model": false,
+        "rationale": "The node matches GoldenProduct.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "7f21f1a2e5b5b128"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"d180905f2d113506\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [
+          "Warranty period"
+        ],
+        "document_name": "extract2.txt",
+        "matched_model_class": "GoldenProduct",
+        "propose_new_model": false,
+        "rationale": "The node matches GoldenProduct.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "d180905f2d113506"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"e18a1a7deacfd585\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "high",
+        "coverage_gaps": [],
+        "document_name": "extract.txt",
+        "matched_model_class": "GoldenProduct",
+        "propose_new_model": false,
+        "rationale": "The node matches GoldenProduct.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "e18a1a7deacfd585"
+      }
+    },
+    {
+      "key": "ModelDecision|{\"uid\": \"e830b5edfef1ae15\"}",
+      "labels": [
+        "ModelDecision"
+      ],
+      "props": {
+        "confidence": "low",
+        "coverage_gaps": [],
+        "document_name": "extract2.txt",
+        "propose_new_model": false,
+        "rationale": "No catalog model fits this node.",
+        "tenant_id": "golden-a",
+        "timestamp": "<ts>",
+        "uid": "e830b5edfef1ae15"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"city\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "city",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"place\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenNormRow",
+        "name": "place",
+        "type": "golden_models.GoldenPlace | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"description\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPart",
+        "name": "description",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"part_code\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenPartCode",
+        "is_instance_key": true,
+        "model": "GoldenPart",
+        "name": "part_code",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"canonical\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPlace",
+        "name": "canonical",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"country\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenPlace",
+        "name": "country",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"category\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "category",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"manufacturer\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenManufacturer",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "manufacturer",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"parts\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "parts",
+        "type": "list[golden_models.GoldenPart]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"primary_part\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "primary_part",
+        "type": "golden_models.GoldenPart | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"product_name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenProductName",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "product_name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"spec\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "spec",
+        "type": "golden_models.GoldenSpec | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"supplier_codes\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenProduct",
+        "name": "supplier_codes",
+        "type": "list[str]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"tags\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenTag",
+        "is_instance_key": false,
+        "model": "GoldenProduct",
+        "name": "tags",
+        "type": "list[str]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"item\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenRow",
+        "name": "item",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"qty\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenRow",
+        "name": "qty",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"sku\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenSku",
+        "is_instance_key": false,
+        "model": "GoldenRow",
+        "name": "sku",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"material\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenSpec",
+        "name": "material",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"weight\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "GoldenSpec",
+        "name": "weight",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_code\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "is_instance_key": true,
+        "model": "GoldenSupplier",
+        "name": "supplier_code",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_name\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "entity_label": "GoldenSupplierName",
+        "is_instance_key": false,
+        "model": "GoldenSupplier",
+        "name": "supplier_name",
+        "type": "str | None"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"Triple\", \"name\": \"triples\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "Triple",
+        "name": "triples",
+        "type": "list[scinr.newton.models.default.triple.TripleItem]"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"object\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "object",
+        "type": "str"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"predicate\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "predicate",
+        "type": "str"
+      }
+    },
+    {
+      "key": "ModelField|{\"model\": \"TripleItem\", \"name\": \"subject\"}",
+      "labels": [
+        "ModelField"
+      ],
+      "props": {
+        "model": "TripleItem",
+        "name": "subject",
+        "type": "str"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "category": "tools",
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "manufacturer": "Acme Corp",
+        "model_class": "GoldenProduct",
+        "product_name": "Widget B",
+        "supplier_codes": [
+          "S-1"
+        ],
+        "tags": [
+          "steel"
+        ],
+        "tenant_id": "golden-a",
+        "uid": "0698ff8c1a15724b"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"5fba38f63a1e2a9b\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "model_class": "GoldenSupplier",
+        "supplier_code": "s-2",
+        "tenant_id": "golden-a",
+        "uid": "5fba38f63a1e2a9b"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"646844a58da3785e\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "description": "Nut",
+        "job_ids": [],
+        "model_class": "GoldenPart",
+        "part_code": "P-2",
+        "tenant_id": "golden-a",
+        "uid": "646844a58da3785e"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"673ff7b2d3e31705\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "description": "Main part",
+        "job_ids": [],
+        "model_class": "GoldenPart",
+        "part_code": "P-0",
+        "tenant_id": "golden-a",
+        "uid": "673ff7b2d3e31705"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "model_class": "GoldenSupplier",
+        "supplier_code": "S-1",
+        "supplier_name": "Supply Co",
+        "tenant_id": "golden-a",
+        "uid": "7bf8059da13dfcae"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "category": "tools",
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "manufacturer": "Acme Corp",
+        "model_class": "GoldenProduct",
+        "product_name": "Widget A",
+        "supplier_codes": [
+          "S-1",
+          "S-2"
+        ],
+        "tags": [
+          "steel",
+          "small"
+        ],
+        "tenant_id": "golden-a",
+        "uid": "a96d35561aa285c9"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "category": "tools",
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "manufacturer": "Acme Corp",
+        "model_class": "GoldenProduct",
+        "product_name": "Widget B",
+        "supplier_codes": [
+          "S-1"
+        ],
+        "tags": [
+          "steel"
+        ],
+        "tenant_id": "golden-a",
+        "uid": "ac52db2fbae15eaf"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"c68b61842e5fd5ea\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "material": "steel",
+        "model_class": "GoldenSpec",
+        "tenant_id": "golden-a",
+        "uid": "c68b61842e5fd5ea",
+        "weight": "2 kg"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "description": "Bolt (revised)",
+        "job_ids": [],
+        "model_class": "GoldenPart",
+        "part_code": "P-1",
+        "tenant_id": "golden-a",
+        "uid": "d75d928d813b6d80"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"df37c8da402497c6\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "material": "steel",
+        "model_class": "GoldenSpec",
+        "tenant_id": "golden-a",
+        "uid": "df37c8da402497c6",
+        "weight": "2 kg"
+      }
+    },
+    {
+      "key": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "labels": [
+        "ModelInstance"
+      ],
+      "props": {
+        "category": "tools",
+        "created_by_user_ids": [],
+        "job_ids": [],
+        "manufacturer": "Acme Corp",
+        "model_class": "GoldenProduct",
+        "product_name": "Widget A",
+        "supplier_codes": [
+          "S-1",
+          "S-2"
+        ],
+        "tags": [
+          "steel",
+          "small"
+        ],
+        "tenant_id": "golden-a",
+        "uid": "fff0a3b5560b41df"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::extract.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::extract.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::extract.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::extract.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::misc\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::extract2.txt::1::misc",
+        "node_id": "misc",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "2 Miscellaneous"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::extract2.txt::1::sec_1",
+        "node_id": "sec_1",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1 Products"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/combo\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 2,
+        "id": "golden-a::extract2.txt::1::sec_1/combo",
+        "node_id": "combo",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.2 Widget B"
+      }
+    },
+    {
+      "key": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/prod_a\"}",
+      "labels": [
+        "Section",
+        "StructureNode"
+      ],
+      "props": {
+        "appearance_order": 1,
+        "id": "golden-a::extract2.txt::1::sec_1/prod_a",
+        "node_id": "prod_a",
+        "role": "section",
+        "source_page_ids": [],
+        "tenant_id": "golden-a",
+        "theme": "default",
+        "title": "1.1 Widget A"
+      }
+    },
+    {
+      "key": "SupplementaryField|{\"uid\": \"06714679d10e66d4\"}",
+      "labels": [
+        "SupplementaryField"
+      ],
+      "props": {
+        "description": "Warranty period.",
+        "field_name": "warranty_period",
+        "field_type": "str | None",
+        "required": false,
+        "tenant_id": "golden-a",
+        "uid": "06714679d10e66d4"
+      }
+    },
+    {
+      "key": "SupplementaryField|{\"uid\": \"509157ae17f008e7\"}",
+      "labels": [
+        "SupplementaryField"
+      ],
+      "props": {
+        "description": "Warranty period.",
+        "field_name": "warranty_period",
+        "field_type": "str | None",
+        "required": false,
+        "tenant_id": "golden-a",
+        "uid": "509157ae17f008e7"
+      }
+    },
+    {
+      "key": "Theme|{\"path\": \"default\"}",
+      "labels": [
+        "Theme"
+      ],
+      "props": {
+        "name": "default",
+        "path": "default"
+      }
+    },
+    {
+      "key": "Theme|{\"path\": \"golden_theme\"}",
+      "labels": [
+        "Theme"
+      ],
+      "props": {
+        "name": "golden_theme",
+        "path": "golden_theme"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "field_name": "place",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "parts",
+        "is_list": true,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "primary_part",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "spec",
+        "is_list": false,
+        "required": false
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {
+        "field_name": "triples",
+        "is_list": true,
+        "required": true
+      },
+      "to": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "type": "AGGREGATES"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"golden_theme\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {},
+      "to": "Theme|{\"path\": \"default\"}",
+      "type": "BELONGS_TO_THEME"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/combo\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/prod_a\"}",
+      "type": "HAS_CHILD"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"37d4ffbebbee01ec\"}",
+      "props": {},
+      "to": "ComplementaryMatch|{\"uid\": \"8c131c30cbe37b8b\"}",
+      "type": "HAS_COMPLEMENTARY_MATCH"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"d180905f2d113506\"}",
+      "props": {},
+      "to": "ComplementaryMatch|{\"uid\": \"0c20a38f8e174214\"}",
+      "type": "HAS_COMPLEMENTARY_MATCH"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"410415965d57fe60\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"410415965d57fe60\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"410415965d57fe60\"}",
+      "props": {
+        "role": "subject"
+      },
+      "to": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"68bd2aefd920ecf0\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"68bd2aefd920ecf0\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"68bd2aefd920ecf0\"}",
+      "props": {
+        "role": "subject"
+      },
+      "to": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"98d97e91d0b83d6a\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"98d97e91d0b83d6a\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"98d97e91d0b83d6a\"}",
+      "props": {
+        "role": "subject"
+      },
+      "to": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"abce5a7dc83ff7f0\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"abce5a7dc83ff7f0\"}",
+      "props": {
+        "role": "object"
+      },
+      "to": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"abce5a7dc83ff7f0\"}",
+      "props": {
+        "role": "subject"
+      },
+      "to": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "type": "HAS_ENTITY"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::misc\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"410415965d57fe60\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"7e140ab283f13127\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"68bd2aefd920ecf0\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::misc\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"98d97e91d0b83d6a\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"a5200a3630e9b3ce\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "props": {},
+      "to": "ExtractionResult|{\"uid\": \"abce5a7dc83ff7f0\"}",
+      "type": "HAS_EXTRACTION"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "City.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"city\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "Name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenNormRow\"}",
+      "props": {
+        "description": "Normalized place.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenNormRow\", \"name\": \"place\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "description": "Part description.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"description\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "description": "Part code.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPart\", \"name\": \"part_code\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "props": {
+        "description": "Canonical place name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"canonical\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPlace\"}",
+      "props": {
+        "description": "Country.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenPlace\", \"name\": \"country\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Plain scalar.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"category\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Manufacturer.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"manufacturer\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Parts.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"parts\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Main part.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"primary_part\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Product name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"product_name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Specification.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"spec\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Supplier codes.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"supplier_codes\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "description": "Tags.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenProduct\", \"name\": \"tags\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "Item.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"item\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "Quantity.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"qty\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "description": "SKU.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenRow\", \"name\": \"sku\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "props": {
+        "description": "Material.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"material\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSpec\"}",
+      "props": {
+        "description": "Weight with units.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSpec\", \"name\": \"weight\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "description": "Supplier code.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_code\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "description": "Supplier name.",
+        "required": false
+      },
+      "to": "ModelField|{\"model\": \"GoldenSupplier\", \"name\": \"supplier_name\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"object\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"predicate\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"TripleItem\"}",
+      "props": {
+        "description": "",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"TripleItem\", \"name\": \"subject\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"Triple\"}",
+      "props": {
+        "description": "All subject-predicate-object statements extracted from the content.",
+        "required": true
+      },
+      "to": "ModelField|{\"model\": \"Triple\", \"name\": \"triples\"}",
+      "type": "HAS_FIELD"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"7e140ab283f13127\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "type": "HAS_GOLDEN_PRODUCT"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"a5200a3630e9b3ce\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "type": "HAS_GOLDEN_PRODUCT"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "type": "HAS_GOLDEN_PRODUCT"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "type": "HAS_GOLDEN_PRODUCT"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "HAS_GOLDEN_SUPPLIER"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "HAS_GOLDEN_SUPPLIER"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"60cecb0c93c0af5c\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"658e95b59b05db54\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"224cbd8e21fa6927\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"2be79cf6e7582739\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::misc\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"2d92c20604eef87d\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"3a5fb229099831d5\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"2cc1ac916e4385b7\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "props": {},
+      "to": "InfoUnit|{\"uid\": \"23488bc745f7226c\"}",
+      "type": "HAS_INFO_UNIT"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::misc\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"1d96a9f48ce3763b\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"37d4ffbebbee01ec\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"e18a1a7deacfd585\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"7231448a043856ab\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::misc\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"e830b5edfef1ae15\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/combo\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"d180905f2d113506\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1/prod_a\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"7f21f1a2e5b5b128\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "props": {},
+      "to": "ModelDecision|{\"uid\": \"71f645906b90c6f3\"}",
+      "type": "HAS_MODEL_DECISION"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "props": {
+        "index": 0
+      },
+      "to": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "index": 1
+      },
+      "to": "ModelInstance|{\"uid\": \"646844a58da3785e\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "index": 0
+      },
+      "to": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "props": {
+        "index": 0
+      },
+      "to": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "index": 1
+      },
+      "to": "ModelInstance|{\"uid\": \"646844a58da3785e\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "index": 0
+      },
+      "to": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "type": "HAS_PARTS"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"673ff7b2d3e31705\"}",
+      "type": "HAS_PRIMARY_PART"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"673ff7b2d3e31705\"}",
+      "type": "HAS_PRIMARY_PART"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"df37c8da402497c6\"}",
+      "type": "HAS_SPEC"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"c68b61842e5fd5ea\"}",
+      "type": "HAS_SPEC"
+    },
+    {
+      "from": "Document|{\"path\": \"extract.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"extract.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"extract2.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::misc\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "Document|{\"path\": \"extract2.txt\", \"tenant_id\": \"golden-a\", \"version\": 1}",
+      "props": {},
+      "to": "StructureNode|{\"id\": \"golden-a::extract2.txt::1::sec_1\"}",
+      "type": "HAS_STRUCTURE"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"37d4ffbebbee01ec\"}",
+      "props": {},
+      "to": "SupplementaryField|{\"uid\": \"06714679d10e66d4\"}",
+      "type": "HAS_SUPPLEMENTARY_FIELD"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"d180905f2d113506\"}",
+      "props": {},
+      "to": "SupplementaryField|{\"uid\": \"509157ae17f008e7\"}",
+      "type": "HAS_SUPPLEMENTARY_FIELD"
+    },
+    {
+      "from": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "props": {
+        "predicate_raw": "is made by"
+      },
+      "to": "Entity|{\"uid\": \"168bfb7b8e1b7bcd\"}",
+      "type": "IS_MADE_BY"
+    },
+    {
+      "from": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "props": {
+        "from_field": "product_name",
+        "to_field": "manufacturer",
+        "via_model": "GoldenProduct"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "type": "MADE_BY"
+    },
+    {
+      "from": "LabeledEntity|{\"uid\": \"37b4ec420f9aa12b\"}",
+      "props": {},
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "MADE_BY"
+    },
+    {
+      "from": "LabeledEntity|{\"uid\": \"c33b1825cc300f5f\"}",
+      "props": {},
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "MADE_BY"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"37d4ffbebbee01ec\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"7f21f1a2e5b5b128\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"d180905f2d113506\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "ModelDecision|{\"uid\": \"e18a1a7deacfd585\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "MATCHED_MODEL"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenPart\"}",
+      "props": {
+        "field_name": "part_code"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenPartCode\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenManufacturer\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenProductName\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "field_name": "tags"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenTag\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenRow\"}",
+      "props": {
+        "field_name": "sku"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenSku\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "props": {
+        "field_name": "supplier_name"
+      },
+      "to": "EntityLabel|{\"label\": \"GoldenSupplierName\"}",
+      "type": "PRODUCES_ENTITY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 0
+      },
+      "to": "LabeledEntity|{\"uid\": \"680480ee708906ea\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "LabeledEntity|{\"uid\": \"c33b1825cc300f5f\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"646844a58da3785e\"}",
+      "props": {
+        "field_name": "part_code"
+      },
+      "to": "LabeledEntity|{\"uid\": \"c1b2d091f97edd9d\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"673ff7b2d3e31705\"}",
+      "props": {
+        "field_name": "part_code"
+      },
+      "to": "LabeledEntity|{\"uid\": \"b4212e8e4c2db4c5\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "props": {
+        "field_name": "supplier_name"
+      },
+      "to": "LabeledEntity|{\"uid\": \"0aee879a0ae5f60c\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "LabeledEntity|{\"uid\": \"37b4ec420f9aa12b\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 0
+      },
+      "to": "LabeledEntity|{\"uid\": \"680480ee708906ea\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 1
+      },
+      "to": "LabeledEntity|{\"uid\": \"c143d2fe22da4bc0\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 0
+      },
+      "to": "LabeledEntity|{\"uid\": \"680480ee708906ea\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "LabeledEntity|{\"uid\": \"c33b1825cc300f5f\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"d75d928d813b6d80\"}",
+      "props": {
+        "field_name": "part_code"
+      },
+      "to": "LabeledEntity|{\"uid\": \"056746fb44933fcc\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "field_name": "manufacturer"
+      },
+      "to": "LabeledEntity|{\"uid\": \"04c0936b127ec479\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "field_name": "product_name"
+      },
+      "to": "LabeledEntity|{\"uid\": \"37b4ec420f9aa12b\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 0
+      },
+      "to": "LabeledEntity|{\"uid\": \"680480ee708906ea\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {
+        "field_name": "tags",
+        "list_index": 1
+      },
+      "to": "LabeledEntity|{\"uid\": \"c143d2fe22da4bc0\"}",
+      "type": "REFERENCES"
+    },
+    {
+      "from": "ComplementaryMatch|{\"uid\": \"0c20a38f8e174214\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "REFERS_TO_MODEL"
+    },
+    {
+      "from": "ComplementaryMatch|{\"uid\": \"8c131c30cbe37b8b\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "REFERS_TO_MODEL"
+    },
+    {
+      "from": "Entity|{\"uid\": \"852119620eca2586\"}",
+      "props": {
+        "predicate_raw": "ships with"
+      },
+      "to": "Entity|{\"uid\": \"815ba70fb62e6367\"}",
+      "type": "SHIPS_WITH"
+    },
+    {
+      "from": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "props": {
+        "composite": false,
+        "join_via": "{\"supplier_codes\": \"supplier_code\"}",
+        "via_field": "supplier_codes"
+      },
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"0698ff8c1a15724b\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"5fba38f63a1e2a9b\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"a96d35561aa285c9\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"ac52db2fbae15eaf\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"5fba38f63a1e2a9b\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ModelInstance|{\"uid\": \"fff0a3b5560b41df\"}",
+      "props": {},
+      "to": "ModelInstance|{\"uid\": \"7bf8059da13dfcae\"}",
+      "type": "SUPPLIED_BY"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "USES_COMPLEMENTARY_MODEL"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenSupplier\"}",
+      "type": "USES_COMPLEMENTARY_MODEL"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"7e140ab283f13127\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "USES_PRIMARY_MODEL"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"a5200a3630e9b3ce\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "USES_PRIMARY_MODEL"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"b6485791473e4a02\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "USES_PRIMARY_MODEL"
+    },
+    {
+      "from": "ExtractionResult|{\"uid\": \"d060bec52efaa083\"}",
+      "props": {},
+      "to": "CatalogModel|{\"name\": \"GoldenProduct\"}",
+      "type": "USES_PRIMARY_MODEL"
+    }
+  ]
+}
