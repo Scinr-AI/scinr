@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+PostgreSQL and SQLite join Neo4j (graph and navigation) and MongoDB (storage and
+snapshots) as backends, so the whole pipeline can run without either of them.
+Neo4j stays the default and behaves exactly as before; its Python driver becomes
+an optional extra. See the new [SQL Graph Backends](docs/user-guides/sql-graph.md)
+guide and the [Graph backends](docs/architecture.md#8e-graph-backends-neo4j-and-sql)
+section of the architecture.
+
+### Breaking changes
+
+- **`neo4j` is now an optional extra.** `pip install scinr` no longer installs the
+  Neo4j driver; install `pip install "scinr[neo4j]"` to keep using
+  `graph_backend="neo4j"` (the default, unchanged). Without it, `import scinr.newton`
+  still works, and the first use of the Neo4j backend (`get_graph_store()`,
+  `get_graph_navigator()`) raises `GraphConnectionError` with the text
+  `pip install 'scinr[neo4j]'`. Add the extra to your requirements, Dockerfiles and CI.
+- **Re-exports.** Nothing exported from `scinr.newton` was removed or made lazy:
+  `scinr.newton.__all__` only grows. Importing the modules of the Neo4j packages
+  (`scinr.newton.graph.neo4j.*`, `scinr.newton.navigation.neo4j.*`) needs the `neo4j` extra,
+  because they import the driver. Outside them, no module imports `neo4j`.
+- **Internal functions that exposed the driver** (`get_driver`, `get_async_driver`,
+  `setup_schema(driver)`, the `driver` / `session` / `tx` arguments) were already changed in
+  0.6.0 (see *Internal modules and functions* there, with the replacement of each:
+  `get_graph_store()` and its sub-interfaces). This release changes no further signature.
+- The default `graph_backend` is still `"neo4j"`. Making a SQL engine the default is a possible
+  future change, not part of this release.
+
+### Added
+
+- **PostgreSQL (14 or later, no extension required) and SQLite backends** for the graph write
+  path (`GraphStore`), the read-only navigation API (`GraphNavigator`), the storage
+  repositories (`RawFileRepository`, `PageRepository`, including page images) and the freeze
+  repository (`FreezeRepository`). One implementation with a `Dialect` per engine; SQLAlchemy
+  Core, no ORM. Install with `pip install "scinr[postgres]"` or `pip install "scinr[sqlite]"`.
+  - New values: `graph_backend` accepts `"postgres"` and `"sqlite"`; `storage_backend` and
+    `freeze_backend` accept `"postgres"` and `"sqlite"`. All the SQL axes share one `sql_url`
+    and must use the same engine. The Neo4j credentials are required only when
+    `graph_backend="neo4j"`.
+  - New settings (`configure()` argument / environment variable / default):
+    `sql_url` / `SQL_URL` / `""`, `sql_schema` / `SQL_SCHEMA` / `"newton"`,
+    `sql_pool_size` / `SQL_POOL_SIZE` / `10`, `sql_fulltext_config` / `SQL_FULLTEXT_CONFIG` /
+    `"simple"`, `sqlite_files_dir` / `SQLITE_FILES_DIR` / `""` (the `.files/` folder next to
+    the `.db`). `sql_url` is redacted in logs and in `repr(config)`.
+  - **Simple mode** (default): newton creates the schema on first use and migrates it when it
+    is behind. Migrations are numbered `.sql` files per dialect with the `newton_schema`
+    control table (no Alembic).
+  - **Row-Level Security mode** (Postgres): `setup_sql_schema(admin_url, enable_rls=True,
+    runtime_role=...)` creates the schema with policies, and the restricted runtime role only
+    reads and writes the tenants granted to it. New administration API, exported from
+    `scinr.newton`: `setup_sql_schema`, `grant_tenant_access`, `revoke_tenant_access`,
+    `list_tenant_access`, with the dataclasses `SchemaStatus` and `TenantAccess`. These are
+    synchronous (one-off administration calls). In RLS mode an upgrade requires running
+    `setup_sql_schema` again with the administrator.
+  - `TenantAccessError` (a `GraphError` and a `StorageError`): the database refused the
+    operation for the tenant. In RLS mode a read of a tenant that was not granted returns
+    nothing (no exception), a read without `tenant_id` sees only the granted tenants, and
+    `delete_document` of a document the role cannot write raises it.
+  - `execute_raw` accepts read-only SQL (`dialect="postgres"` or `"sqlite"`), enforced by the
+    engine (`READ ONLY` transaction, `PRAGMA query_only`).
+  - SQLite keeps raw files, images and snapshots as files next to the `.db`;
+    `scinr.newton.storage.sql.blobs.find_inconsistencies()` reports files without a row and
+    rows without a file after a crash. Postgres keeps them in chunks inside the database.
+  - Freeze snapshots are portable across backends (`SNAPSHOT_SCHEMA_VERSION = 1`): a snapshot
+    made on Neo4j can be restored on Postgres or SQLite and the other way round.
+- Test suites `tests/storage_contract/` (repositories), `tests/equivalence/` (Neo4j against
+  SQL, same scenarios and calls) and `tests/sql_rls/` (restricted Postgres roles, marker
+  `sql_rls`); the `GraphStore` contract in `tests/contract/` now also runs on SQLite and
+  Postgres.
+- Developer guide [Adding a SQL engine](docs/architecture.md#adding-a-sql-engine).
+
+### Changed
+
+- `configure()` validates the three backend axes against the new values and checks `sql_url`
+  (present, matching scheme, no mixing of Postgres and SQLite).
+- Internal helpers shared by every engine moved out of the Neo4j packages and are re-exported
+  from their old place: `navigation.neo4j._map` and `navigation.neo4j._safe` re-export
+  `navigation._map` / `navigation._safe`; the batch sizes and GC bounds (`DELETE_BATCH_ROWS`,
+  `DOCUMENTS_PER_QUERY`, `GC_REACHABILITY_MAX_HOPS`, `GC_FLUSH_CANDIDATES`) are now defined in
+  `graph/types.py`.
+
+### Known differences
+
+Between the SQL backends and Neo4j (full list in
+[SQL Graph Backends](docs/user-guides/sql-graph.md#known-differences-from-neo4j)):
+
+- **Full-text search** (`search_info_units`): Lucene syntax on Neo4j, `websearch_to_tsquery`
+  on Postgres, FTS5 on SQLite (`-word` exclusions are dropped there). The **score** differs
+  (`ts_rank` and `bm25` against Lucene): the set of results is comparable, the order by score
+  is not.
+- **Regular expressions** (`Regex` filter): Java on Neo4j, POSIX on Postgres, Python `re` on
+  SQLite.
+- **D1, restore:** the Neo4j restore creates a relationship unless one with all the same
+  properties exists; SQL keeps one relationship per identity (type, ends and identity
+  properties), so it does not create a second one with other properties. The pipeline never
+  produces a snapshot like that.
+- `execute_raw` takes read-only SQL on the SQL backends, not Cypher.
+- `get_graph_summary` filtered by `created_by_user_id` or `job_id` fails on Neo4j with a
+  `CypherSyntaxError`; the SQL backends answer it.
+- On SQLite tenant isolation is the software filter only (no RLS) and writes are serialized.
+
 ## [0.6.0] - 2026-11-16
 
 The pipeline no longer talks to Neo4j directly: every write to the graph (and

@@ -44,3 +44,24 @@ async def test_context_manager_closes() -> None:
     async with graph_navigator() as nav:
         assert isinstance(nav, Neo4jGraphNavigator)
     Neo4jGraphNavigator.close.assert_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_factory_returns_the_sql_navigator(backend, monkeypatch, tmp_path) -> None:
+    from scinr.newton.navigation.sql.navigator import SqlGraphNavigator
+
+    monkeypatch.setattr(SqlGraphNavigator, "connect", AsyncMock())
+    monkeypatch.setattr(SqlGraphNavigator, "close", AsyncMock())
+    url = f"sqlite:///{tmp_path}/n.db" if backend == "sqlite" else "postgresql://u:p@localhost/db"
+    configure(**_NEO, graph_backend=backend, sql_url=url)
+    async with graph_navigator() as nav:
+        assert isinstance(nav, SqlGraphNavigator)
+    SqlGraphNavigator.connect.assert_awaited()  # type: ignore[attr-defined]
+    SqlGraphNavigator.close.assert_awaited()  # type: ignore[attr-defined]
+
+
+async def test_unknown_backend_message_lists_the_sql_engines(monkeypatch) -> None:
+    cfg = configure(**_NEO)
+    monkeypatch.setattr(cfg, "graph_backend", "titan", raising=False)
+    with pytest.raises(ConfigurationError, match="'neo4j', 'postgres', 'sqlite'"):
+        await get_graph_navigator()

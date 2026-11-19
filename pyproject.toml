@@ -9,7 +9,6 @@ authors = [{name = "Scinr AI"}]
 dependencies = [
     "langchain>=0.3",
     "langgraph>=0.2",
-    "neo4j>=5.0",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     # converters
@@ -32,7 +31,10 @@ dependencies = [
 bedrock = ["langchain-aws>=0.2", "boto3>=1.34"]
 openai = ["langchain-openai>=0.2"]
 ollama = ["langchain-ollama>=0.1"]
+neo4j = ["neo4j>=5.0"]
 mongodb = ["motor>=3.3", "pymongo>=4.6"]
+postgres = ["sqlalchemy[asyncio]>=2.0.30", "psycopg[binary]>=3.1.18"]
+sqlite = ["sqlalchemy[asyncio]>=2.0.30", "aiosqlite>=0.20"]
 # Local transcription (faster-whisper) and HEIC/HEIF images. ffmpeg / ffprobe are
 # system binaries required for audio and video; they are not installed by pip.
 media = ["faster-whisper>=1.0", "pillow-heif>=0.16"]
@@ -48,6 +50,10 @@ dev = [
     "pytest-mock>=3.14",
     "ruff>=0.4",
     "mypy>=1.10",
+    "neo4j>=5.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "psycopg[binary]>=3.1.18",
+    "aiosqlite>=0.20",
 ]
 
 [project.entry-points."scinr.newton.models"]
@@ -64,7 +70,10 @@ packages = ["src/scinr"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["integration: requires running Neo4j and/or MongoDB"]
+markers = [
+    "integration: requires running Neo4j and/or MongoDB",
+    "sql_rls: Postgres Row-Level-Security suite (restricted roles); needs the postgres-test container",
+]
 
 [tool.ruff]
 line-length = 100

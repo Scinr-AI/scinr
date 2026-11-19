@@ -37,14 +37,30 @@ async def get_graph_navigator() -> GraphNavigator:
     backend = cfg.graph_backend
 
     if backend == "neo4j":
-        from scinr.newton.navigation.neo4j.navigator import Neo4jGraphNavigator
+        from scinr.newton.exceptions import GraphConnectionError
 
-        nav = Neo4jGraphNavigator()
+        # The navigator imports the driver lazily, in connect(): guard both steps.
+        try:
+            from scinr.newton.navigation.neo4j.navigator import Neo4jGraphNavigator
+
+            nav = Neo4jGraphNavigator()
+            await nav.connect()
+        except ImportError as exc:  # pragma: no cover - depends on installed extras
+            raise GraphConnectionError(
+                "graph_backend='neo4j' requires the optional dependency: "
+                "pip install 'scinr[neo4j]'"
+            ) from exc
+        return nav
+
+    if backend in ("postgres", "sqlite"):
+        from scinr.newton.navigation.sql.navigator import SqlGraphNavigator
+
+        nav = SqlGraphNavigator()
         await nav.connect()
         return nav
 
     raise ConfigurationError(
-        f"Unknown graph_backend: {backend!r}. Valid values: 'neo4j'."
+        f"Unknown graph_backend: {backend!r}. Valid values: 'neo4j', 'postgres', 'sqlite'."
     )
 
 

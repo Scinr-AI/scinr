@@ -16,8 +16,34 @@ from typing import Any, NamedTuple, Protocol
 GC_MAX_PASSES = 7
 """Maximum number of iterations the tenant-wide orphan sweep runs for each pass."""
 
+DELETE_BATCH_ROWS = 1000
+"""Nodes deleted per write transaction (deletion, GC, freeze, restore)."""
+
+DOCUMENTS_PER_QUERY = 50
+"""Documents whose subtree one query walks."""
+
+GC_REACHABILITY_MAX_HOPS = 7
+"""Hop bound of the "still reachable from an :ExtractionResult" check.
+
+Not to be confused with :data:`GC_MAX_PASSES`. The same bound limits what
+``export_document_snapshot()`` archives from each :ExtractionResult, so that
+export, GC and ``keep_extraction_results`` agree on what hangs from one.
+"""
+
+GC_FLUSH_CANDIDATES = 100_000
+"""Candidates an orphan collector holds before it collects them.
+
+Bounds the memory of the client on a large operation. Collecting early is
+safe: a node still reachable from an :ExtractionResult not deleted yet is
+left alone, and is a candidate again when that one goes.
+"""
+
 __all__ = [
+    "DELETE_BATCH_ROWS",
+    "DOCUMENTS_PER_QUERY",
+    "GC_FLUSH_CANDIDATES",
     "GC_MAX_PASSES",
+    "GC_REACHABILITY_MAX_HOPS",
     "DocumentInfo",
     "DocumentSelector",
     "ExportReader",

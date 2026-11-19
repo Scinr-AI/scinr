@@ -15,7 +15,7 @@ redact_uri(uri)
 redact_secrets(text)
     Scrub free text: mask the userinfo password of every ``scheme://user:pw@``
     it contains, plus any literal occurrence of the configured secrets
-    (Neo4j password, MongoDB URI password, Mistral API key).
+    (Neo4j password, MongoDB URI password, SQL URL password, Mistral API key).
 """
 
 from __future__ import annotations
@@ -72,11 +72,15 @@ def _uri_password(uri: str | None) -> str | None:
 
 @functools.lru_cache(maxsize=8)
 def _literal_secrets(
-    neo4j_password: str | None, mongodb_uri: str | None, mistral_api_key: str | None
+    neo4j_password: str | None,
+    mongodb_uri: str | None,
+    mistral_api_key: str | None,
+    sql_url: str | None = None,
 ) -> tuple[str, ...]:
     candidates: set[str] = set()
     mongo_pw = _uri_password(mongodb_uri)
-    for value in (neo4j_password, mistral_api_key, mongo_pw):
+    sql_pw = _uri_password(sql_url)
+    for value in (neo4j_password, mistral_api_key, mongo_pw, sql_pw):
         if value:
             candidates.add(value)
             candidates.add(unquote_plus(value))  # the decoded form drivers may echo
@@ -95,7 +99,9 @@ def _configured_secrets() -> tuple[str, ...]:
         return ()
     if cfg is None:
         return ()
-    return _literal_secrets(cfg.neo4j_password or None, cfg.mongodb_uri, cfg.mistral_api_key)
+    return _literal_secrets(
+        cfg.neo4j_password or None, cfg.mongodb_uri, cfg.mistral_api_key, cfg.sql_url or None
+    )
 
 
 def redact_secrets(text: str | None) -> str | None:
@@ -103,7 +109,7 @@ def redact_secrets(text: str | None) -> str | None:
 
     Masks the password of every ``scheme://user:password@`` URI in the text,
     then any literal occurrence (raw or URL-decoded) of the currently configured
-    Neo4j password, MongoDB URI password and Mistral API key.
+    Neo4j password, MongoDB URI password, SQL URL password and Mistral API key.
     """
     if not text:
         return text

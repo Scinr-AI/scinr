@@ -35,7 +35,8 @@ def get_storage() -> tuple[RawFileRepository, PageRepository]:
         If the storage backend is unknown or misconfigured.
         If backend='custom' but custom_storage was not provided.
     StorageError
-        If backend='mongodb' but the MongoDB server is unreachable.
+        If backend='mongodb' but the MongoDB server is unreachable, or a SQL
+        backend ('postgres' / 'sqlite') cannot create or reach its schema.
 
     Notes
     -----
@@ -45,18 +46,28 @@ def get_storage() -> tuple[RawFileRepository, PageRepository]:
     """
     from scinr.newton.config import get_config
     from scinr.newton.exceptions import ConfigurationError
+
     cfg = get_config()
     backend = cfg.storage_backend
 
     if backend == "none":
         from scinr.newton.storage.null import NullPageRepository, NullRawFileRepository
+
         return NullRawFileRepository(), NullPageRepository()
 
     if backend == "mongodb":
         _ensure_mongodb_ready(cfg)
         from scinr.newton.storage.mongodb.pages import MongoDBPageRepository
         from scinr.newton.storage.mongodb.raw_files import MongoDBRawFileRepository
+
         return MongoDBRawFileRepository(), MongoDBPageRepository()
+
+    if backend in ("postgres", "sqlite"):
+        _ensure_sql_ready()
+        from scinr.newton.storage.sql.pages import SqlPageRepository
+        from scinr.newton.storage.sql.raw_files import SqlRawFileRepository
+
+        return SqlRawFileRepository(), SqlPageRepository()
 
     if backend == "custom":
         if cfg.custom_storage is None:
@@ -68,8 +79,21 @@ def get_storage() -> tuple[RawFileRepository, PageRepository]:
 
     raise ConfigurationError(
         f"Unknown storage_backend: {backend!r}. "
-        f"Valid values: 'none', 'mongodb', 'custom'."
+        f"Valid values: 'none', 'mongodb', 'postgres', 'sqlite', 'custom'."
     )
+
+
+def _ensure_sql_ready() -> None:
+    """Create, migrate or verify the SQL schema (once per process and target).
+
+    ``ensure_schema`` remembers the targets it verified and ``reset_engines()`` (hence
+    ``configure()``) makes it forget them, so no extra bookkeeping is needed here.
+    """
+    from scinr.newton.sql.errors import sql_errors
+    from scinr.newton.sql.schema import ensure_schema
+
+    with sql_errors("storage"):
+        ensure_schema()
 
 
 def reset_mongodb_readiness() -> None:
@@ -118,9 +142,11 @@ def _check_mongodb_connection(cfg) -> None:
     warning and does not block storage access.
     """
     from scinr.newton.exceptions import StorageError
+
     try:
         from pymongo import MongoClient
         from pymongo.errors import PyMongoError
+
         client = MongoClient(cfg.mongodb_uri, serverSelectionTimeoutMS=5000)
         try:
             client.admin.command("ping")

@@ -28,6 +28,7 @@ from scinr.newton.exceptions import (
     PreconditionError,
     ScinrError,
     StorageError,
+    TenantAccessError,
     TransientGraphError,
     UnsupportedOperationError,
 )
@@ -61,6 +62,14 @@ from scinr.newton.results import (
     RestoreResult,
     SkippedFile,
     StageResult,
+)
+from scinr.newton.sql.admin import (
+    SchemaStatus,
+    TenantAccess,
+    grant_tenant_access,
+    list_tenant_access,
+    revoke_tenant_access,
+    setup_sql_schema,
 )
 from scinr.newton.stages import (
     run_annotation,
@@ -106,6 +115,14 @@ __all__ = [
     "GraphConstraintError",
     "DocumentVersionConflict",
     "GraphQueryError",
+    "TenantAccessError",
+    # SQL administration (PostgreSQL)
+    "setup_sql_schema",
+    "grant_tenant_access",
+    "revoke_tenant_access",
+    "list_tenant_access",
+    "SchemaStatus",
+    "TenantAccess",
     # Result dataclasses
     "DocumentResult",
     "StageResult",

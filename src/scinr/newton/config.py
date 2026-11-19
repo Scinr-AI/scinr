@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
@@ -60,8 +61,9 @@ class PromptFamily(str, Enum):
     To add support for a new model family in the future, add a new member here
     and create the corresponding prompt files (_newmodel.py) in each stage directory.
     """
-    GENERIC       = "generic"        # default — model-agnostic, all LLM families
-    CLAUDE        = "claude"         # XML-structured, extended reasoning protocols
+
+    GENERIC = "generic"  # default — model-agnostic, all LLM families
+    CLAUDE = "claude"  # XML-structured, extended reasoning protocols
     GPT_REASONING = "gpt_reasoning"  # OpenAI reasoning models (GPT-5.5, o3, o4-mini) — goal-based Markdown, no CoT elicitation; use GENERIC for non-reasoning GPT models
 
 
@@ -111,13 +113,13 @@ class ScinrConfig:
     neo4j_password: str = ""
     neo4j_database: str = ""
     # Graph navigation
-    graph_backend: str = "neo4j"  # "neo4j"  (pluggable; more engines later)
+    graph_backend: str = "neo4j"  # "neo4j" | "postgres" | "sqlite"
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None
     enabled_user_themes: list[str] | None = None
     extra_models_paths: list[Path] = field(default_factory=list)
     # Storage
-    storage_backend: str = "none"  # "none" | "mongodb" | "custom"
+    storage_backend: str = "none"  # "none" | "mongodb" | "postgres" | "sqlite" | "custom"
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_database: str = "scinr"
     mongodb_raw_files_collection: str = "raw_files"
@@ -126,13 +128,19 @@ class ScinrConfig:
     mongodb_ensure_indexes: bool = True
     custom_storage: tuple | None = None  # (RawFileRepository, PageRepository)
     # Freeze (document snapshots) — resolved: never None after configure()
-    freeze_backend: str = "none"  # "none" | "mongodb" | "custom"
+    freeze_backend: str = "none"  # "none" | "mongodb" | "postgres" | "sqlite" | "custom"
     mongodb_frozen_collection: str = "frozen_documents"
     mongodb_frozen_gridfs_bucket: str = "frozen_snapshots"
     custom_freeze_storage: Any = None  # FreezeRepository
     # Page images (described embedded images and video frames)
     mongodb_images_collection: str = "page_images"
     mongodb_images_gridfs_bucket: str = "page_image_binaries"
+    # SQL (Postgres / SQLite)
+    sql_url: str = ""
+    sql_schema: str = "newton"
+    sql_pool_size: int = 10
+    sql_fulltext_config: str = "simple"
+    sqlite_files_dir: str = ""
     # Converters
     extra_converters: dict[str, type] = field(default_factory=dict)
     # PDF
@@ -212,7 +220,16 @@ _UNSET = _Unset()
 
 
 _SECRET_FIELDS = frozenset({"neo4j_password", "mistral_api_key"})
-_URI_FIELDS = frozenset({"neo4j_uri", "mongodb_uri"})
+_URI_FIELDS = frozenset({"neo4j_uri", "mongodb_uri", "sql_url"})
+
+#: Values accepted by the three backend axes.
+_GRAPH_BACKENDS = ("neo4j", "postgres", "sqlite")
+_STORAGE_BACKENDS = ("none", "mongodb", "postgres", "sqlite", "custom")
+_SQL_BACKENDS = ("postgres", "sqlite")
+_SQL_SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: URL scheme (before any ``+driver``) -> SQL backend name.
+_SQL_URL_SCHEMES = {"postgresql": "postgres", "postgres": "postgres", "sqlite": "sqlite"}
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +273,13 @@ def configure(
     neo4j_password: str | None = None,
     neo4j_database: str | None = None,
     # Graph navigation
-    graph_backend: Literal["neo4j"] | None = None,
+    graph_backend: Literal["neo4j", "postgres", "sqlite"] | None = None,
     # Models
     enabled_base_themes: list[ThemePath | str] | None = None,
     enabled_user_themes: list[str] | None = None,
     extra_models_paths: list[str | Path] | None = None,
     # Storage
-    storage_backend: Literal["none", "mongodb", "custom"] | None = None,
+    storage_backend: Literal["none", "mongodb", "postgres", "sqlite", "custom"] | None = None,
     mongodb_uri: str | None = None,
     mongodb_database: str | None = None,
     mongodb_raw_files_collection: str | None = None,
@@ -271,13 +288,19 @@ def configure(
     mongodb_ensure_indexes: bool | None = None,
     custom_storage: tuple | None = None,
     # Freeze (document snapshots)
-    freeze_backend: Literal["none", "mongodb", "custom"] | None = None,
+    freeze_backend: Literal["none", "mongodb", "postgres", "sqlite", "custom"] | None = None,
     mongodb_frozen_collection: str | None = None,
     mongodb_frozen_gridfs_bucket: str | None = None,
     custom_freeze_storage: Any | None = None,
     # Page images (described embedded images and video frames)
     mongodb_images_collection: str | None = None,
     mongodb_images_gridfs_bucket: str | None = None,
+    # SQL (Postgres / SQLite)
+    sql_url: str | None = None,
+    sql_schema: str | None = None,
+    sql_pool_size: int | None = None,
+    sql_fulltext_config: str | None = None,
+    sqlite_files_dir: str | None = None,
     # Converters
     extra_converters: dict[str, type] | None = None,
     # PDF
@@ -344,13 +367,14 @@ def configure(
         neo4j_user: Neo4j username. Env: `NEO4J_USER`. Required.
         neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`. Required.
         neo4j_database: Neo4j target database name. Env: `NEO4J_DATABASE`. Required.
-        graph_backend: Backend for the read-only graph-navigation API
-            (`scinr.newton.navigation`). `'neo4j'` (default). Env: `GRAPH_BACKEND`.
-            Validated like `storage_backend`; reserved for future engines.
+        graph_backend: Backend for the graph (write path and the read-only navigation API
+            `scinr.newton.navigation`): `'neo4j'` (default), `'postgres'` or `'sqlite'`.
+            Env: `GRAPH_BACKEND`. The Neo4j credentials are required only for `'neo4j'`.
         enabled_base_themes: Whitelist of built-in theme paths to activate (`ThemePath` values).
         enabled_user_themes: Whitelist of user theme paths to activate.
         extra_models_paths: Filesystem paths to scan for additional user-defined theme models.
-        storage_backend: Storage type: `'none'` (default), `'mongodb'`, or `'custom'`.
+        storage_backend: Storage type: `'none'` (default), `'mongodb'`, `'postgres'`,
+            `'sqlite'` or `'custom'`. Env: `STORAGE_BACKEND`.
         mongodb_uri: MongoDB connection URI. Env: `MONGODB_URI`.
         mongodb_database: MongoDB database name. Env: `MONGODB_DATABASE`.
         mongodb_raw_files_collection: Collection for raw file metadata.
@@ -363,7 +387,7 @@ def configure(
         custom_storage: Tuple `(RawFileRepository, PageRepository)` when `storage_backend='custom'`.
         freeze_backend: Backend for document snapshots (`freeze_document()`,
             `restore_document()`, `export_document_snapshot(destination='storage')`):
-            `'none'`, `'mongodb'` or `'custom'`. Resolution: this argument, else env
+            `'none'`, `'mongodb'`, `'postgres'`, `'sqlite'` or `'custom'`. Resolution: this argument, else env
             `FREEZE_BACKEND`, else **inherits the resolved `storage_backend`**. Leaving it
             `None` (not specified) inherits; passing `'none'` explicitly disables freezing
             even when `storage_backend='mongodb'`. Reuses `mongodb_uri` / `mongodb_database`.
@@ -378,6 +402,20 @@ def configure(
         mongodb_images_gridfs_bucket: GridFS bucket for the original bytes of the
             described page images and video frames. Env:
             `MONGODB_IMAGES_GRIDFS_BUCKET`. Default: `'page_image_binaries'`.
+        sql_url: SQLAlchemy URL of the SQL backends, without driver:
+            `postgresql://user:pass@host:5432/db` or `sqlite:///path/newton.db`. A URL that
+            names a driver (`postgresql+psycopg://`) is accepted and the driver is ignored.
+            Required when any axis is `'postgres'` or `'sqlite'`; all the SQL axes share it
+            and must match its scheme. Env: `SQL_URL`.
+        sql_schema: Postgres schema that holds the tables. Ignored by SQLite.
+            Env: `SQL_SCHEMA`. Default: `'newton'`.
+        sql_pool_size: Connection pool size of each SQL engine (minimum 1).
+            Env: `SQL_POOL_SIZE`. Default: `10`.
+        sql_fulltext_config: Postgres text-search configuration used by `to_tsvector`.
+            Applied only when the schema is created. Env: `SQL_FULLTEXT_CONFIG`.
+            Default: `'simple'`.
+        sqlite_files_dir: Folder for the binaries kept by the SQLite backend. Empty means
+            `<db path without extension>.files/` next to the `.db`. Env: `SQLITE_FILES_DIR`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
         mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
@@ -555,9 +593,7 @@ def configure(
                 region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
                 max_tokens=int(os.getenv("MAX_TOKENS", "65536")),
                 temperature=0,
-                config=BotocoreConfig(
-                    max_pool_connections=max(resolved_concurrency * 2, 20)
-                ),
+                config=BotocoreConfig(max_pool_connections=max(resolved_concurrency * 2, 20)),
             )
         else:
             log.info(
@@ -579,6 +615,15 @@ def configure(
             )
         resolved_repair_llm = resolved_llm  # may be None (navigation-only)
 
+    # ── Graph backend ─────────────────────────────────────────────────────────
+    # Resolved first: the Neo4j credentials are only required for graph_backend="neo4j".
+    resolved_graph_backend = graph_backend or os.getenv("GRAPH_BACKEND", "neo4j")
+    if resolved_graph_backend not in _GRAPH_BACKENDS:
+        raise ConfigurationError(
+            f"Unknown graph_backend: {resolved_graph_backend!r}. "
+            f"Valid values: 'neo4j', 'postgres', 'sqlite'."
+        )
+
     # ── Neo4j ─────────────────────────────────────────────────────────────────
     resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
     resolved_neo4j_user = neo4j_user or os.getenv("NEO4J_USER")
@@ -592,41 +637,38 @@ def configure(
             resolved_neo4j_user = resolved_neo4j_user or parts[0]
             resolved_neo4j_password = resolved_neo4j_password or parts[1]
 
-    if not resolved_neo4j_user:
-        raise ConfigurationError(
-            "Neo4j username is not configured. Options:\n"
-            "  - Set NEO4J_USER=neo4j in your .env file\n"
-            "  - Pass neo4j_user='neo4j' to configure()\n"
-            "  - Set NEO4J_AUTH=neo4j/password in your .env file"
-        )
-    if not resolved_neo4j_password:
-        raise ConfigurationError(
-            "Neo4j password is not configured. Options:\n"
-            "  - Set NEO4J_PASSWORD=your_password in your .env file\n"
-            "  - Pass neo4j_password='...' to configure()\n"
-            "  - Set NEO4J_AUTH=neo4j/password in your .env file"
-        )
-    if not resolved_neo4j_database:
-        raise ConfigurationError(
-            "Neo4j database is not configured. Options:\n"
-            "  - Set NEO4J_DATABASE=neo4j in your .env file\n"
-            "  - Pass neo4j_database='neo4j' to configure()"
-        )
-
-    # ── Graph navigation ──────────────────────────────────────────────────────
-    resolved_graph_backend = graph_backend or os.getenv("GRAPH_BACKEND", "neo4j")
-    if resolved_graph_backend not in ("neo4j",):
-        raise ConfigurationError(
-            f"Unknown graph_backend: {resolved_graph_backend!r}. "
-            f"Valid values: 'neo4j'."
-        )
+    if resolved_graph_backend == "neo4j":
+        if not resolved_neo4j_user:
+            raise ConfigurationError(
+                "Neo4j username is not configured. Options:\n"
+                "  - Set NEO4J_USER=neo4j in your .env file\n"
+                "  - Pass neo4j_user='neo4j' to configure()\n"
+                "  - Set NEO4J_AUTH=neo4j/password in your .env file"
+            )
+        if not resolved_neo4j_password:
+            raise ConfigurationError(
+                "Neo4j password is not configured. Options:\n"
+                "  - Set NEO4J_PASSWORD=your_password in your .env file\n"
+                "  - Pass neo4j_password='...' to configure()\n"
+                "  - Set NEO4J_AUTH=neo4j/password in your .env file"
+            )
+        if not resolved_neo4j_database:
+            raise ConfigurationError(
+                "Neo4j database is not configured. Options:\n"
+                "  - Set NEO4J_DATABASE=neo4j in your .env file\n"
+                "  - Pass neo4j_database='neo4j' to configure()"
+            )
+    else:
+        resolved_neo4j_user = resolved_neo4j_user or ""
+        resolved_neo4j_password = resolved_neo4j_password or ""
+        resolved_neo4j_database = resolved_neo4j_database or ""
 
     # ── Storage ───────────────────────────────────────────────────────────────
     resolved_storage_backend = storage_backend or os.getenv("STORAGE_BACKEND", "none")
-    if resolved_storage_backend not in ("none", "mongodb", "custom"):
+    if resolved_storage_backend not in _STORAGE_BACKENDS:
         raise ConfigurationError(
             f"Unknown storage_backend: {resolved_storage_backend!r}. "
-            f"Valid values: 'none', 'mongodb', 'custom'."
+            f"Valid values: 'none', 'mongodb', 'postgres', 'sqlite', 'custom'."
         )
 
     # ── Freeze ────────────────────────────────────────────────────────────────
@@ -636,11 +678,30 @@ def configure(
     resolved_freeze_backend = (
         freeze_backend or os.getenv("FREEZE_BACKEND") or resolved_storage_backend
     )
-    if resolved_freeze_backend not in ("none", "mongodb", "custom"):
+    if resolved_freeze_backend not in _STORAGE_BACKENDS:
         raise ConfigurationError(
             f"Unknown freeze_backend: {resolved_freeze_backend!r}. "
-            f"Valid values: 'none', 'mongodb', 'custom'."
+            f"Valid values: 'none', 'mongodb', 'postgres', 'sqlite', 'custom'."
         )
+
+    # ── SQL (Postgres / SQLite) ───────────────────────────────────────────────
+    resolved_sql_url = sql_url or os.getenv("SQL_URL", "")
+    resolved_sql_schema = sql_schema or os.getenv("SQL_SCHEMA", "newton")
+    resolved_sql_pool_size = _resolve_int(
+        sql_pool_size, "SQL_POOL_SIZE", 10, "sql_pool_size", minimum=1
+    )
+    resolved_sql_fulltext_config = sql_fulltext_config or os.getenv("SQL_FULLTEXT_CONFIG", "simple")
+    resolved_sqlite_files_dir = sqlite_files_dir or os.getenv("SQLITE_FILES_DIR", "")
+    _validate_sql_config(
+        sql_url=resolved_sql_url,
+        sql_schema=resolved_sql_schema,
+        sql_fulltext_config=resolved_sql_fulltext_config,
+        axes={
+            "graph_backend": resolved_graph_backend,
+            "storage_backend": resolved_storage_backend,
+            "freeze_backend": resolved_freeze_backend,
+        },
+    )
 
     # ── PDF / Mistral OCR chunking ───────────────────────────────────────────
     resolved_mistral_ocr_safe_max_pages = (
@@ -670,8 +731,7 @@ def configure(
     )
     if resolved_mistral_ocr_max_retries < 1:
         raise ConfigurationError(
-            f"mistral_ocr_max_retries must be >= 1. "
-            f"Received: {resolved_mistral_ocr_max_retries!r}."
+            f"mistral_ocr_max_retries must be >= 1. Received: {resolved_mistral_ocr_max_retries!r}."
         )
     resolved_mistral_ocr_retry_backoff_seconds = (
         mistral_ocr_retry_backoff_seconds
@@ -698,13 +758,15 @@ def configure(
     )
     if resolved_mistral_ocr_concurrency < 1:
         raise ConfigurationError(
-            f"mistral_ocr_concurrency must be >= 1. "
-            f"Received: {resolved_mistral_ocr_concurrency!r}."
+            f"mistral_ocr_concurrency must be >= 1. Received: {resolved_mistral_ocr_concurrency!r}."
         )
 
     resolved_mistral_ocr_image_max_pages = _resolve_int(
-        mistral_ocr_image_max_pages, "MISTRAL_OCR_IMAGE_MAX_PAGES", 50,
-        "mistral_ocr_image_max_pages", minimum=1,
+        mistral_ocr_image_max_pages,
+        "MISTRAL_OCR_IMAGE_MAX_PAGES",
+        50,
+        "mistral_ocr_image_max_pages",
+        minimum=1,
     )
 
     # ── Multimodal (images, audio, video) ─────────────────────────────────────
@@ -728,9 +790,7 @@ def configure(
     resolved_store_described_images = _resolve_bool(
         store_described_images, "STORE_DESCRIBED_IMAGES", True
     )
-    resolved_store_video_frames = _resolve_bool(
-        store_video_frames, "STORE_VIDEO_FRAMES", True
-    )
+    resolved_store_video_frames = _resolve_bool(store_video_frames, "STORE_VIDEO_FRAMES", True)
     resolved_media_error_strategy = media_error_strategy or os.getenv(
         "MEDIA_ERROR_STRATEGY", "best_effort"
     )
@@ -750,20 +810,28 @@ def configure(
         max_images_per_page, "MAX_IMAGES_PER_PAGE", 10, "max_images_per_page", minimum=1
     )
     resolved_image_decode_concurrency = _resolve_int(
-        image_decode_concurrency, "IMAGE_DECODE_CONCURRENCY", 1, "image_decode_concurrency",
+        image_decode_concurrency,
+        "IMAGE_DECODE_CONCURRENCY",
+        1,
+        "image_decode_concurrency",
         minimum=1,
     )
     resolved_media_segment_seconds = _resolve_int(
-        media_segment_seconds, "MEDIA_SEGMENT_SECONDS", 300, "media_segment_seconds",
+        media_segment_seconds,
+        "MEDIA_SEGMENT_SECONDS",
+        300,
+        "media_segment_seconds",
         minimum=10,
     )
     _min_segment_explicit = (
-        media_min_segment_seconds is not None
-        or os.getenv("MEDIA_MIN_SEGMENT_SECONDS") is not None
+        media_min_segment_seconds is not None or os.getenv("MEDIA_MIN_SEGMENT_SECONDS") is not None
     )
     resolved_media_min_segment_seconds = _resolve_int(
-        media_min_segment_seconds, "MEDIA_MIN_SEGMENT_SECONDS", 10,
-        "media_min_segment_seconds", minimum=0,
+        media_min_segment_seconds,
+        "MEDIA_MIN_SEGMENT_SECONDS",
+        10,
+        "media_min_segment_seconds",
+        minimum=0,
     )
     _half_segment = resolved_media_segment_seconds // 2
     if resolved_media_min_segment_seconds > _half_segment:
@@ -847,7 +915,9 @@ def configure(
     # botocore connection pool sizing there too.
 
     _neo4j_concurrency_env = os.getenv("NEO4J_CONCURRENCY", "10")
-    resolved_neo4j_concurrency = neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
+    resolved_neo4j_concurrency = (
+        neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
+    )
 
     _neo4j_sync_concurrency_env = os.getenv("NEO4J_SYNC_CONCURRENCY", "8")
     resolved_neo4j_sync_concurrency = (
@@ -866,13 +936,21 @@ def configure(
     resolved_consolidation_max_output_tokens = (
         consolidation_max_output_tokens
         if consolidation_max_output_tokens is not None
-        else (int(_consolidation_max_output_tokens_env) if _consolidation_max_output_tokens_env else None)
+        else (
+            int(_consolidation_max_output_tokens_env)
+            if _consolidation_max_output_tokens_env
+            else None
+        )
     )
     _consolidation_max_input_tokens_env = os.getenv("CONSOLIDATION_MAX_INPUT_TOKENS")
     resolved_consolidation_max_input_tokens = (
         consolidation_max_input_tokens
         if consolidation_max_input_tokens is not None
-        else (int(_consolidation_max_input_tokens_env) if _consolidation_max_input_tokens_env else 65536)
+        else (
+            int(_consolidation_max_input_tokens_env)
+            if _consolidation_max_input_tokens_env
+            else 65536
+        )
     )
 
     # ── Prompt family ─────────────────────────────────────────────────────────
@@ -883,8 +961,7 @@ def configure(
         except ValueError:
             valid = [m.value for m in PromptFamily]
             raise ConfigurationError(
-                f"Invalid prompt_family: {prompt_family!r}. "
-                f"Valid values: {valid}"
+                f"Invalid prompt_family: {prompt_family!r}. Valid values: {valid}"
             ) from None
     else:
         try:
@@ -952,8 +1029,7 @@ def configure(
         custom_storage=custom_storage,
         freeze_backend=resolved_freeze_backend,
         mongodb_frozen_collection=(
-            mongodb_frozen_collection
-            or os.getenv("MONGODB_FROZEN_COLLECTION", "frozen_documents")
+            mongodb_frozen_collection or os.getenv("MONGODB_FROZEN_COLLECTION", "frozen_documents")
         ),
         mongodb_frozen_gridfs_bucket=(
             mongodb_frozen_gridfs_bucket
@@ -961,13 +1037,17 @@ def configure(
         ),
         custom_freeze_storage=custom_freeze_storage,
         mongodb_images_collection=(
-            mongodb_images_collection
-            or os.getenv("MONGODB_IMAGES_COLLECTION", "page_images")
+            mongodb_images_collection or os.getenv("MONGODB_IMAGES_COLLECTION", "page_images")
         ),
         mongodb_images_gridfs_bucket=(
             mongodb_images_gridfs_bucket
             or os.getenv("MONGODB_IMAGES_GRIDFS_BUCKET", "page_image_binaries")
         ),
+        sql_url=resolved_sql_url,
+        sql_schema=resolved_sql_schema,
+        sql_pool_size=resolved_sql_pool_size,
+        sql_fulltext_config=resolved_sql_fulltext_config,
+        sqlite_files_dir=resolved_sqlite_files_dir,
         extra_converters=extra_converters or {},
         mistral_api_key=mistral_api_key or os.getenv("MISTRAL_API_KEY"),
         mistral_ocr_safe_max_pages=resolved_mistral_ocr_safe_max_pages,
@@ -1029,24 +1109,35 @@ def configure(
 
     try:
         from scinr.newton.graph.neo4j.driver import _reset_async_driver_singleton
+
         _reset_async_driver_singleton()
     except Exception:
         pass  # ingest module may not be initialized yet
 
     try:
         from scinr.newton.graph import reset_graph_store
+
         reset_graph_store()
     except Exception:
         pass  # graph package may not be initialized yet
 
     try:
         from scinr.newton.storage.mongodb.client import reset_client
+
         reset_client()
     except Exception:
         pass  # storage mongodb module may not be initialized yet
 
     try:
+        from scinr.newton.sql.engine import reset_engines
+
+        reset_engines()
+    except ImportError:
+        pass  # SQL extras not installed
+
+    try:
         from scinr.newton.annotation.catalog import reset_catalog_memoization
+
         reset_catalog_memoization()
     except Exception:
         pass  # annotation module may not be initialized yet
@@ -1084,6 +1175,50 @@ def _resolve_int(value: int | None, env: str, default: int, name: str, *, minimu
     if resolved < minimum:
         raise ConfigurationError(f"{name} must be >= {minimum}. Received: {resolved!r}.")
     return resolved
+
+
+def _validate_sql_config(
+    *, sql_url: str, sql_schema: str, sql_fulltext_config: str, axes: dict[str, str]
+) -> None:
+    """Validate the SQL settings against the three backend axes.
+
+    Raises:
+        ConfigurationError: If an axis needs ``sql_url`` and it is missing, if the URL
+            scheme does not match an axis, if the axes mix Postgres and SQLite, or if
+            ``sql_schema`` / ``sql_fulltext_config`` are not plain identifiers.
+    """
+    from scinr.newton.utils.redaction import redact_uri
+
+    sql_axes = {name: value for name, value in axes.items() if value in _SQL_BACKENDS}
+    if not sql_axes:
+        return
+
+    first_name, first_value = next(iter(sql_axes.items()))
+    if not sql_url:
+        raise ConfigurationError(f"{first_name} {first_value!r} requires sql_url (or SQL_URL).")
+
+    if len(set(sql_axes.values())) > 1:
+        detail = ", ".join(f"{name}={value!r}" for name, value in sql_axes.items())
+        raise ConfigurationError(
+            f"The SQL axes cannot mix Postgres and SQLite ({detail}): they share one sql_url."
+        )
+
+    scheme = sql_url.partition("://")[0].partition("+")[0].lower()
+    url_backend = _SQL_URL_SCHEMES.get(scheme)
+    if url_backend != first_value:
+        raise ConfigurationError(
+            f"{first_name} {first_value!r} does not match sql_url {redact_uri(sql_url)!r}."
+        )
+
+    if not _SQL_SCHEMA_RE.match(sql_schema):
+        raise ConfigurationError(
+            f"sql_schema must match {_SQL_SCHEMA_RE.pattern}. Received: {sql_schema!r}."
+        )
+    if not _SQL_IDENTIFIER_RE.match(sql_fulltext_config):
+        raise ConfigurationError(
+            f"sql_fulltext_config must match {_SQL_IDENTIFIER_RE.pattern}. "
+            f"Received: {sql_fulltext_config!r}."
+        )
 
 
 def _resolve_bool(value: bool | None, env: str, default: bool) -> bool:

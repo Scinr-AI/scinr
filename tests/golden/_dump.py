@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -78,7 +78,7 @@ def jsonable(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _node_key(labels: list[str], props: dict[str, Any]) -> str:
+def node_key(labels: list[str], props: dict[str, Any]) -> str:
     try:
         primary, fields = node_identity(labels)
     except FreezeError:
@@ -87,6 +87,27 @@ def _node_key(labels: list[str], props: dict[str, Any]) -> str:
         )
     key = {f: props.get(f) for f in fields}
     return f"{primary}|{json.dumps(key, sort_keys=True, default=str, ensure_ascii=False)}"
+
+
+def build_dump(
+    nodes: Iterable[tuple[Sequence[str], dict[str, Any]]],
+    rels: Iterable[tuple[str, str, str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build the neutral dump from ``(labels, props)`` nodes and ``(type, from, to, props)``.
+
+    The relationship ends are node keys already computed with :func:`node_key`. Any backend
+    that can list its nodes and relationships produces the same structure.
+    """
+    out_nodes: list[dict[str, Any]] = []
+    for labels, raw_props in nodes:
+        labels = sorted(labels)
+        props = jsonable(raw_props)
+        out_nodes.append({"key": node_key(labels, props), "labels": labels, "props": props})
+    relationships = [
+        {"type": rel_type, "from": src, "to": dst, "props": jsonable(props)}
+        for rel_type, src, dst, props in rels
+    ]
+    return {"nodes": _sorted_nodes(out_nodes), "relationships": _sorted_rels(relationships)}
 
 
 def dump_graph(driver: Any, database: str) -> dict[str, Any]:
@@ -100,24 +121,11 @@ def dump_graph(driver: Any, database: str) -> dict[str, Any]:
             "properties(r) AS props"
         ).data()
 
-    keys: dict[str, str] = {}
-    nodes: list[dict[str, Any]] = []
-    for row in raw_nodes:
-        labels = sorted(row["labels"])
-        props = jsonable(row["props"])
-        key = _node_key(labels, props)
-        keys[row["id"]] = key
-        nodes.append({"key": key, "labels": labels, "props": props})
-    relationships = [
-        {
-            "type": row["type"],
-            "from": keys[row["a"]],
-            "to": keys[row["b"]],
-            "props": jsonable(row["props"]),
-        }
-        for row in raw_rels
-    ]
-    return {"nodes": _sorted_nodes(nodes), "relationships": _sorted_rels(relationships)}
+    keys = {row["id"]: node_key(sorted(row["labels"]), jsonable(row["props"])) for row in raw_nodes}
+    return build_dump(
+        [(row["labels"], row["props"]) for row in raw_nodes],
+        [(row["type"], keys[row["a"]], keys[row["b"]], row["props"]) for row in raw_rels],
+    )
 
 
 def _sorted_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
