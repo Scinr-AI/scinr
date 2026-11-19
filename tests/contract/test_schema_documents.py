@@ -8,6 +8,7 @@ import pytest
 
 from scinr.newton.exceptions import DocumentVersionConflict
 from scinr.newton.graph.types import DocumentSelector
+from scinr.newton.models.document_structure import InfoUnit, NodeRole, StructureNode
 from tests.golden._scenarios import TENANT_A, TENANT_B, product_structure
 
 from ._helpers import documents, labels, make_document, rels, twice
@@ -79,6 +80,36 @@ class TestInsertDocumentGraph:
         assert leaf["props"]["created_by_user_id"] == "u"
         assert len(rels(graph, "IS_COMPOSED_OF")) >= 2
         assert labels(graph, "InfoUnit")
+
+    async def test_writes_paragraph_reference_properties(self, graph_store, dump):
+        child = StructureNode(
+            node_id="child",
+            title="Child",
+            role=NodeRole.SECTION,
+            appearance_order=1,
+            info_units=[InfoUnit(title="Child", order=0, description="Child text.")],
+        )
+        parent = StructureNode(
+            node_id="parent",
+            title="Parent",
+            role=NodeRole.SECTION,
+            appearance_order=1,
+            source_paragraphs=["1:1-2", "2:1-1"],
+            paragraph_segmenter_version=1,
+            info_units_mode="verbatim",
+            info_units=[InfoUnit(title="Parent", order=0, description="Parent text.")],
+            children=[child],
+        )
+        graph_store.documents.insert_document_graph(
+            make_document("a.txt", tenant=TENANT_A, structure=[parent]), 1, False
+        )
+        nodes = {n["props"]["node_id"]: n["props"] for n in labels(dump(), "StructureNode")}
+        assert list(nodes["parent"]["source_paragraphs"]) == ["1:1-2", "2:1-1"]
+        assert nodes["parent"]["paragraph_segmenter_version"] == 1
+        assert nodes["parent"]["info_units_mode"] == "verbatim"
+        assert nodes["child"]["info_units_mode"] == "summary"
+        assert list(nodes["child"]["source_paragraphs"]) == []
+        assert nodes["child"].get("paragraph_segmenter_version") is None
 
     async def test_is_idempotent_in_update_mode(self, graph_store, dump):
         doc = make_document("a.txt", tenant=TENANT_A)

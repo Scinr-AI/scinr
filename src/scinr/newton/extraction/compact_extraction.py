@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from scinr.newton.extraction.paragraphs import merge_ranges
 from scinr.newton.models.document_structure import Document, NodeRole, StructureNode
 
 # ── Role categories ───────────────────────────────────────────────────────────
@@ -167,6 +168,8 @@ def _dedup_siblings(nodes: list[StructureNode]) -> None:
             first.source_page_ids = list(
                 dict.fromkeys(first.source_page_ids + node.source_page_ids)
             )
+            # Merge paragraph_ranges: overlapping or contiguous ranges are united
+            first.paragraph_ranges = merge_ranges(first.paragraph_ranges + node.paragraph_ranges)
             to_remove.append(idx)
 
     for i in reversed(to_remove):

@@ -29,7 +29,7 @@ def no_llm_extraction(monkeypatch):
         return document
 
     monkeypatch.setattr(extraction, "_run_chunk_extraction", _fake_run_chunk_extraction)
-    monkeypatch.setattr(extraction, "get_llm", lambda: None)
+    monkeypatch.setattr(extraction, "get_llm", lambda *, stage=None: None)
     monkeypatch.setattr(
         extraction, "get_config", lambda: SimpleNamespace(extraction_batch_size=10)
     )

@@ -126,6 +126,7 @@ See [Multimodal Ingestion](user-guides/multimodal-ingestion.md). `vision_llm` an
 | :--- | :--- | :--- |
 | `PROMPT_CACHING_ENABLED` | `true` | Enable prompt caching. Currently effective for AWS Bedrock; ignored for other providers. |
 | `EXTRACTION_BATCH_SIZE` | `1` | Number of pages per extraction chunk. |
+| `VERBATIM_INFO_UNIT_MAX_CHARS` | `4000` | Maximum characters of each InfoUnit in `run_pipeline(info_units_mode="verbatim")`; longer paragraphs are split into several InfoUnits. Minimum `100`. |
 | `PROMPT_FAMILY` | `generic` | Prompt template family: `generic`, `claude`, or `gpt_reasoning`. |
 | `SCINR_EXTRA_MODELS_PATHS` | `""` (empty) | Colon-separated list of extra model package paths. |
 | `FULL_DOCSTRING` | `true` | Saves the full docstring from the models. On False, it only saves the first line before a jumpline. |
@@ -274,11 +275,14 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 | :--- | :--- | :--- |
 | `llm_concurrency` | `int \| None` | Max concurrent LLM calls across all stages. Default `4`. |
 | `extraction_batch_size` | `int \| None` | Pages per extraction chunk. Default `1`. |
+| `verbatim_info_unit_max_chars` | `int \| None` | Maximum characters of each InfoUnit in `info_units_mode="verbatim"` (longer paragraphs are split). Default `4000`, minimum `100`. |
 | `prompt_caching_enabled` | `bool \| None` | Bedrock system-prompt caching. Default `True`. |
 | `full_docstring` | `bool \| None` | Store the full model docstring (`True`) or only its first line (`False`). Default `True`. |
 | `consolidation_token_safety_margin` | `float \| None` | Fraction of `max_tokens` reserved for output during `fast_extraction=True` consolidation. Default `0.75`. |
 | `consolidation_max_output_tokens` | `int \| None` | Explicit output-token ceiling for consolidation; derived from the margin when unset. Default `None`. |
 | `consolidation_max_input_tokens` | `int \| None` | Input-token ceiling that sizes the consolidation batches. Default `65536`. |
+
+> **Note:** `info_units_mode`, like `fast_extraction`, is a per-call `run_pipeline()` argument; see [Running the Pipeline](user-guides/running-pipeline.md#info_units_mode--infounits-of-stage-1).
 
 > **Note:** `fast_extraction` itself is **not** a `configure()` setting — it is a per-call `run_pipeline(fast_extraction=...)` argument. See [Running the Pipeline](user-guides/running-pipeline.md#fast_extraction-parallel-stage-1-extraction-opt-in).
 
@@ -519,6 +523,90 @@ configure(prompt_family="generic")  # default, works everywhere
 
 ---
 
+## LLM por etapa (Per-Stage LLM)
+
+By default one `llm`, one `prompt_family` and one `prompt_caching_enabled` serve every LLM
+call of the pipeline. `llm_stage_configuration` lets each stage have its own.
+
+```python
+from scinr.newton import StageLLMConfig, configure
+
+configure(
+    llm=ChatBedrockConverse(model="...sonnet..."),      # default for every stage
+    prompt_family="claude",
+    llm_stage_configuration={
+        "extraction": StageLLMConfig(llm=ChatBedrockConverse(model="...haiku...")),
+        "entity_extraction": StageLLMConfig(
+            llm=ChatOpenAI(model="..."),
+            prompt_family="gpt_reasoning",
+        ),
+    },
+)
+```
+
+`StageLLMConfig` has three fields, all optional:
+
+| Field | Type | `None` means |
+| :--- | :--- | :--- |
+| `llm` | `BaseChatModel \| None` | the global `llm` |
+| `prompt_family` | `PromptFamily \| str \| None` | the global `prompt_family` |
+| `prompt_caching_enabled` | `bool \| None` | the global `prompt_caching_enabled` |
+
+### Stages
+
+| Key | Calls it covers |
+| :--- | :--- |
+| `extraction` | Per-chunk structure extraction (stage 1) **and** the consolidation call of `fast_extraction=True` |
+| `annotation` | The model decision of annotation (stage 3) |
+| `entity_extraction` | Entity extraction (stage 4) |
+| `tabular` | `classify_theme`, `decide_model` and `map_columns` of the tabular pipeline |
+
+The consolidation of the fast branch is part of stage 1 and has no configuration of its own:
+it uses `extraction`.
+
+### Resolution rules
+
+- **Each field resolves on its own.** A `None` field takes the global value, so you can change
+  only the prompt family of a stage and keep the global `llm`.
+- **Validation in `configure()`.** An unknown key, a value that is not a `StageLLMConfig`, an
+  `llm` that is not a `BaseChatModel`, an invalid family or a non-bool `prompt_caching_enabled`
+  raises `ConfigurationError` (the unknown-key message lists the valid keys).
+- **No environment variables**: the values are objects, like `llm`.
+- **The global `llm` is still required** when a stage that runs has no LLM of its own. The
+  error is the usual one, prefixed with the name of the stage that asked for it.
+- **The prompt family is never inferred from the model.** A stage with its own `llm` but no
+  `prompt_family` uses the global `prompt_family`.
+- **Global configuration**: it cannot be changed per `run_pipeline()` call.
+- The Bedrock `cachePoint` is added when the **stage's** LLM is `ChatBedrockConverse` and the
+  **stage's** caching is enabled.
+
+### What does not change
+
+- `repair_llm` is still a single LLM for all stages (falling back to `llm`).
+- `normalization_llm` is unchanged: it falls back to `llm`, not to the `tabular` configuration.
+- `vision_llm` and `transcriber` are unchanged.
+
+### Concurrency
+
+There is a single global semaphore (`llm_concurrency`) for all stages. If two stages use
+providers with different rate limits, set the global limit to that of the most restrictive one.
+
+### Logging
+
+`configure()` logs (INFO) which stages have their own configuration and the family and caching
+each uses, with the model name only, never keys or credentials. Each call logs at DEBUG the
+model of its stage.
+
+### Accessors
+
+- `get_stage_config(stage)` returns the resolved `llm`, `prompt_family` and
+  `prompt_caching_enabled` of a stage.
+- `get_llm(temperature=0.0, *, stage=None)`, `get_prompt_family(*, stage=None)` and
+  `make_system_message(text, *, stage=None)`. Without `stage` they use the global values, as
+  before.
+
+---
+
 ## Complete Reference: All Settings
 
 For quick lookup, here is every configurable setting with its resolution chain:
@@ -585,6 +673,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Prompt Caching** | `prompt_caching_enabled` | `PROMPT_CACHING_ENABLED` | `true` |
 | **Full Docstring** | `full_docstring` | `FULL_DOCSTRING` | `true` |
 | **Extraction Batch** | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | `1` |
+| **Verbatim InfoUnit size** | `verbatim_info_unit_max_chars` | `VERBATIM_INFO_UNIT_MAX_CHARS` | `4000` |
 | **Prompt Family** | `prompt_family` | `PROMPT_FAMILY` | `generic` |
 | **Extra Models Paths** | `extra_models_paths` | `SCINR_EXTRA_MODELS_PATHS` | `""` |
 | **Enabled Base Themes** | `enabled_base_themes` | *(none)* | `None` |

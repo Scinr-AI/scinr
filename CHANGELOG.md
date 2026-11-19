@@ -75,9 +75,45 @@ section of the architecture.
   `sql_rls`); the `GraphStore` contract in `tests/contract/` now also runs on SQLite and
   Postgres.
 - Developer guide [Adding a SQL engine](docs/architecture.md#adding-a-sql-engine).
+- **One LLM per stage.** New `configure(llm_stage_configuration=...)` parameter and
+  `StageLLMConfig` dataclass (exported from `scinr.newton`) to give the `extraction`,
+  `annotation`, `entity_extraction` and `tabular` stages their own `llm`, `prompt_family` and
+  `prompt_caching_enabled`. Each field left as `None` takes the global value, so without the
+  new parameter nothing changes. `get_llm()`, `get_prompt_family()` and `make_system_message()`
+  accept a keyword-only `stage`, and `get_stage_config()` returns the resolved settings. The
+  entity extraction system message now goes through `make_system_message()`, so Bedrock prompt
+  caching applies to it as to the other stages. See
+  [LLM por etapa](docs/configuration.md#llm-por-etapa-per-stage-llm).
+- **Paragraph anchors in Stage 1.** The current pages of each extraction prompt carry a `[[n]]`
+  marker before every paragraph (numbered continuously over the whole document, in both the
+  normal and the `fast_extraction` branch), and the LLM cites the paragraphs of each node in a
+  new `paragraph_ranges` field instead of `source_page_ids`. After extraction the pipeline
+  validates the ranges, derives `source_page_ids` from them and fills three new
+  `StructureNode` properties, written by Neo4j, SQLite and Postgres: `source_paragraphs`
+  (informative `"<page>:<from>-<to>"` spans), `paragraph_segmenter_version` and
+  `info_units_mode`. In the SQL schema they are three new columns of `structure_nodes`
+  (added to `0001_init.sql`; no migration, there is no SQL database created yet). Graphs
+  already ingested lack them: read their absence as `info_units_mode = "summary"` and no
+  `source_paragraphs`.
+- **`run_pipeline(info_units_mode="summary" | "verbatim")`.** `"summary"` (default) keeps the
+  LLM-written InfoUnits. `"verbatim"` makes the LLM return only the structure plus the
+  paragraph ranges of each node, and the pipeline builds one InfoUnit per cited paragraph with
+  the original text, which cuts the Stage 1 output tokens. Independent of `fast_extraction`
+  (all four combinations are valid). `"verbatim"` without `"extraction"` in `stages` raises
+  `ValueError`. See [Running the Pipeline](docs/user-guides/running-pipeline.md#info_units_mode--infounits-of-stage-1).
+- **`verbatim_info_unit_max_chars`** (`configure()` / `VERBATIM_INFO_UNIT_MAX_CHARS`, default
+  `4000`, minimum `100`): paragraphs longer than this are split into several InfoUnits in
+  `verbatim` mode.
 
 ### Changed
 
+- **`extract-*.json` files written by this version cannot be read by earlier versions.** The
+  models use `extra="forbid"` and the files now contain `paragraph_ranges`, `source_paragraphs`,
+  `paragraph_segmenter_version` and `info_units_mode`. Older files are read by this version
+  (empty ranges, `info_units_mode = "summary"`).
+- The Stage 1 prompt of the `summary` mode now carries the `[[n]]` markers and the
+  `paragraph_ranges` output field, so its output may vary slightly from earlier versions.
+  The golden baseline was regenerated because `StructureNode` writes three new properties.
 - `configure()` validates the three backend axes against the new values and checks `sql_url`
   (present, matching scheme, no mixing of Postgres and SQLite).
 - Internal helpers shared by every engine moved out of the Neo4j packages and are re-exported

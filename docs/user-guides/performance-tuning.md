@@ -202,6 +202,19 @@ configure(extraction_batch_size=1)  # Default: 1 page per chunk
 | Very long documents (100+ pages) | 2-3 | Reduces call count significantly |
 | Documents with complex tables | 1 | Tables need focused context; grouping may lose detail |
 
+### Verbatim InfoUnits (`info_units_mode`)
+
+**Default:** `"summary"`  **Passed to:** `run_pipeline(info_units_mode=...)`
+
+Stage 1 output tokens are usually its largest cost, because the LLM writes a summary of every
+node. With `info_units_mode="verbatim"` the LLM returns only the structure and the paragraph
+ranges of each node, and the pipeline builds the InfoUnits by copying the cited paragraphs:
+the output is much smaller, and so are the broken-JSON repair calls. The trade-off is that the
+InfoUnits are the original text (annotation and entity extraction receive somewhat more input)
+and that content the LLM does not cite is not stored: check the coverage figure of the
+per-document `INFO` log. It is independent of `fast_extraction` and can be combined with it.
+See [Running the Pipeline](running-pipeline.md#info_units_mode--infounits-of-stage-1).
+
 ### Fast Extraction (`fast_extraction`)
 
 **Default:** `False`  **Passed to:** `run_pipeline(fast_extraction=...)` — a per-call

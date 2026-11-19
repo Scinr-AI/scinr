@@ -102,6 +102,9 @@ structure_nodes = _table(
     _col("appearance_order", sa.BigInteger),
     _col("row_index", sa.BigInteger),
     _col("source_page_ids", JsonList),
+    _col("source_paragraphs", JsonList),
+    _col("paragraph_segmenter_version", sa.BigInteger),
+    _col("info_units_mode"),
     *_provenance(),
     _props(),
     _col("_document_key"),
@@ -358,6 +361,6 @@ TYPED_COLUMNS: dict[str, frozenset[str]] = {
 
 #: For every node table: the typed columns that hold a list of texts.
 LIST_COLUMNS: dict[str, frozenset[str]] = {
-    "structure_nodes": frozenset({"source_page_ids"}),
+    "structure_nodes": frozenset({"source_page_ids", "source_paragraphs"}),
     **{name: frozenset({"created_by_user_ids", "job_ids"}) for name in DEDUP_TABLES},
 }

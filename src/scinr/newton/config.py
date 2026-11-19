@@ -25,6 +25,7 @@ Usage (environment variables / .env file):
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -99,6 +100,30 @@ Examples::
 # ---------------------------------------------------------------------------
 # Config dataclass
 # ---------------------------------------------------------------------------
+
+
+
+#: Stages that accept their own LLM configuration (llm_stage_configuration keys).
+LLM_STAGES: tuple[str, ...] = ("extraction", "annotation", "entity_extraction", "tabular")
+
+
+@dataclass(frozen=True)
+class StageLLMConfig:
+    """LLM settings of one pipeline stage. ``None`` in a field means "use the global value"."""
+
+    llm: Any = None  # BaseChatModel
+    prompt_family: PromptFamily | str | None = None
+    prompt_caching_enabled: bool | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedStageConfig:
+    """Effective settings of one stage: every field already resolved against the globals."""
+
+    stage: str
+    llm: Any  # None only when neither the stage nor the global config has an LLM
+    prompt_family: PromptFamily
+    prompt_caching_enabled: bool
 
 
 @dataclass
@@ -177,6 +202,7 @@ class ScinrConfig:
     prompt_caching_enabled: bool = True
     full_docstring: bool = True
     extraction_batch_size: int = 1
+    verbatim_info_unit_max_chars: int = 4000
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
     neo4j_sync_concurrency: int = 8
@@ -192,6 +218,8 @@ class ScinrConfig:
     normalization_enabled: bool = True
     normalization_batch_size: int = 5
     normalization_llm: Any = None  # BaseChatModel — falls back to llm if None
+    # Per-stage LLM configuration (validated; prompt_family already a PromptFamily)
+    llm_stage_configuration: dict[str, StageLLMConfig] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         # The generated dataclass repr would print the secrets verbatim — and it
@@ -352,6 +380,8 @@ def configure(
     normalization_enabled: bool | None = None,
     normalization_batch_size: int | None = None,
     normalization_llm: Any | None = None,
+    llm_stage_configuration: dict[str, StageLLMConfig] | None = None,
+    verbatim_info_unit_max_chars: int | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -528,6 +558,10 @@ def configure(
             to the LLM during annotation and stored as `CatalogModel.description` in
             the graph database. Env: `FULL_DOCSTRING`. Default: `True`.
         extraction_batch_size: Pages per extraction chunk (default: `1`).
+        verbatim_info_unit_max_chars: Maximum length, in characters, of each InfoUnit created
+            in `info_units_mode="verbatim"`; longer paragraphs are split into several
+            InfoUnits. Must be >= 100, otherwise `ConfigurationError` is raised.
+            Env: `VERBATIM_INFO_UNIT_MAX_CHARS`. Default: `4000`.
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
         neo4j_concurrency: Max concurrent graph-store sessions during annotation and entity
             extraction, for any graph backend (Neo4j or SQL; default: `10`).
@@ -554,6 +588,25 @@ def configure(
         normalization_enabled: Enable post-extraction normalization for tabular data.
         normalization_batch_size: Max normalization entries per LLM batch (default: `5`).
         normalization_llm: Dedicated LLM model instance for tabular normalization.
+        llm_stage_configuration: Per-stage LLM settings, as a dict of stage name ->
+            `StageLLMConfig`. Valid stages: `"extraction"`, `"annotation"`,
+            `"entity_extraction"`, `"tabular"`. Each `StageLLMConfig` field left as
+            `None` takes the global value (`llm`, `prompt_family`,
+            `prompt_caching_enabled`). The structure consolidation of
+            `fast_extraction` uses the `"extraction"` stage. `repair_llm`,
+            `normalization_llm`, `vision_llm` and `transcriber` are not affected.
+            Not read from environment variables. Example::
+
+                configure(
+                    llm=ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6"),
+                    llm_stage_configuration={
+                        "extraction": StageLLMConfig(
+                            llm=ChatOpenAI(model="gpt-5.5"),
+                            prompt_family="gpt_reasoning",
+                        ),
+                        "annotation": StageLLMConfig(prompt_family="claude"),
+                    },
+                )
 
     Returns:
         ScinrConfig singleton containing active library settings.
@@ -914,6 +967,15 @@ def configure(
         if extraction_batch_size is not None
         else int(os.getenv("EXTRACTION_BATCH_SIZE", "1"))
     )
+    resolved_verbatim_max_chars = (
+        verbatim_info_unit_max_chars
+        if verbatim_info_unit_max_chars is not None
+        else int(os.getenv("VERBATIM_INFO_UNIT_MAX_CHARS", "4000"))
+    )
+    if resolved_verbatim_max_chars < 100:
+        raise ConfigurationError(
+            f"verbatim_info_unit_max_chars must be >= 100, got {resolved_verbatim_max_chars}."
+        )
     # resolved_concurrency is computed earlier (see "── LLM" section above),
     # before the Bedrock client is constructed, so it's available for the
     # botocore connection pool sizing there too.
@@ -976,6 +1038,8 @@ def configure(
                 "Unknown PROMPT_FAMILY env value %r, defaulting to 'generic'.",
                 _env_prompt_family,
             )
+
+    resolved_llm_stage_configuration = _resolve_llm_stage_configuration(llm_stage_configuration)
 
     # ── Normalization ─────────────────────────────────────────────────────────
     resolved_normalization_enabled = (
@@ -1084,6 +1148,7 @@ def configure(
         prompt_caching_enabled=resolved_caching,
         full_docstring=resolved_full_docstring,
         extraction_batch_size=resolved_batch_size,
+        verbatim_info_unit_max_chars=resolved_verbatim_max_chars,
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,
         neo4j_sync_concurrency=resolved_neo4j_sync_concurrency,
@@ -1095,6 +1160,7 @@ def configure(
         normalization_enabled=resolved_normalization_enabled,
         normalization_batch_size=resolved_normalization_batch_size,
         normalization_llm=resolved_normalization_llm,
+        llm_stage_configuration=resolved_llm_stage_configuration,
     )
 
     # ── Post-init: apply converter overrides ──────────────────────────────────
@@ -1145,6 +1211,32 @@ def configure(
         reset_catalog_memoization()
     except Exception:
         pass  # annotation module may not be initialized yet
+
+    if resolved_llm_stage_configuration:
+        stage_summaries = []
+        for stage_name, stage_sc in resolved_llm_stage_configuration.items():
+            stage_llm = stage_sc.llm if stage_sc.llm is not None else resolved_llm
+            resolved_stage = ResolvedStageConfig(
+                stage=stage_name,
+                llm=stage_llm,
+                prompt_family=(
+                    stage_sc.prompt_family
+                    if stage_sc.prompt_family is not None
+                    else resolved_prompt_family
+                ),
+                prompt_caching_enabled=(
+                    stage_sc.prompt_caching_enabled
+                    if stage_sc.prompt_caching_enabled is not None
+                    else resolved_caching
+                ),
+            )
+            llm_label = _llm_label(stage_llm) if stage_sc.llm is not None else "global"
+            stage_summaries.append(
+                f"{stage_name}: llm={llm_label}, "
+                f"prompt_family={resolved_stage.prompt_family.value}, "
+                f"prompt_caching={resolved_stage.prompt_caching_enabled}"
+            )
+        log.info("LLM stage configuration: %s", "; ".join(stage_summaries))
 
     log.debug(
         "scinr-ingest configured: storage=%s, graph_backend=%s, llm_concurrency=%d, "
@@ -1284,7 +1376,58 @@ def _validate_llm(llm: Any) -> None:
         )
 
 
-def _require_llm() -> Any:
+def _llm_label(llm: Any) -> str:
+    """Model name of *llm* for logs: never credentials."""
+    for attr in ("model_id", "model", "model_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(llm).__name__
+
+
+def _resolve_llm_stage_configuration(value: Any) -> dict[str, StageLLMConfig]:
+    """Validate ``llm_stage_configuration`` and normalise each ``prompt_family``."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigurationError(
+            "llm_stage_configuration must be a dict of stage name -> StageLLMConfig, "
+            f"got {type(value).__name__}."
+        )
+    resolved: dict[str, StageLLMConfig] = {}
+    for stage, sc in value.items():
+        if stage not in LLM_STAGES:
+            raise ConfigurationError(
+                f"Unknown stage {stage!r} in llm_stage_configuration. "
+                f"Valid stages: {list(LLM_STAGES)}"
+            )
+        if not isinstance(sc, StageLLMConfig):
+            raise ConfigurationError(
+                f"llm_stage_configuration[{stage!r}] must be a StageLLMConfig, "
+                f"got {type(sc).__name__}."
+            )
+        if sc.llm is not None:
+            _validate_llm(sc.llm)
+        family: PromptFamily | None = None
+        if sc.prompt_family is not None:
+            try:
+                family = PromptFamily(sc.prompt_family)
+            except ValueError:
+                raise ConfigurationError(
+                    f"Invalid prompt_family {sc.prompt_family!r} for stage {stage!r}. "
+                    f"Valid values: {[m.value for m in PromptFamily]}"
+                ) from None
+        if sc.prompt_caching_enabled is not None and not isinstance(
+            sc.prompt_caching_enabled, bool
+        ):
+            raise ConfigurationError(
+                f"prompt_caching_enabled for stage {stage!r} must be a bool or None."
+            )
+        resolved[stage] = dataclasses.replace(sc, prompt_family=family)
+    return resolved
+
+
+def _require_llm(stage: str | None = None) -> Any:
     """Return the configured main LLM or raise a descriptive ConfigurationError.
 
     Raises:
@@ -1292,8 +1435,14 @@ def _require_llm() -> Any:
     """
     cfg = get_config()
     if cfg.llm is None:
+        prefix = (
+            f"Stage {stage!r} has no LLM in llm_stage_configuration and no global llm "
+            "is configured.\n\n"
+            if stage is not None
+            else ""
+        )
         raise ConfigurationError(
-            "An LLM is required for this operation but none is configured.\n"
+            prefix + "An LLM is required for this operation but none is configured.\n"
             "\n"
             "Configure one before running LLM-dependent stages (extraction, "
             "annotation, entity extraction, or tabular mapping/normalization):\n"
@@ -1350,9 +1499,35 @@ def get_available_themes() -> dict[str, list[str]]:
     }
 
 
-def get_llm(temperature: float = 0.0):
-    """Return the configured LLM. Optionally binds a temperature."""
-    llm = _require_llm()
+def get_stage_config(stage: str) -> ResolvedStageConfig:
+    """Effective LLM settings of *stage* (each field: the stage's value, else the global one)."""
+    if stage not in LLM_STAGES:
+        raise ValueError(f"Unknown stage {stage!r}. Valid stages: {list(LLM_STAGES)}")
+    cfg = get_config()
+    sc = cfg.llm_stage_configuration.get(stage) or StageLLMConfig()
+    return ResolvedStageConfig(
+        stage=stage,
+        llm=sc.llm if sc.llm is not None else cfg.llm,
+        prompt_family=(
+            PromptFamily(sc.prompt_family) if sc.prompt_family is not None else cfg.prompt_family
+        ),
+        prompt_caching_enabled=(
+            sc.prompt_caching_enabled
+            if sc.prompt_caching_enabled is not None
+            else cfg.prompt_caching_enabled
+        ),
+    )
+
+
+def get_llm(temperature: float = 0.0, *, stage: str | None = None):
+    """Return the configured LLM (of *stage* when given). Optionally binds a temperature."""
+    if stage is None:
+        llm = _require_llm()
+    else:
+        llm = get_stage_config(stage).llm
+        if llm is None:
+            llm = _require_llm(stage=stage)
+        log.debug("LLM for stage %s: %s", stage, _llm_label(llm))
     if temperature == 0.0:
         return llm
     try:
@@ -1425,29 +1600,38 @@ def embedded_images_enabled() -> bool:
     return bool(_config.describe_embedded_images and _config.vision_llm is not None)
 
 
-def get_prompt_family() -> PromptFamily:
+def get_prompt_family(*, stage: str | None = None) -> PromptFamily:
     """Return the configured prompt family (GENERIC, CLAUDE, or GPT_REASONING).
 
     Controls which prompt variant is used for all LLM calls in the pipeline.
     Set via configure(prompt_family=PromptFamily.CLAUDE) or PROMPT_FAMILY=claude env var.
+    With *stage*, returns the family of that stage (its own, else the global one).
     """
+    if stage is not None:
+        return get_stage_config(stage).prompt_family
     return get_config().prompt_family
 
 
-def make_system_message(text: str):
+def make_system_message(text: str, *, stage: str | None = None):
     """
     Create a SystemMessage. If the LLM is ChatBedrockConverse and prompt caching
     is enabled, appends a Bedrock-specific cachePoint block (~90% token cost reduction
     on repeated calls with the same prompt). For all other providers, returns a
-    standard SystemMessage.
+    standard SystemMessage. With *stage*, the LLM and the caching flag are those of
+    that stage.
     """
     from langchain_core.messages import SystemMessage
 
     try:
         from langchain_aws import ChatBedrockConverse
 
-        cfg = get_config()
-        if isinstance(cfg.llm, ChatBedrockConverse) and cfg.prompt_caching_enabled:
+        if stage is None:
+            cfg = get_config()
+            llm, caching_enabled = cfg.llm, cfg.prompt_caching_enabled
+        else:
+            stage_cfg = get_stage_config(stage)
+            llm, caching_enabled = stage_cfg.llm, stage_cfg.prompt_caching_enabled
+        if isinstance(llm, ChatBedrockConverse) and caching_enabled:
             return SystemMessage(
                 content=[
                     {"type": "text", "text": text},

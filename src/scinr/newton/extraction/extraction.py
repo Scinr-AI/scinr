@@ -33,8 +33,21 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
-from scinr.newton.config import make_system_message
-from scinr.newton.models.document_structure import DocumentStructure, StructureNode
+from scinr.newton.config import get_prompt_family, make_system_message
+from scinr.newton.extraction.paragraphs import (
+    ParagraphIndex,
+    ParagraphStats,
+    merge_ranges,
+    strip_markers,
+)
+from scinr.newton.models.document_structure import (
+    DocumentStructureSummaryOutput,
+    DocumentStructureVerbatimOutput,
+    InfoUnitsMode,
+    StructureNode,
+    StructureNodeSummaryOutput,
+    StructureNodeVerbatimOutput,
+)
 from scinr.newton.prompts.system_prompt import build_extraction_prompt
 from scinr.newton.utils.llm_repair import MAX_REPAIR_RETRIES, extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
@@ -45,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 _PHASE1_TEMPERATURE = 0.0
+_INFO_UNITS_MODES = ("summary", "verbatim")
 
 
 # ── Error class ───────────────────────────────────────────────────────────────
@@ -57,26 +71,35 @@ class ExtractionMaxRetriesError(Exception):
 # ── Dynamic output class (built once at module load) ──────────────────────────
 
 
-def _build_extraction_output_class() -> type:
-    """Builds a DocumentStructure subclass with `theme` validated as a dynamic Literal.
+def _build_extraction_output_class(info_units_mode: str = "summary") -> type:
+    """Builds the LLM output schema with `theme` validated as a dynamic Literal.
 
-    Called once at module load time. The returned class is used as the schema
+    The node and document base classes depend on *info_units_mode*: summary mode uses
+    ``StructureNodeSummaryOutput`` / ``DocumentStructureSummaryOutput``; verbatim mode uses
+    the ``Verbatim`` variants, which have no ``info_units``.
+
+    Called lazily, once per mode. The returned class is used as the schema
     for with_structured_output(), which translates the Literal type into an
     `{"enum": [...]}` constraint in the Bedrock tool_use JSON schema — preventing
     the LLM from hallucinating theme values.
 
-    Since StructureNode is recursive, we use a subclass approach rather than
+    Since the node class is recursive, we use a subclass approach rather than
     pydantic.create_model to preserve the recursive children reference.
     """
     from typing import Literal
 
-    from pydantic import BaseModel
-
     from scinr.newton.utils.theme_registry import get_theme_registry
+    if info_units_mode == "verbatim":
+        node_base: type = StructureNodeVerbatimOutput
+        document_base: type = DocumentStructureVerbatimOutput
+    else:
+        node_base = StructureNodeSummaryOutput
+        document_base = DocumentStructureSummaryOutput
+
     theme_paths = tuple(get_theme_registry().get_all_theme_paths())
     if not theme_paths:
-        # Fallback: no themes discovered, use plain DocumentStructure
-        return DocumentStructure
+        # Fallback: no themes discovered, use the plain document output
+        return document_base
 
     # make_literal unpacks a tuple as separate Literal arguments
     # e.g. make_literal("a", "b") → Literal["a", "b"]
@@ -85,8 +108,8 @@ def _build_extraction_output_class() -> type:
 
     ThemeLiteral = make_literal(*theme_paths)
 
-    class ExtractionStructureNode(StructureNode):
-        """StructureNode subclass with theme validated as a Literal enum."""
+    class ExtractionStructureNode(node_base):  # type: ignore[valid-type,misc]
+        """Node output subclass with theme validated as a Literal enum."""
         theme: ThemeLiteral = theme_paths[0]  # type: ignore[valid-type]
         children: list[ExtractionStructureNode] = []
 
@@ -104,41 +127,44 @@ def _build_extraction_output_class() -> type:
         f"Please report this as a bug."
     )
 
-    class ExtractionDocumentStructure(BaseModel):
-        """DocumentStructure subclass using ExtractionStructureNode for theme validation."""
+    class ExtractionDocumentStructure(document_base):  # type: ignore[valid-type,misc]
+        """Document output subclass using ExtractionStructureNode for theme validation."""
         nodes: list[ExtractionStructureNode]
 
     return ExtractionDocumentStructure
 
 
-# Lazy singletons — built on first use after configure() has been called.
+# Lazy caches — built on first use after configure() has been called.
 # Reset by reset_extraction_cache() which is called from reset_theme_registry().
-_EXTRACTION_OUTPUT_CLASS: type | None = None
-_EXTRACTION_PROMPT: str | None = None
+_EXTRACTION_OUTPUT_CLASSES: dict[str, type] = {}  # key: info_units_mode
+_EXTRACTION_PROMPTS: dict[tuple[str, str], str] = {}  # key: (family.value, info_units_mode)
 
 
-def _get_extraction_output_class() -> type:
-    global _EXTRACTION_OUTPUT_CLASS
-    if _EXTRACTION_OUTPUT_CLASS is None:
-        _EXTRACTION_OUTPUT_CLASS = _build_extraction_output_class()
-    return _EXTRACTION_OUTPUT_CLASS
-
-
-def _get_extraction_prompt() -> str:
-    global _EXTRACTION_PROMPT
-    if _EXTRACTION_PROMPT is None:
-        from scinr.newton.utils.theme_registry import get_theme_registry
-        _EXTRACTION_PROMPT = build_extraction_prompt(
-            get_theme_registry().build_theme_section_for_extraction_prompt()
+def _get_extraction_output_class(info_units_mode: str = "summary") -> type:
+    if info_units_mode not in _EXTRACTION_OUTPUT_CLASSES:
+        _EXTRACTION_OUTPUT_CLASSES[info_units_mode] = _build_extraction_output_class(
+            info_units_mode
         )
-    return _EXTRACTION_PROMPT
+    return _EXTRACTION_OUTPUT_CLASSES[info_units_mode]
+
+
+def _get_extraction_prompt(info_units_mode: str = "summary") -> str:
+    family = get_prompt_family(stage="extraction")
+    key = (family.value, info_units_mode)
+    if key not in _EXTRACTION_PROMPTS:
+        from scinr.newton.utils.theme_registry import get_theme_registry
+        _EXTRACTION_PROMPTS[key] = build_extraction_prompt(
+            get_theme_registry().build_theme_section_for_extraction_prompt(),
+            family=family,
+            info_units_mode=info_units_mode,
+        )
+    return _EXTRACTION_PROMPTS[key]
 
 
 def reset_extraction_cache() -> None:
-    """Invalidate lazy singletons. Called from reset_theme_registry() after configure()."""
-    global _EXTRACTION_OUTPUT_CLASS, _EXTRACTION_PROMPT
-    _EXTRACTION_OUTPUT_CLASS = None
-    _EXTRACTION_PROMPT = None
+    """Invalidate lazy caches. Called from reset_theme_registry() after configure()."""
+    _EXTRACTION_OUTPUT_CLASSES.clear()
+    _EXTRACTION_PROMPTS.clear()
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -249,6 +275,65 @@ def _assign_page_ids_recursive(
         _assign_page_ids_recursive(node.children, page_ids)
 
 
+def _walk(nodes: list[StructureNode]):
+    """Yield every node of the subtrees, parents before children."""
+    for node in nodes:
+        yield node
+        yield from _walk(node.children)
+
+
+def _postprocess_nodes(
+    llm_nodes: list,
+    *,
+    curr_page_ids: list[str] | None,
+    allowed: tuple[int, int] | None,
+    has_index: bool,
+    paragraph_stats: ParagraphStats | None,
+    log_context: str,
+) -> list[StructureNode]:
+    """Convert the LLM output nodes to StructureNode, clean markers and validate ranges.
+
+    Args:
+        llm_nodes: Nodes parsed from the LLM output (output-schema instances).
+        curr_page_ids: Page ids of the chunk; stamped as ``source_page_ids`` fallback.
+        allowed: Inclusive (lo, hi) paragraph numbers shown to the LLM, or None.
+        has_index: Whether anchors were shown to the LLM at all.
+        paragraph_stats: Counter shared by the document's chunks, if any.
+        log_context: Label included in the discard warnings.
+    """
+    nodes = [StructureNode.model_validate(n.model_dump()) for n in llm_nodes]
+    for node in _walk(nodes):
+        if node.title:
+            node.title = strip_markers(node.title) or None
+        for unit in node.info_units:
+            unit.title = strip_markers(unit.title)
+            unit.description = strip_markers(unit.description)
+
+        valid = []
+        for r in node.paragraph_ranges:
+            if not has_index:
+                continue
+            if r.start > r.end:
+                reason = "start > end"
+            elif allowed is None:
+                reason = "no paragraphs in the current pages"
+            elif r.start < allowed[0] or r.end > allowed[1]:
+                reason = f"outside the current pages (allowed {allowed[0]}-{allowed[1]})"
+            else:
+                valid.append(r)
+                continue
+            logger.warning(
+                "Discarded paragraph range %d-%d of node %r (%s): %s",
+                r.start, r.end, node.node_id, log_context, reason,
+            )
+            if paragraph_stats is not None:
+                paragraph_stats.discarded_ranges += 1
+        node.paragraph_ranges = merge_ranges(valid)
+    if curr_page_ids:
+        _assign_page_ids_recursive(nodes, curr_page_ids)
+    return nodes
+
+
 async def extract_chunk(
     prev_page: str,
     curr_pages: list[str],
@@ -258,6 +343,11 @@ async def extract_chunk(
     user_context: str = "",
     *,
     defer_hierarchy: bool = False,
+    paragraph_index: ParagraphIndex | None = None,
+    curr_positions: list[int] | None = None,
+    info_units_mode: InfoUnitsMode = "summary",
+    paragraph_stats: ParagraphStats | None = None,
+    log_context: str = "",
 ) -> list[StructureNode]:
     """
     Extract structured nodes from one sliding-window chunk.
@@ -288,24 +378,65 @@ async def extract_chunk(
             cannot be resolved from ``<previous_page>`` alone — see
             ``_FAST_EXTRACTION_MODE_NOTE``. Defaults to ``False`` (unchanged behavior;
             no ``<extraction_mode>`` block is added).
+        paragraph_index: Global paragraph numbering of the document. When provided, the
+            current pages are shown to the LLM with ``[[n]]`` anchors (not
+            ``prev_page``) and the returned nodes carry validated ``paragraph_ranges``.
+        curr_positions: Positions of ``curr_pages`` inside ``paragraph_index``. Required
+            with ``paragraph_index``; must have the same length as ``curr_pages``.
+        info_units_mode: ``"summary"`` (the LLM writes InfoUnits) or ``"verbatim"`` (the
+            LLM only cites paragraph ranges; requires ``paragraph_index``).
+        paragraph_stats: Counter updated with every discarded paragraph range.
+        log_context: Label (e.g. the chunk) included in range-discard warnings.
 
     Returns:
         Merged, parsed nodes for this chunk.
 
     Raises:
         ExtractionMaxRetriesError: If both phases exhaust all repair retries without a successful parse.
+        ValueError: On inconsistent paragraph_index / curr_positions / info_units_mode arguments.
     """
+    if info_units_mode not in _INFO_UNITS_MODES:
+        raise ValueError(f"Unknown info_units_mode {info_units_mode!r}")
+    if paragraph_index is not None and (
+        curr_positions is None or len(curr_positions) != len(curr_pages)
+    ):
+        raise ValueError(
+            "paragraph_index requires curr_positions with one position per page in curr_pages"
+        )
+    if info_units_mode == "verbatim" and paragraph_index is None:
+        raise ValueError("info_units_mode='verbatim' requires paragraph_index (the anchors)")
+
+    allowed = (
+        paragraph_index.number_range(curr_positions) if paragraph_index is not None else None
+    )
+    pages_for_prompt = (
+        [paragraph_index.marked_page(p) for p in curr_positions]
+        if paragraph_index is not None
+        else curr_pages
+    )
+    output_class = _get_extraction_output_class(info_units_mode)
+
+    def postprocess(llm_nodes: list) -> list[StructureNode]:
+        return _postprocess_nodes(
+            llm_nodes,
+            curr_page_ids=curr_page_ids,
+            allowed=allowed,
+            has_index=paragraph_index is not None,
+            paragraph_stats=paragraph_stats,
+            log_context=log_context,
+        )
+
     if llm is None:
         from scinr.newton.config import get_llm
-        llm = get_llm()
-    structured_llm = llm.with_structured_output(_get_extraction_output_class(), include_raw=True)
+        llm = get_llm(stage="extraction")
+    structured_llm = llm.with_structured_output(output_class, include_raw=True)
 
     # ── Phase 1: full context ──────────────────────────────────────────────────
     human_text_p1 = _build_human_message(
-        prev_page, curr_pages, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
+        prev_page, pages_for_prompt, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
     )
     messages_p1 = [
-        make_system_message(_get_extraction_prompt()),
+        make_system_message(_get_extraction_prompt(info_units_mode), stage="extraction"),
         HumanMessage(content=human_text_p1),
     ]
 
@@ -314,25 +445,20 @@ async def extract_chunk(
 
     if result_p1["parsed"] is not None:
         logger.info("Phase 1: structured output parsed successfully.")
-        nodes = result_p1["parsed"].nodes
-        if curr_page_ids:
-            _assign_page_ids_recursive(nodes, curr_page_ids)
-        return nodes
+        return postprocess(result_p1["parsed"].nodes)
 
     logger.warning("Phase 1: structured output failed, running repair loop.")
     broken_json_p1 = extract_raw_payload(result_p1["raw"])
     error_p1 = result_p1.get("parsing_error", "Unknown parse error")
 
     repaired_p1 = await run_repair_loop(
-        schema=_get_extraction_output_class(),
+        schema=output_class,
         initial_raw=broken_json_p1,
         initial_error=str(error_p1),
         context_label="extraction-phase1",
     )
     if repaired_p1 is not None:
-        if curr_page_ids:
-            _assign_page_ids_recursive(repaired_p1.nodes, curr_page_ids)
-        return repaired_p1.nodes
+        return postprocess(repaired_p1.nodes)
 
     # ── Phase 2: without previous page ────────────────────────────────────────
     logger.warning(
@@ -340,13 +466,13 @@ async def extract_chunk(
         "Falling back to Phase 2 (no previous page context)."
     )
 
-    structured_llm_p2 = llm.with_structured_output(_get_extraction_output_class(), include_raw=True)
+    structured_llm_p2 = llm.with_structured_output(output_class, include_raw=True)
 
     human_text_p2 = _build_human_message(
-        "", curr_pages, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
+        "", pages_for_prompt, active_hierarchy, user_context, defer_hierarchy=defer_hierarchy
     )
     messages_p2 = [
-        make_system_message(_get_extraction_prompt()),
+        make_system_message(_get_extraction_prompt(info_units_mode), stage="extraction"),
         HumanMessage(content=human_text_p2),
     ]
 
@@ -355,25 +481,20 @@ async def extract_chunk(
 
     if result_p2["parsed"] is not None:
         logger.info("Phase 2: structured output parsed successfully.")
-        nodes = result_p2["parsed"].nodes
-        if curr_page_ids:
-            _assign_page_ids_recursive(nodes, curr_page_ids)
-        return nodes
+        return postprocess(result_p2["parsed"].nodes)
 
     logger.warning("Phase 2: structured output also failed, running repair loop.")
     broken_json_p2 = extract_raw_payload(result_p2["raw"])
     error_p2 = result_p2.get("parsing_error", "Unknown parse error")
 
     repaired_p2 = await run_repair_loop(
-        schema=_get_extraction_output_class(),
+        schema=output_class,
         initial_raw=broken_json_p2,
         initial_error=str(error_p2),
         context_label="extraction-phase2",
     )
     if repaired_p2 is not None:
-        if curr_page_ids:
-            _assign_page_ids_recursive(repaired_p2.nodes, curr_page_ids)
-        return repaired_p2.nodes
+        return postprocess(repaired_p2.nodes)
 
     logger.error(
         "All Phase 1 and Phase 2 repair attempts exhausted. "

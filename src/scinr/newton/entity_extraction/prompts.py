@@ -37,7 +37,7 @@ def build_extraction_system_prompt(composite_schema: type) -> str:
     """Build the entity extraction system prompt for the configured PromptFamily."""
     from scinr.newton.config import PromptFamily, get_prompt_family
 
-    family = get_prompt_family()
+    family = get_prompt_family(stage="entity_extraction")
     if family == PromptFamily.CLAUDE:
         from scinr.newton.entity_extraction import prompts_claude as m
     elif family == PromptFamily.GPT_REASONING:

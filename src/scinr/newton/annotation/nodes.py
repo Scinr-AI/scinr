@@ -158,10 +158,10 @@ async def _decide_model(
     human_content = _build_annotation_human_message(ctx, user_context=user_context)
 
     _msgs = [
-        make_system_message(decision_prompt),
+        make_system_message(decision_prompt, stage="annotation"),
         HumanMessage(content=human_content),
     ]
-    llm_structured = get_llm(temperature=0).with_structured_output(
+    llm_structured = get_llm(temperature=0, stage="annotation").with_structured_output(
         AnnotationDecision, include_raw=True
     )
 

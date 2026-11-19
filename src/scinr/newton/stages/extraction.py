@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING
 from scinr.newton.config import get_config, get_llm, get_llm_semaphore
 from scinr.newton.extraction.compact_extraction import compact_extraction, get_active_hierarchy
 from scinr.newton.extraction.extraction import ExtractionMaxRetriesError, extract_chunk
+from scinr.newton.extraction.paragraphs import (
+    ParagraphIndex,
+    ParagraphStats,
+    finalize_paragraph_references,
+)
 from scinr.newton.extraction.structure_consolidation import (
     assemble_tree,
     consolidate_structure,
@@ -22,7 +27,7 @@ from scinr.newton.extraction.structure_consolidation import (
     namespace_node_ids,
     write_map_checkpoint,
 )
-from scinr.newton.models.document_structure import Document
+from scinr.newton.models.document_structure import Document, InfoUnitsMode
 from scinr.newton.results import DocumentResult, StageResult
 
 if TYPE_CHECKING:
@@ -40,14 +45,17 @@ async def _run_chunk_extraction(
     output_file: Path | None,
     llm,
     fast_extraction: bool,
+    *,
+    paragraph_index: ParagraphIndex,
+    info_units_mode: InfoUnitsMode,
 ) -> Document:
     """Runs the legacy sequential or fast-extraction parallel chunk-processing
     loop against *document*, writing intermediate/final output when
     *output_file* is set, and returns the mutated *document*.
     """
+    stats = ParagraphStats()
     if not fast_extraction:
-        # ── Legacy sequential path (fast_extraction=False, always the
-        # default) — unchanged. Do not modify a single line in this branch. ──
+        # Legacy sequential path (fast_extraction=False). Paragraph anchors apply here too (spec decision 7).
         for chunk_idx, (prev_page, curr_pages) in enumerate(chunks):
             active_hierarchy = get_active_hierarchy(document)
             curr_start_idx = chunk_idx * batch_size  # position in `pages`/`page_indices`
@@ -66,6 +74,11 @@ async def _run_chunk_extraction(
                         llm=llm,
                         curr_page_ids=curr_page_ids,
                         user_context=document.context_instructions or "",
+                        paragraph_index=paragraph_index,
+                        curr_positions=list(range(curr_start_idx, curr_start_idx + len(curr_pages))),
+                        info_units_mode=info_units_mode,
+                        paragraph_stats=stats,
+                        log_context=f"document={document.document_name!r} chunk={chunk_idx + 1}/{len(chunks)}",
                     )
             except ExtractionMaxRetriesError:
                 logger.warning(
@@ -82,7 +95,11 @@ async def _run_chunk_extraction(
     else:
         # ── fast_extraction=True: parallel chunk extraction + consolidation ──
         async def _extract_one_chunk_fast(
-            chunk_idx: int, prev_page: str, curr_pages: list[str], curr_page_ids: list[str] | None
+            chunk_idx: int,
+            prev_page: str,
+            curr_pages: list[str],
+            curr_page_ids: list[str] | None,
+            curr_positions: list[int],
         ) -> list:
             try:
                 async with get_llm_semaphore():
@@ -94,6 +111,11 @@ async def _run_chunk_extraction(
                         llm=llm,
                         curr_page_ids=curr_page_ids,
                         user_context=document.context_instructions or "",
+                        paragraph_index=paragraph_index,
+                        curr_positions=curr_positions,
+                        info_units_mode=info_units_mode,
+                        paragraph_stats=stats,
+                        log_context=f"document={document.document_name!r} chunk={chunk_idx + 1}/{len(chunks)}",
                     )
             except ExtractionMaxRetriesError:
                 logger.warning(
@@ -112,7 +134,10 @@ async def _run_chunk_extraction(
                 if page_indices[curr_start_idx + i] in page_ids_by_index
             ] or None
             chunk_first_abs_page_idx.append(page_indices[curr_start_idx])
-            tasks.append(_extract_one_chunk_fast(chunk_idx, prev_page, curr_pages, curr_page_ids))
+            curr_positions = list(range(curr_start_idx, curr_start_idx + len(curr_pages)))
+            tasks.append(
+                _extract_one_chunk_fast(chunk_idx, prev_page, curr_pages, curr_page_ids, curr_positions)
+            )
 
         all_chunks_nodes = await asyncio.gather(*tasks)
 
@@ -130,6 +155,13 @@ async def _run_chunk_extraction(
         if checkpoint_path is not None:
             delete_map_checkpoint(checkpoint_path)
 
+    finalize_paragraph_references(
+        document, paragraph_index,
+        info_units_mode=info_units_mode,
+        max_chars=get_config().verbatim_info_unit_max_chars,
+        stats=stats,
+    )
+
     # Final write if output requested
     if output_file:
         output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
@@ -142,6 +174,7 @@ async def extract_one_intermediate(
     doc: IntermediateDocument,
     output_path: Path | None,
     fast_extraction: bool = False,
+    info_units_mode: InfoUnitsMode = "summary",
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
@@ -170,6 +203,11 @@ async def extract_one_intermediate(
         parallel with cross-chunk hierarchy resolution deferred to a single
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
+    info_units_mode:
+        ``"summary"`` (default) keeps the InfoUnits written by the LLM;
+        ``"verbatim"`` builds them from the paragraphs the LLM cites, copying
+        the source text. Independent of *fast_extraction*. See
+        ``run_pipeline()``'s docstring.
     tenant_id, created_by_user_id, job_id:
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``
@@ -229,7 +267,8 @@ async def extract_one_intermediate(
         job_id=job_id if job_id is not None else doc.job_id,
         file_metadata=doc.file_metadata,
     )
-    llm = get_llm()
+    llm = get_llm(stage="extraction")
+    paragraph_index = ParagraphIndex(pages, page_indices, page_ids_by_index)
 
     # Set up output file if output_folder provided
     if output_path:
@@ -244,6 +283,8 @@ async def extract_one_intermediate(
 
     return await _run_chunk_extraction(
         document, chunks, page_indices, page_ids_by_index, batch_size, output_file, llm, fast_extraction,
+        paragraph_index=paragraph_index,
+        info_units_mode=info_units_mode,
     )
 
 
@@ -252,6 +293,7 @@ async def extract_one_file(
     output_path: Path | None,
     input_folder: Path | None,
     fast_extraction: bool = False,
+    info_units_mode: InfoUnitsMode = "summary",
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
@@ -283,6 +325,11 @@ async def extract_one_file(
         parallel with cross-chunk hierarchy resolution deferred to a single
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
+    info_units_mode:
+        ``"summary"`` (default) keeps the InfoUnits written by the LLM;
+        ``"verbatim"`` builds them from the paragraphs the LLM cites, copying
+        the source text. Independent of *fast_extraction*. See
+        ``run_pipeline()``'s docstring.
     tenant_id, created_by_user_id, job_id:
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``
@@ -342,7 +389,8 @@ async def extract_one_file(
         job_id=job_id if job_id is not None else raw.get("job_id"),
         file_metadata=raw.get("file_metadata"),
     )
-    llm = get_llm()
+    llm = get_llm(stage="extraction")
+    paragraph_index = ParagraphIndex(pages, page_indices, page_ids_by_index)
 
     # Determine relative structure to preserve subdir layout
     if input_folder:
@@ -362,6 +410,8 @@ async def extract_one_file(
 
     return await _run_chunk_extraction(
         document, chunks, page_indices, page_ids_by_index, batch_size, output_file, llm, fast_extraction,
+        paragraph_index=paragraph_index,
+        info_units_mode=info_units_mode,
     )
 
 
@@ -383,7 +433,7 @@ async def run_extraction(
     ``extract_one_file()`` with ``fast_extraction=False`` — the ``fast_extraction``
     flag is only reachable via ``run_pipeline()``'s per-document-unit engine
     (``_process_document_unit()``). This is a deliberate scope boundary, not
-    an oversight.
+    an oversight. It also always uses ``info_units_mode="summary"``.
 
     Parameters
     ----------

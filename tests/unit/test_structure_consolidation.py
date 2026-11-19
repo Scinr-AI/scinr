@@ -30,6 +30,7 @@ import pytest
 
 from scinr.newton.config import configure
 from scinr.newton.extraction.structure_consolidation import (
+    _render_pool,
     assemble_tree,
     consolidate_structure,
     delete_map_checkpoint,
@@ -37,7 +38,7 @@ from scinr.newton.extraction.structure_consolidation import (
     write_map_checkpoint,
 )
 from scinr.newton.models.consolidation import ParentDecision
-from scinr.newton.models.document_structure import NodeRole, StructureNode
+from scinr.newton.models.document_structure import NodeRole, ParagraphRange, StructureNode
 
 
 @pytest.fixture(autouse=True)
@@ -978,3 +979,61 @@ class TestCheckpointIO:
         delete_map_checkpoint(checkpoint_path)  # must not raise.
 
         assert not checkpoint_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. paragraph_ranges survive namespacing, assembly, checkpoint and rendering
+# ---------------------------------------------------------------------------
+
+
+def _ranged(node_id: str, role: NodeRole, ranges: list[tuple[int, int]], **kw) -> StructureNode:
+    node = _node(node_id, role, **kw)
+    node.paragraph_ranges = [ParagraphRange(start=a, end=b) for a, b in ranges]
+    return node
+
+
+def _pairs(node: StructureNode) -> list[tuple[int, int]]:
+    return [(r.start, r.end) for r in node.paragraph_ranges]
+
+
+class TestParagraphRangesPreserved:
+    def test_namespace_node_ids_leaves_ranges_untouched(self):
+        child = _ranged("a_1", NodeRole.SUBSECTION, [(4, 5)])
+        top = _ranged("a", NodeRole.SECTION, [(1, 3)], children=[child])
+
+        namespace_node_ids([top], page_number=2)
+
+        assert _pairs(top) == [(1, 3)]
+        assert _pairs(top.children[0]) == [(4, 5)]
+
+    def test_assemble_tree_keeps_ranges_of_orphan_from_other_chunk(self):
+        top = _ranged("sec1", NodeRole.SECTION, [(1, 2)])
+        orphan = _ranged("orphan1", NodeRole.SUBSECTION, [(7, 9), (12, 12)])
+
+        tree = assemble_tree(
+            [[top], [orphan]],
+            [ParentDecision(node_id="orphan1", decided_parent_id="sec1")],
+        )
+
+        placed = tree[0].children[0]
+        assert placed.node_id == "orphan1"
+        assert _pairs(placed) == [(7, 9), (12, 12)]
+        assert _pairs(tree[0]) == [(1, 2)]
+
+    def test_checkpoint_contains_paragraph_ranges(self, tmp_path: Path):
+        top = _ranged("page-1::sec1", NodeRole.SECTION, [(3, 4)])
+        path = tmp_path / "doc.map-checkpoint.json"
+
+        write_map_checkpoint(path, [[top]])
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload[0][0]["paragraph_ranges"] == [{"start": 3, "end": 4}]
+
+    def test_render_pool_is_identical_with_and_without_ranges(self):
+        def build(with_ranges: bool) -> list[list[StructureNode]]:
+            ranges = [(1, 3)] if with_ranges else []
+            child = _ranged("c", NodeRole.SUBSECTION, ranges, title="Child")
+            top = _ranged("t", NodeRole.SECTION, ranges, title="Top", children=[child])
+            return [[top]]
+
+        assert _render_pool(build(True), {"c"}) == _render_pool(build(False), {"c"})

@@ -107,6 +107,51 @@ class TestFastExtractionValidation:
         assert result.stages_executed == ["preprocess", "extraction"]
 
 
+class TestInfoUnitsModeValidation:
+    async def test_invalid_value_raises_value_error(self):
+        with pytest.raises(ValueError, match="info_units_mode must be 'summary' or 'verbatim'"):
+            await run_pipeline(
+                stages=["extraction"],
+                extraction_input_dir="/tmp/does-not-matter-for-this-check",
+                info_units_mode="paraphrase",
+            )
+
+    async def test_verbatim_without_extraction_stage_raises_value_error(self):
+        with pytest.raises(ValueError, match="info_units_mode='verbatim'"):
+            await run_pipeline(
+                stages=["ingestion"],
+                ingestion_input_dir="/tmp/does-not-matter-for-this-check",
+                info_units_mode="verbatim",
+            )
+
+    @pytest.mark.parametrize("fast_extraction", [False, True])
+    @pytest.mark.parametrize("info_units_mode", ["summary", "verbatim"])
+    async def test_four_combinations_pass_validation(
+        self, tmp_path: Path, monkeypatch, fast_extraction, info_units_mode
+    ):
+        _write_extraction_json(tmp_path, "doc1")
+
+        import scinr.newton.stages.extraction as extraction_mod
+
+        async def _fake_extract_one_file(json_file, output_path, input_folder, **kwargs):
+            return SimpleNamespace(document_name=json_file.stem, doc_path=json_file.stem)
+
+        mock_extract_one_file = AsyncMock(side_effect=_fake_extract_one_file)
+        monkeypatch.setattr(extraction_mod, "extract_one_file", mock_extract_one_file)
+
+        result = await run_pipeline(
+            stages=["extraction"],
+            extraction_input_dir=str(tmp_path),
+            fast_extraction=fast_extraction,
+            info_units_mode=info_units_mode,
+        )
+
+        assert result.success is True
+        call_kwargs = mock_extract_one_file.call_args.kwargs
+        assert call_kwargs["fast_extraction"] is fast_extraction
+        assert call_kwargs["info_units_mode"] == info_units_mode
+
+
 # ---------------------------------------------------------------------------
 # 2. fast_extraction reaches extract_one_intermediate/extract_one_file as an
 #    explicit value, all the way from run_pipeline()

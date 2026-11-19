@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 def _m():
     """Return the tabular prompt module for the currently configured PromptFamily."""
     from scinr.newton.config import PromptFamily, get_prompt_family
-    family = get_prompt_family()
+    family = get_prompt_family(stage="tabular")
     if family == PromptFamily.CLAUDE:
         from scinr.newton.tabular import prompts_claude as m
     elif family == PromptFamily.GPT_REASONING:
