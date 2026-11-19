@@ -27,7 +27,7 @@ async def run_entity_extraction(
     Parameters
     ----------
     document_name:
-        Name of the document node already annotated in Neo4j. Used to select
+        Name of the document node already annotated in the graph database. Used to select
         the document only when *doc_path* is not given (then every latest
         document of *tenant_id* with that name is processed).
     parallel_docs:

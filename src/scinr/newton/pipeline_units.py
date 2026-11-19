@@ -28,17 +28,17 @@ logic below drift from the real stage without updating both)::
                         _FILE_GLOB — reused directly, not duplicated.
     pre_ingested     -> scinr.newton.utils.document_resolver
                         .resolve_leaf_documents() — reused directly,
-                        a sync Neo4j query run via asyncio.to_thread(),
+                        a sync graph query run via asyncio.to_thread(),
                         scoped to the run's tenant.
 
 Known design discrepancy (document_names vs document_names_dir)
 -----------------------------------------------------------------
 The `document_names` branch below eagerly resolves every name to its leaf
-documents via Neo4j (`resolve_leaf_documents`, within the run's tenant),
+documents via the graph database (`resolve_leaf_documents`, within the run's tenant),
 matching the explicit spec for this module. The `document_names_dir` branch,
-by contrast, does **not** touch Neo4j at all: it reads the `document_name`
+by contrast, does **not** touch the graph database at all: it reads the `document_name`
 and `doc_path` fields out of each `extract-*.json` file. The two branches
-are therefore *not* symmetric: `document_names` units carry Neo4j-confirmed
+are therefore *not* symmetric: `document_names` units carry graph-confirmed
 leaf documents, while `document_names_dir` units carry unconfirmed ones
 (leaf resolution for those only happens later, inside `run_annotation()` /
 `run_entity_extraction()` via `scinr.newton.annotation.agent` /
@@ -75,7 +75,7 @@ class DocumentUnit:
     they only describe *where* the eventual document comes from and what its
     ``doc_path`` will resolve to once the real stage processes it. Units of
     kind ``"pre_ingested"`` describe an already-ingested document (for
-    ``document_names``, Neo4j-confirmed leaf documents; for
+    ``document_names``, graph-confirmed leaf documents; for
     ``document_names_dir``, documents read from disk — see module docstring
     "Known design discrepancy" note).
 
@@ -87,7 +87,7 @@ class DocumentUnit:
         doc_path: For ``raw_file`` / ``extraction_json`` / ``ingestion_json``: the
             document path derived exactly as the real stage would derive it
             (see module docstring). For ``pre_ingested``: the path of the
-            already-ingested document (Neo4j-confirmed leaf path for
+            already-ingested document (graph-confirmed leaf path for
             ``document_names``; the ``extract-*.json``'s own ``doc_path`` for
             ``document_names_dir``). Together with the tenant, the selector
             the annotation / entity extraction stages use.
@@ -367,11 +367,11 @@ def _discover_ingestion_json_units(ingestion_input_dir: str) -> list[DocumentUni
 async def _discover_pre_ingested_units(
     document_names: list[str], tenant_id: str | None
 ) -> list[DocumentUnit]:
-    """Resolve each name in *document_names* to its leaf documents in Neo4j,
+    """Resolve each name in *document_names* to its leaf documents in the graph database,
     among *tenant_id*'s documents only (``None`` = public documents).
 
     Uses ``scinr.newton.utils.document_resolver.resolve_leaf_documents()``
-    (a sync Neo4j query) run off the event loop via ``asyncio.to_thread()``.
+    (a sync graph query) run off the event loop via ``asyncio.to_thread()``.
     One synchronous graph connection (``store.sync_scope()``) is shared by the
     whole call and closed at the end (never left open). Leaves are deduplicated by path preserving
     first-occurrence order across all input names.
@@ -411,7 +411,7 @@ def _discover_document_names_dir_units(document_names_dir: str) -> list[Document
     ``doc_path`` is the path ingestion stored the document under
     (``doc_path`` or, when absent, ``document_name`` — as in
     ``graph.neo4j.documents.insert_document_graph``); units are deduplicated by it. Does **not**
-    touch Neo4j (see module docstring "Known design discrepancy" note):
+    touch the graph database (see module docstring "Known design discrepancy" note):
     unlike ``document_names``, documents returned here are NOT confirmed.
     """
 
@@ -486,7 +486,7 @@ async def _discover_units(
     ingestion — it only enumerates files and reads lightweight metadata
     (e.g. the ``folder_path`` field of an intermediate JSON file, or the
     ``document_name`` field of an ``extract-*.json`` file), or resolves leaf
-    document names already confirmed in Neo4j.
+    document names already confirmed in the graph database.
 
     Args:
         input_raw: Folder of raw source files (PDF, DOCX, CSV, XLSX, …) to enumerate as
@@ -495,8 +495,8 @@ async def _discover_units(
             ``"extraction_json"`` units.
         ingestion_input_dir: Folder of ``extract-*.json`` files (Stage 1 output) to enumerate as
             ``"ingestion_json"`` units.
-        document_names: Explicit list of Neo4j document names to resolve to leaf documents
-            (``"pre_ingested"`` units, Neo4j-confirmed).
+        document_names: Explicit list of the graph database document names to resolve to leaf documents
+            (``"pre_ingested"`` units, graph-confirmed).
         document_names_dir: Folder of ``extract-*.json`` files to read raw ``document_name``
             values from (``"pre_ingested"`` units, unresolved — see module
             docstring).

@@ -96,24 +96,25 @@ class RawFileRepository(ABC):
         created_by_user_id: str | None = None,
         job_id: str | None = None,
     ) -> str:
-        """Persiste el fichero situado en *path* y devuelve su raw_file_id.
+        """Persist the file at *path* and return its raw_file_id.
 
-        Implementación por defecto: lee el fichero completo y delega en
-        :meth:`store`. Los backends capaces de hacer streaming (p.ej. MongoDB/GridFS)
-        la sobrescriben para no mantener el fichero entero en memoria. No es
-        abstracto para no romper backends propios que solo implementen :meth:`store`.
+        Default implementation: reads the whole file and delegates to
+        :meth:`store`. Backends able to stream (e.g. a document store with
+        chunked file storage) override it so the whole file is never held in
+        memory. It is not abstract so that custom backends that only implement
+        :meth:`store` keep working.
 
         Parameters
         ----------
         path:
-            Ruta del fichero a persistir.
+            Path of the file to persist.
         filename, content_type, folder_path, tenant_id, created_by_user_id, job_id:
-            Igual que en :meth:`store`.
+            Same as in :meth:`store`.
 
         Returns
         -------
         str
-            El ``raw_file_id`` asignado por el backend.
+            The ``raw_file_id`` assigned by the backend.
         """
         content = await asyncio.to_thread(path.read_bytes)
         return await self.store(

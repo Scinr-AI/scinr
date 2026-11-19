@@ -29,7 +29,7 @@ def build_tabular_graph():
                               │
                        map_columns        ← LLM Call 2: ColumnMapping
                               │
-                       write_tabular      ← Neo4j write (Table + Rows)
+                       write_tabular      ← graph write (Table + Rows)
                               │
                        [check_done_router] → loop or END
     """

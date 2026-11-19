@@ -49,7 +49,7 @@ class ComplementaryModel(BaseModel):
 class AnnotationDecision(BaseModel):
     """
     The result of the annotation agent's decision for a single StructureNode.
-    Written to Neo4j as: (:StructureNode)-[:HAS_MODEL_DECISION]->(:ModelDecision)
+    Written to the graph database as: (:StructureNode)-[:HAS_MODEL_DECISION]->(:ModelDecision)
     """
 
     @model_validator(mode="before")

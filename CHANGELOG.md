@@ -86,6 +86,12 @@ section of the architecture.
   `DOCUMENTS_PER_QUERY`, `GC_REACHABILITY_MAX_HOPS`, `GC_FLUSH_CANDIDATES`) are now defined in
   `graph/types.py`.
 
+- **Performance, SQL graph traversal:** `shortest_path` is now a bidirectional
+  level-synchronous BFS (on SQLite, from seconds or minutes to single-digit milliseconds on a
+  ~20k-node corpus). Variable-length walks (`neighbors`, `subgraph`) search an index per edge
+  table and direction instead of scanning the relationships (SQLite `neighbors` at depth 4
+  from ~17 s to ~50 ms on a 20k-node graph). Results are unchanged.
+
 ### Known differences
 
 Between the SQL backends and Neo4j (full list in
@@ -101,6 +107,10 @@ Between the SQL backends and Neo4j (full list in
   properties exists; SQL keeps one relationship per identity (type, ends and identity
   properties), so it does not create a second one with other properties. The pipeline never
   produces a snapshot like that.
+- **`shortest_path` ties:** when several shortest paths have the same length, both SQL engines
+  pick the one that sorts first by code-point order (on Postgres this replaced a
+  collation-dependent order); Neo4j picks any of them. The SQL engines compute it with a
+  bidirectional BFS.
 - `execute_raw` takes read-only SQL on the SQL backends, not Cypher.
 - `get_graph_summary` filtered by `created_by_user_id` or `job_id` fails on Neo4j with a
   `CypherSyntaxError`; the SQL backends answer it.
@@ -132,7 +142,7 @@ exceptions never leave the library: the message is kept and the original is in
 | Before | Now | `except` to write |
 |---|---|---|
 | Version conflict on ingestion: `IngestionError` | `DocumentVersionConflict` (no longer an `IngestionError`) | `except DocumentVersionConflict` (or `GraphConstraintError` / `GraphError`) |
-| Missing Neo4j credentials: `ValueError` | `GraphConfigurationError` (no longer a `ValueError`), same message | `except GraphConfigurationError` or `except ConfigurationError` |
+| Missing Neo4j credentials: `ValueError` | `configure()` raises `ConfigurationError`; the driver raises `GraphConfigurationError` (a `ConfigurationError`) when it is built without them. Neither is a `ValueError`, same message | `except ConfigurationError` (covers both) |
 | `GraphConnectionError` was a `NavigationError` | It is a `GraphError` | `except (NavigationError, GraphConnectionError)` where the connection failure was expected as a `NavigationError`; or `except GraphError` |
 | `neo4j.exceptions.*` from any write path | The `GraphError` classes: `GraphAuthenticationError`, `GraphConnectionError` (service unavailable, session expired), `GraphResourceError` (out of memory: shrink the batch), `TransientGraphError` (retries exhausted), `GraphConstraintError`, `GraphQueryError` | `except GraphError` (or the subclass) instead of `except neo4j.exceptions.Neo4jError` / `DriverError` |
 

@@ -1,6 +1,6 @@
 # scinr
 
-[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/0.6.0)
+[![PyPI version](https://img.shields.io/pypi/v/scinr.svg)](https://pypi.org/project/scinr/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-scinr.ai-5e35b1.svg)](https://scinr-ai.github.io/scinr/)
 [![llms.txt](https://img.shields.io/badge/agent-llms.txt-4400ff.svg)](https://scinr-ai.github.io/scinr/llms.txt)
@@ -10,7 +10,7 @@
 
 📖 **[Documentation Site](https://scinr-ai.github.io/scinr/)** &nbsp;|&nbsp; 🤖 **[llms.txt for Agents](https://scinr-ai.github.io/scinr/llms.txt)** ([Full Context](https://scinr-ai.github.io/scinr/llms-full.txt))
 
-Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a complete 5-stage LLM pipeline that converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML), images, audio and video into structured Neo4j knowledge graphs.
+Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a complete 5-stage LLM pipeline that converts raw documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, JSON, XML), images, audio and video into structured knowledge graphs (Neo4j, PostgreSQL or SQLite).
 
 ---
 
@@ -18,7 +18,7 @@ Its **`newton` module** (`scinr.newton`) is the document ingestion engine: a com
 
 SCINR is the first agentic memory platform purpose-built for life sciences domains. Learn more at [scinr.com](https://www.scinr.com/).
 
-`scinr` is the open library layer of the Newton platform, providing AI-driven extraction of knowledge from complex datasets and regulatory documents. It's `newton` module is the structured and unstructured ingestion foundation.
+`scinr` is the open library layer of the Newton platform, providing AI-driven extraction of knowledge from complex datasets and regulatory documents. Its `newton` module is the structured and unstructured ingestion foundation.
 
 ---
 
@@ -45,21 +45,21 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 - **Images, audio and video** — image files transcribed and described by a configurable vision model; audio and video transcribed segment by segment with time ranges (video frames described too); images embedded in PDF, DOCX and PPTX described in place. Cloud or self-hosted providers (OpenAI-compatible endpoints, Bedrock, Ollama, faster-whisper)
 - **Provider-agnostic** — OpenAI, AWS Bedrock, Ollama, Anthropic, or any LangChain-compatible model
 - **LLM-powered extraction** — sliding-window 2-phase extraction with an automatic repair loop; crash-safe intermediate writes after every chunk
-- **Knowledge graph output** — idempotent Neo4j writes (MERGE throughout); safe to re-run at any stage
+- **Knowledge graph output** — idempotent graph writes (upserts throughout; `MERGE` on Neo4j); safe to re-run at any stage
 - **Two independent LangGraph agents** — Annotation agent assigns an extraction model to each structural node; Entity Extraction agent pulls typed Pydantic entities from text
 - **Auto-discovery of extraction domains** — `ThemeRegistry` scans `models/*/catalog.py` at startup; no registration code needed when a new domain is added
 - **Dynamic schema composition** — per-node composite Pydantic schemas built at runtime from the annotation decision (primary + complementary models + supplementary fields)
 - **Global entity deduplication** — `LabeledEntity` singletons keyed by `(label, normalized_value)` enable cross-document dedup in the graph
 - **Cross-document model linking** — `instance_relationships` create typed edges between `ModelInstance` nodes across different document sections; forward-reference shell nodes are merged when the target model is later extracted
-- **Versioning & folder hierarchy** — full document version chain in Neo4j; folder structure mirrored as `IS_COMPOSED_OF` relationships
-- **Document lifecycle** — `delete_document()` removes a document and its whole cascade; `freeze_document()` archives its subgraph to a snapshot and leaves a stub in the graph, and `restore_document()` rebuilds it with no LLM calls. All three are tenant-scoped and work in bounded transactions, so they fit in Neo4j's transaction memory whatever the size of the folder. See the [Document Freezing guide](https://scinr-ai.github.io/scinr/user-guides/document-freezing/)
+- **Versioning & folder hierarchy** — full document version chain in the graph; folder structure mirrored as `IS_COMPOSED_OF` relationships
+- **Document lifecycle** — `delete_document()` removes a document and its whole cascade; `freeze_document()` archives its subgraph to a snapshot and leaves a stub in the graph, and `restore_document()` rebuilds it with no LLM calls. All three are tenant-scoped and work in bounded transactions, so, on Neo4j, they fit in the transaction memory whatever the size of the folder. See the [Document Freezing guide](https://scinr-ai.github.io/scinr/user-guides/document-freezing/)
 - **Read-back navigation API** — `scinr.newton.navigation`: a read-only, `async`, engine-abstracted layer of ~90 typed methods over the graph (documents, structure nodes, model instances, entities, schema introspection) — no Cypher required. See the [Graph Navigation guide](https://scinr-ai.github.io/scinr/user-guides/graph-navigation/)
-- **Tabular bypass pipeline** — direct CSV/XLSX → Neo4j without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
+- **Tabular bypass pipeline** — direct CSV/XLSX → graph without LLM extraction stages; only 3 LLM calls per sheet (classify, decide model, map columns)
 - **Parallel processing** — `parallel_docs=N` for concurrent document handling at every stage
 - **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
-- **Live progress reporting** — `run_pipeline(callbacks=[...])` emits an event at every stage boundary of every document; use the built-in `ProgressTracker` (`snapshot().percent`) or your own sync/async callbacks to update a job in your database. See the [Progress Tracking guide](https://scinr-ai.github.io/scinr/user-guides/progress-tracking/)
 - **Prompt caching** — Bedrock `cachePoint` support for ~90% reduction in repeated token costs
-- **Optional storage layer** — MongoDB backend for raw file + page storage; pipeline runs without it
+- **Optional storage layer** — MongoDB, PostgreSQL or SQLite backend for raw file + page storage; pipeline runs without it
+- **Choice of graph engine** — Neo4j (default), PostgreSQL or SQLite, selected by `graph_backend`; see the [SQL Graph Backends guide](https://scinr-ai.github.io/scinr/user-guides/sql-graph/)
 - **Two retry layers** — `bedrock_retry` (exponential backoff for throttling) + Neo4j retry (`graph/neo4j/retry.py`, deadlock-safe writes)
 
 ---
@@ -90,7 +90,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
           ▼                                                                  
 ┌──────────────────────┐                                                     
 │  Stage 2             │  ingest/                                            
-│  INGEST              │  Neo4j MERGE writes (idempotent)    
+│  INGEST              │  Graph writes (idempotent upserts)  
 │                      │  Versioning · folder hierarchy
 └─────────┬────────────┘
           │  (:Document)-[:HAS_STRUCTURE]→(:StructureNode)
@@ -116,7 +116,7 @@ SCINR is the first agentic memory platform purpose-built for life sciences domai
 
 ## Installation
 
-**Requirements:** Python 3.11+, a running Neo4j instance (5.x+); for audio and video, the `ffmpeg` / `ffprobe` system binaries
+**Requirements:** Python 3.11+, and one graph engine: a running Neo4j instance (5+), **or** PostgreSQL, **or** SQLite (no server); for audio and video, the `ffmpeg` / `ffprobe` system binaries
 
 ```bash
 pip install scinr
@@ -131,6 +131,16 @@ pip install 'scinr[ollama]'    # Ollama (local models)
 pip install 'scinr[mongodb]'   # Optional MongoDB storage layer
 pip install 'scinr[media]'     # Local transcription (faster-whisper) and HEIC/HEIF images
 ```
+
+Install the extra for your graph engine:
+
+```bash
+pip install 'scinr[neo4j]'     # Neo4j driver (the default graph backend)
+pip install 'scinr[postgres]'  # PostgreSQL (SQLAlchemy + psycopg 3)
+pip install 'scinr[sqlite]'    # SQLite (SQLAlchemy + aiosqlite)
+```
+
+The default graph backend is `neo4j`, and the Neo4j driver is an optional extra: without `scinr[neo4j]` it fails at first use with `graph_backend='neo4j' requires the optional dependency: pip install 'scinr[neo4j]'`. For a no-Docker start, see the [SQLite recipe](docs/user-guides/quick-start.md#sqlite-no-docker) and the [PostgreSQL recipe](docs/user-guides/quick-start.md#postgresql-with-docker).
 
 For development:
 
@@ -181,6 +191,8 @@ configure(
 )
 ```
 
+The example above uses Neo4j, the default graph backend. To run on PostgreSQL or SQLite, pass `graph_backend`, `storage_backend` and `sql_url` instead of the `neo4j_*` settings; see the [SQL Graph Backends guide](docs/user-guides/sql-graph.md).
+
 ### Configuration from environment variables
 
 Every `configure()` parameter you omit is read from the environment. Copy `.env.example` to `.env` and fill in the required values:
@@ -194,7 +206,7 @@ cp .env.example .env
 # Provider SDK settings still come from the environment:
 AWS_DEFAULT_REGION=us-east-1
 
-# Required — Neo4j
+# Required when GRAPH_BACKEND=neo4j (the default) — Neo4j
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
@@ -207,12 +219,17 @@ MISTRAL_API_KEY=your_mistral_key
 STORAGE_BACKEND=mongodb
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DATABASE=scinr
+
+# Alternative to Neo4j — PostgreSQL or SQLite (instead of the NEO4J_* block)
+# GRAPH_BACKEND=sqlite
+# STORAGE_BACKEND=sqlite
+# SQL_URL=sqlite:///newton.db
 ```
 
 Then pass only the LLM in code and run the pipeline:
 
 ```python
-configure(llm=ChatOpenAI(model="gpt-4o"))  # Neo4j, Mistral and storage come from the environment
+configure(llm=ChatOpenAI(model="gpt-4o"))  # the graph, Mistral and storage settings come from the environment
 
 result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
 ```
@@ -227,11 +244,13 @@ result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
 |---|---|---|
 | `llm` | `BaseChatModel \| None` | LangChain model for all LLM calls. Optional at `configure()` time; needed for LLM pipeline stages |
 | `repair_llm` | `BaseChatModel` | Model for the JSON repair loop; falls back to `llm` if not set |
+| `graph_backend` | `str` | `'neo4j'` (default), `'postgres'` or `'sqlite'` |
 | `neo4j_uri` | `str` | Neo4j connection URI. Default: `bolt://localhost:7687` |
-| `neo4j_user` | `str` | Neo4j username (required) |
-| `neo4j_password` | `str` | Neo4j password (required) |
+| `neo4j_user` | `str` | Neo4j username (required when `graph_backend='neo4j'`) |
+| `neo4j_password` | `str` | Neo4j password (required when `graph_backend='neo4j'`) |
+| `sql_url` | `str` | SQLAlchemy URL for the SQL backends (`postgresql://…` or `sqlite:///…`); required when any backend is `postgres` or `sqlite` |
 | `mistral_api_key` | `str` | Mistral OCR API key. Required to process any PDF — PDF conversion is Mistral OCR only, with no fallback |
-| `storage_backend` | `str` | `'none'` (default), `'mongodb'`, or `'custom'` |
+| `storage_backend` | `str` | `'none'` (default), `'mongodb'`, `'postgres'`, `'sqlite'` or `'custom'` |
 | `extraction_batch_size` | `int` | Pages per extraction chunk. Default: `1` |
 | `llm_concurrency` | `int` | Max concurrent LLM calls (semaphore). Default: `4` |
 | `enabled_base_themes` | `list[str]` | Whitelist of built-in theme paths to activate; `None` activates all |
@@ -241,27 +260,34 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 
 ### Environment variables
 
-`configure()` reads these when the matching parameter is omitted. The LLM is **not** an environment variable — build a LangChain chat model and pass it to `configure(llm=...)`. Provider SDK settings (`AWS_DEFAULT_REGION`, `OPENAI_API_KEY`, …) come from the environment as each SDK expects.
+`configure()` reads these when the matching parameter is omitted. The usual way to set the LLM is to build a LangChain chat model and pass it to `configure(llm=...)`; the only environment shortcut is `MODEL_ID`, a Bedrock shortcut used when `llm` is omitted. Provider SDK settings (`AWS_DEFAULT_REGION`, `OPENAI_API_KEY`, …) come from the environment as each SDK expects.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `GRAPH_BACKEND` | No | `neo4j` | Graph engine: `neo4j`, `postgres` or `sqlite` |
 | `NEO4J_URI` | No | `bolt://localhost:7687` | Neo4j connection URI |
-| `NEO4J_USER` | Yes | — | Neo4j username (also accepts `NEO4J_AUTH=user/password`) |
-| `NEO4J_PASSWORD` | Yes | — | Neo4j password (also accepts `NEO4J_AUTH=user/password`) |
-| `NEO4J_DATABASE` | Yes | — | Neo4j target database name |
+| `NEO4J_USER` | If `GRAPH_BACKEND=neo4j` | — | Neo4j username (also accepts `NEO4J_AUTH=user/password`) |
+| `NEO4J_PASSWORD` | If `GRAPH_BACKEND=neo4j` | — | Neo4j password (also accepts `NEO4J_AUTH=user/password`) |
+| `NEO4J_DATABASE` | If `GRAPH_BACKEND=neo4j` | — | Neo4j target database name |
+| `SQL_URL` | If any backend is `postgres` / `sqlite` | — | SQLAlchemy URL shared by all SQL backends |
+| `SQL_SCHEMA` | No | `newton` | Postgres schema that holds the tables (ignored by SQLite) |
+| `SQL_POOL_SIZE` | No | `10` | Connection pool size of each SQL engine |
+| `SQL_FULLTEXT_CONFIG` | No | `simple` | Postgres text-search configuration (applied when the schema is created) |
+| `SQLITE_FILES_DIR` | No | next to the `.db` | Folder for the binaries kept by the SQLite backend |
 | `MISTRAL_API_KEY` | For PDFs | — | Mistral OCR API key; required to ingest any PDF (no non-Mistral path) |
-| `STORAGE_BACKEND` | No | — | Set to `mongodb` to enable raw file + page storage |
+| `STORAGE_BACKEND` | No | `none` | `none`, `mongodb`, `postgres`, `sqlite` or `custom`; enables raw file + page storage |
 | `MONGODB_URI` | No | `mongodb://localhost:27017` | MongoDB connection URI |
 | `MONGODB_DATABASE` | No | `scinr` | MongoDB database name |
 | `MONGODB_RAW_FILES_COLLECTION` | No | `raw_files` | Collection for raw file metadata |
 | `MONGODB_PAGES_COLLECTION` | No | `converted_pages` | Collection for converted page content |
 | `MONGODB_GRIDFS_BUCKET` | No | `raw_binaries` | GridFS bucket for raw binary files |
-| `FREEZE_BACKEND` | No | the storage backend | Backend for document snapshots (`freeze_document()` / `restore_document()`): `none`, `mongodb` or `custom` |
+| `FREEZE_BACKEND` | No | the storage backend | Backend for document snapshots (`freeze_document()` / `restore_document()`): `none`, `mongodb`, `postgres`, `sqlite` or `custom` |
 | `MONGODB_FROZEN_COLLECTION` | No | `frozen_documents` | Collection for snapshot metadata |
 | `MONGODB_FROZEN_GRIDFS_BUCKET` | No | `frozen_snapshots` | GridFS bucket for snapshot files |
 | `EXTRACTION_BATCH_SIZE` | No | `1` | Pages per extraction chunk |
 | `LLM_CONCURRENCY` | No | `4` | Max concurrent LLM calls |
 | `PROMPT_CACHING_ENABLED` | No | `true` | Enable Bedrock prompt caching (`cachePoint`) |
+| `MODEL_ID` | No | — | Shortcut for AWS Bedrock: used only when `llm` is omitted; newton then builds a `ChatBedrockConverse` (reads `AWS_DEFAULT_REGION`, default `us-east-1`, and `MAX_TOKENS`, default `65536`). Passing `llm=` is the usual way |
 | `SCINR_EXTRA_MODELS_PATHS` | No | — | Colon-separated paths to user-defined theme directories |
 
 > **AWS region & model ID** (when using `ChatBedrockConverse`): the model ID prefix must match the region group. `us.anthropic.claude-sonnet-4-6` needs `AWS_DEFAULT_REGION` in `us-east-1` / `us-west-2`; Europe uses the `eu.` prefix with `eu-central-1`; Asia Pacific uses `ap.` with `ap-northeast-1`. Set `region_name=` on the model.
@@ -297,10 +323,10 @@ For the full parameter reference, see the [module README](src/scinr/newton/READM
 |---|---|---|---|
 | 0 | Preprocess | Raw files → Paged markdown JSON | Mistral OCR (PDF only) |
 | 1 | Extract | Paged markdown JSON → Document tree JSON | Yes |
-| 2 | Ingest | Document tree JSON → Neo4j nodes & relationships | No |
-| 3 | Annotate | Neo4j StructureNodes → `ModelDecision` nodes | Yes |
+| 2 | Ingest | Document tree JSON → graph nodes & relationships | No |
+| 3 | Annotate | Graph StructureNodes → `ModelDecision` nodes | Yes |
 | 4 | Entity Extract | Annotated StructureNodes → `ExtractionResult` + entity nodes | Yes |
-| — | Tabular | CSV / XLSX → Neo4j Table + Row nodes | Yes (3 calls/sheet) |
+| — | Tabular | CSV / XLSX → graph Table + Row nodes | Yes (3 calls/sheet) |
 
 Run them all with `run_pipeline()`, a subset with `run_pipeline(stages=[...])`, or one at a time with `run_preprocess()`, `run_extraction()`, `run_ingestion()`, `run_annotation()`, `run_entity_extraction()` and `run_tabular_pipeline()`. For every parameter, see the [Running the Pipeline guide](docs/user-guides/running-pipeline.md); for per-stage examples, input/output formats, and agent diagrams, see the [module README](src/scinr/newton/README.md#pipeline-stages--detailed-reference).
 
@@ -351,7 +377,6 @@ scinr/
 ├── pyproject.toml
 ├── .env.example
 ├── CHANGELOG.md
-├── files/                          ← sample input files
 ├── tests/
 └── src/
     └── scinr/
@@ -364,12 +389,14 @@ scinr/
             ├── stages/             ← Stage runner functions
             ├── converters/         ← Stage 0: file → paged JSON
             ├── extraction/         ← Stage 1: paged JSON → Document tree
-            ├── graph/              ← GraphStore: every write to the graph (Neo4j implementation in graph/neo4j/)
+            ├── graph/              ← GraphStore: every write to the graph (Neo4j in graph/neo4j/, SQL in graph/sql/)
+            ├── navigation/         ← Read-only graph navigation API (neo4j/ and sql/ implementations)
+            ├── sql/                ← Shared PostgreSQL / SQLite layer: engines, schema, migrations, admin
             ├── ingest/             ← Stage 2: Document tree → graph; delete / freeze / restore
             ├── annotation/         ← Stage 3: LangGraph annotation agent
             ├── entity_extraction/  ← Stage 4: LangGraph entity extraction
             ├── tabular/            ← Tabular bypass pipeline
-            ├── storage/            ← Optional MongoDB storage layer
+            ├── storage/            ← Optional storage layer (MongoDB, PostgreSQL or SQLite)
             ├── freeze/             ← Snapshot backend for document freezing
             ├── models/             ← Extraction domain models
             │   └── default/        ← Built-in open-source models
@@ -394,14 +421,14 @@ Contributions are welcome! Please follow these steps:
 1. **Fork** the repository and create a feature branch from `main`.
 2. **Install dependencies** with `uv sync --all-extras`.
 3. **Make your changes** following the existing code style (async functions, Pydantic v2 models, explicit error handling, no magic values).
-4. **Test your changes** against a local Neo4j instance with a small set of sample documents.
+4. **Test your changes** with a small set of sample documents. The SQL suites need no Docker for SQLite (`tests/sql`); the Postgres variants run against a disposable `postgres-test` container and are skipped unless `SCINR_SQL_ALLOW_WIPE=1` is set (see `tests/sql/README.md`). Neo4j-backed tests need a local Neo4j instance.
 5. **Open a pull request** with a clear description of what changed and why.
 
 ### Areas where contributions are especially welcome
 
 - New file format converters (`converters/`)
 - New open-source extraction domain models (`models/`)
-- Additional storage backends (`storage/`)
+- Additional storage or graph backends (`storage/`, `graph/`)
 - Performance improvements to the extraction or entity extraction agents
 - Documentation and examples
 
@@ -410,7 +437,7 @@ Contributions are welcome! Please follow these steps:
 Please open a GitHub issue with:
 - A minimal reproducible example (document type, the `run_pipeline()` / `run_*()` call used)
 - The full error traceback
-- Your Python version, OS, and Neo4j version
+- Your Python version, OS, and graph engine and version (Neo4j, PostgreSQL or SQLite)
 
 ---
 

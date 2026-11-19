@@ -307,7 +307,7 @@ A presenter in front of a slide titled "Q3 results"; on screen: "Revenue +12 %".
 
 Each audio or video page carries `start_ms` / `end_ms`, the range
 `[start_ms, end_ms)` in the original file. It is stored with the page
-(`converted_pages` in MongoDB) and exposed on `PageText`, so a search result
+(the page record in the storage backend; `converted_pages` on MongoDB) and exposed on `PageText`, so a search result
 can be played from the stored original:
 
 ```python
@@ -393,7 +393,7 @@ for page in pages:
 Storing is controlled by two switches, both on by default:
 `store_described_images` (`STORE_DESCRIBED_IMAGES`) for embedded images and
 `store_video_frames` (`STORE_VIDEO_FRAMES`) for frames. They only act with a
-persistent storage backend that stores images (MongoDB does). A custom backend
+persistent storage backend that stores images (MongoDB, PostgreSQL and SQLite do). A custom backend
 that does not implement the image methods keeps working, stores no images and
 logs one warning per process (see
 [Storage Backends](storage-backends.md#repository-interfaces)).

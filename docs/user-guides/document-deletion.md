@@ -1,6 +1,6 @@
 # Document Deletion
 
-`delete_document()` permanently removes a `:Document` node and its entire subgraph from Neo4j, then runs garbage collection on orphaned nodes. This is the definitive way to remove a document from your knowledge graph — it is irreversible and cannot be undone.
+`delete_document()` permanently removes a `:Document` node and its entire subgraph from the graph, then runs garbage collection on orphaned nodes. This is the definitive way to remove a document from your knowledge graph — it is irreversible and cannot be undone.
 
 ---
 
@@ -62,7 +62,7 @@ asyncio.run(main())
 
 `delete_document()` is `async` — `await` it from a coroutine, or drive it with `asyncio.run()` as above. The remaining snippets on this page show just the `await delete_document(...)` call for brevity; each assumes it runs inside an `async` function after `configure()`.
 
-The `path` parameter matches the `path` property on `:Document` nodes in Neo4j. This is the file path (relative or absolute) as it was recorded at ingestion time. A path is only unique **within a tenant** (see [Tenant scope](#tenant-scope-mandatory) below), which is why `tenant_id` must always be given.
+The `path` parameter matches the `path` property on `:Document` nodes in the graph. This is the file path (relative or absolute) as it was recorded at ingestion time. A path is only unique **within a tenant** (see [Tenant scope](#tenant-scope-mandatory) below), which is why `tenant_id` must always be given.
 
 ---
 
@@ -197,7 +197,7 @@ All of the above are `DETACH DELETE`d, meaning all their relationships are sever
 
 ### Bounded transactions
 
-The cascade does **not** run in one transaction. A transaction keeps everything it deletes in memory until it commits, and Neo4j caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura). Deleting a folder of a few hundred documents at once goes over that cap and fails with `MemoryPoolOutOfMemoryError`. So:
+The cascade does **not** run in one transaction. On Neo4j, a transaction keeps everything it deletes in memory until it commits, and Neo4j caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura). Deleting a folder of a few hundred documents at once goes over that cap and fails with `MemoryPoolOutOfMemoryError`. So:
 
 - the `:Document` nodes are marked `deletion_pending = true` before anything is deleted;
 - the documents are processed 50 at a time;
@@ -390,4 +390,4 @@ When `version` is specified, only that version's cascade is deleted. However, sh
 - **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, including `update_mode=True` for in-place document updates.
 - **[Deletion API](../api/deletion.md)** — Auto-generated reference for `delete_document()`.
 - **[Results API](../api/results.md)** — `DeletionResult` dataclass reference.
-- **[Architecture](../architecture.md)** — Pipeline stages and Neo4j schema details.
+- **[Architecture](../architecture.md)** — Pipeline stages and graph schema details.

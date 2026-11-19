@@ -1,5 +1,5 @@
 """
-stages/tabular.py — Stage 5: Direct CSV/XLSX ingestion into Neo4j.
+stages/tabular.py — Stage 5: Direct CSV/XLSX ingestion into the graph database.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ async def run_tabular_pipeline(
     emitter: _ProgressEmitter = _NULL_EMITTER,
     batch_version: int | None = None,
 ) -> StageResult:
-    """Ingest all tabular files (CSV/XLSX/XLS) in *input_raw* directly into Neo4j.
+    """Ingest all tabular files (CSV/XLSX/XLS) in *input_raw* directly into the graph database.
 
     Bypasses Stages 0-4 entirely. For each file:
       1. Scans it (headers, row count, 5-row preview). A file that cannot be read,
@@ -43,7 +43,7 @@ async def run_tabular_pipeline(
       2. Stores the raw file and creates the :Document node.
       3. Per sheet: one LLM call to decide the extraction model, one to map
          columns to model fields, then writes the Table + Row StructureNode
-         subgraph to Neo4j directly.
+         subgraph to the graph database directly.
 
     Each file is reported in the returned :class:`StageResult` as one
     :class:`DocumentResult` whose counters are **sheets**: ``nodes_processed`` =

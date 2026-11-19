@@ -3,7 +3,7 @@
 This guide covers every lever available to tune `scinr.newton` pipeline performance for production deployments. It walks through concurrency, batch sizes, prompt optimization, OCR tuning, scenario-based recommendations, and diagnostic techniques.
 
 !!! note "LLM setup"
-    The LLM stages need `configure(llm=...)` (there is no `MODEL_ID` env var).
+    The LLM stages need `configure(llm=...)` (if `llm` is omitted and the env var `MODEL_ID` is set, a Bedrock model is built from it).
     The snippets below assume a model has been built — e.g. a local open-source
     one via [Ollama](https://ollama.com/):
 
@@ -25,7 +25,7 @@ Performance tuning is critical for production deployments of `scinr.newton`. The
 
 There are three primary levers for performance tuning:
 
-1. **Concurrency** — How many operations run in parallel (LLM calls, Neo4j sessions, document processing).
+1. **Concurrency** — How many operations run in parallel (LLM calls, graph sessions, document processing).
 2. **Batch Sizes** — How many items are grouped per LLM call (extraction pages, normalization entries).
 3. **Prompt Optimization** — Reducing token waste via prompt caching and model-specific prompt families.
 
@@ -89,7 +89,9 @@ The global `get_llm_semaphore()` is sized to `llm_concurrency`. All LLM calls ac
 
 **Default:** `10` / `8`  **Env vars:** `NEO4J_CONCURRENCY` / `NEO4J_SYNC_CONCURRENCY`
 
-Two separate semaphores control Neo4j access:
+Two separate semaphores control access to the graph. Despite the name they are not Neo4j-specific: the same semaphores bound the annotation, entity-extraction and ingestion stages when the graph is on PostgreSQL or SQLite (see [SQL Backends](#sql-backends-postgresql-and-sqlite)).
+
+On Neo4j:
 
 ```python
 configure(
@@ -101,11 +103,11 @@ configure(
 
 #### `neo4j_concurrency` — Async Operations
 
-Bounds concurrent Neo4j async sessions during annotation (Stage 3) and entity extraction (Stage 4). These stages use the async Neo4j driver for read-heavy operations.
+Bounds concurrent graph async sessions during annotation (Stage 3) and entity extraction (Stage 4). On Neo4j these stages use the async Neo4j driver for read-heavy operations.
 
 #### `neo4j_sync_concurrency` — Sync Operations
 
-Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). The sync driver is used for document ingestion because the Neo4j Python driver's synchronous API handles bulk writes efficiently. The semaphore must be acquired and released on the event loop, never inside the worker thread.
+Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). On Neo4j the sync driver is used for document ingestion because the Neo4j Python driver's synchronous API handles bulk writes efficiently. The semaphore must be acquired and released on the event loop, never inside the worker thread.
 
 #### Recommendations by graph size
 
@@ -117,6 +119,17 @@ Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous i
 | Very large (100k+) | 30-50 | 25-50 | Consider Neo4j cluster |
 
 > **Tip:** If Neo4j CPU is consistently above 80% during ingestion, reduce `neo4j_sync_concurrency`. If the database has ample capacity and ingestion is slow, increase it.
+
+### SQL Backends (PostgreSQL and SQLite)
+
+With `graph_backend="postgres"` or `"sqlite"` (see [SQL Graph Backends](sql-graph.md)) the `neo4j_concurrency` and `neo4j_sync_concurrency` semaphores keep bounding the concurrent graph sessions of Stages 2-4, exactly as on Neo4j; the `neo4j_` prefix is historical. Their recommended values above refer to Neo4j load, so start from the defaults and measure.
+
+**`sql_pool_size`** (env `SQL_POOL_SIZE`, default `10`, minimum `1`) sizes the connection pool of each SQL engine.
+
+- **PostgreSQL.** The value is applied as the pool size and as the overflow of each engine (`pool_size` and `max_overflow` are both set to it, so an engine can hold up to twice that many connections under load), with `pool_pre_ping` on. Keep `neo4j_concurrency` and `neo4j_sync_concurrency` within what the server can serve, and the total of connections of all your processes below the server's `max_connections`.
+- **SQLite.** SQLite has a **single writer**. newton opens each database in WAL mode with a busy timeout of 30 s, and every transaction starts with `BEGIN IMMEDIATE`, so write transactions queue behind one another instead of failing immediately. `parallel_docs > 1` works, but the writes are serialized, so raising concurrency does not speed up the write-heavy stages; the LLM stages still overlap. The dialect does not use `sql_pool_size`.
+
+Transient SQL errors are retried with the same exponential back-off schedule as the Neo4j retry.
 
 ### Parallel Documents (`parallel_docs`)
 
@@ -502,7 +515,7 @@ llm = ChatOllama(model="llama3")
 configure(
     llm=llm,
     llm_concurrency=2,           # Conservative LLM calls
-    neo4j_concurrency=5,         # Light Neo4j load
+    neo4j_concurrency=5,         # Light graph load
     neo4j_sync_concurrency=5,    # Light sync load
     extraction_batch_size=1,     # Maximum quality (default)
     normalization_batch_size=5,  # Default
@@ -528,7 +541,7 @@ Balanced configuration for typical production workloads.
 configure(
     llm=llm,
     llm_concurrency=8,           # More parallel LLM calls
-    neo4j_concurrency=15,        # Moderate Neo4j load
+    neo4j_concurrency=15,        # Moderate graph load
     neo4j_sync_concurrency=12,   # Moderate sync load
     extraction_batch_size=2,     # Slightly larger batches
     normalization_batch_size=10, # Larger normalization batches
@@ -554,7 +567,7 @@ Maximum throughput configuration for large document sets.
 configure(
     llm=llm,
     llm_concurrency=16,          # High parallel LLM calls
-    neo4j_concurrency=25,        # High Neo4j throughput
+    neo4j_concurrency=25,        # High graph throughput
     neo4j_sync_concurrency=20,   # High sync throughput
     extraction_batch_size=2,     # Larger extraction batches
     normalization_batch_size=15, # Large normalization batches
@@ -609,7 +622,7 @@ Minimize wall-clock time while maintaining acceptable cost.
 configure(
     llm=llm,
     llm_concurrency=16,          # Max parallel LLM calls
-    neo4j_concurrency=30,        # Max Neo4j throughput
+    neo4j_concurrency=30,        # Max graph throughput
     neo4j_sync_concurrency=25,   # Max sync throughput
     extraction_batch_size=1,     # Smaller batches = faster per call
     normalization_batch_size=5,  # Default batch size
@@ -634,7 +647,7 @@ result = await run_pipeline(
 
 ## Deleting, Freezing and Restoring at Scale
 
-`delete_document()`, `freeze_document()` and `restore_document()` call no LLM. Their limit is Neo4j's **transaction memory**: the server caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura), and a transaction holds everything it writes or deletes until it commits. All three therefore work in bounded transactions, and their memory does not grow with the size of the operation.
+`delete_document()`, `freeze_document()` and `restore_document()` call no LLM. On Neo4j, their limit is the **transaction memory**: the server caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura), and a transaction holds everything it writes or deletes until it commits. All three therefore work in bounded transactions, and their memory does not grow with the size of the operation.
 
 | Operation | How the work is split | Tunable |
 |---|---|---|
@@ -703,13 +716,13 @@ for stage_name in result.stages_executed:
 | :--- | :--- | :--- |
 | Stage 0 (preprocess) is the slowest stage | PDF conversion or OCR bottleneck | Increase `mistral_ocr_chunk_concurrency`, check Mistral API |
 | Stage 1 (extraction) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
-| Stage 2 (ingestion) is the slowest stage | Neo4j sync concurrency too low | Increase `neo4j_sync_concurrency` |
+| Stage 2 (ingestion) is the slowest stage | Graph sync concurrency too low | Increase `neo4j_sync_concurrency` |
 | Stage 3 (annotation) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
 | Stage 4 (entity extraction) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
 | High LLM costs per document | Batch sizes too small | Increase `extraction_batch_size` |
 | OCR timeout errors | Large PDFs, low concurrency | Increase `mistral_ocr_chunk_concurrency` |
 | Memory errors (OOM) | Too many parallel documents | Decrease `parallel_docs` |
-| Neo4j connection pool exhausted | Neo4j concurrency too high | Decrease `neo4j_concurrency` |
+| Graph connection pool exhausted | Graph concurrency too high | Decrease `neo4j_concurrency` |
 | Rate limit errors (429) | LLM concurrency too high | Decrease `llm_concurrency` |
 | Inconsistent extraction quality | Batch size too large | Decrease `extraction_batch_size` |
 
@@ -742,7 +755,7 @@ print(f"Neo4j async semaphore: {config.neo4j_concurrency}")
 print(f"Neo4j sync semaphore: {config.neo4j_sync_concurrency}")
 ```
 
-If the LLM stage is slow and `llm_concurrency` is at its maximum, try increasing it. If Neo4j stages are slow and the semaphore is maxed, try increasing the relevant Neo4j concurrency.
+If the LLM stage is slow and `llm_concurrency` is at its maximum, try increasing it. If the graph stages are slow and the semaphore is maxed, try increasing the relevant graph concurrency setting.
 
 ### Live Progress
 
@@ -761,7 +774,7 @@ while not task.done():
 result = await task
 ```
 
-If most of the `parallel_docs` slots sit in `annotation` / `entity_extraction`, the LLM is the bottleneck (`llm_concurrency`); if they sit in `ingestion`, look at the Neo4j semaphores. `completed_by_stage` and the per-document `DocumentProgress` (`started_at` / `finished_at`) give the same picture per document.
+If most of the `parallel_docs` slots sit in `annotation` / `entity_extraction`, the LLM is the bottleneck (`llm_concurrency`); if they sit in `ingestion`, look at the graph semaphores. `completed_by_stage` and the per-document `DocumentProgress` (`started_at` / `finished_at`) give the same picture per document.
 
 A slow callback does not slow the pipeline down: events are queued and delivered by a separate task. An **async** callback that blocks internally (`requests`, `pymongo`, `time.sleep` inside an `async def`) does: it freezes the event loop the pipeline runs on. Write blocking callbacks as `ProgressCallback` (sync), which runs in its own thread. See [Progress Tracking](progress-tracking.md#sync-vs-async-callbacks).
 
@@ -870,7 +883,7 @@ llm = ChatOllama(model="llama3")
 configure(
     llm=llm,
     llm_concurrency=16,           # Max LLM calls for extraction
-    neo4j_concurrency=5,          # Minimal Neo4j (not used yet)
+    neo4j_concurrency=5,          # Minimal graph load (not used yet)
 )
 result1 = await run_pipeline(
     input_raw="./docs",
@@ -879,11 +892,11 @@ result1 = await run_pipeline(
     parallel_docs=10,
 )
 
-# Phase 2: Ingestion (Neo4j-heavy)
+# Phase 2: Ingestion (graph-heavy)
 configure(
     llm=llm,
     llm_concurrency=2,            # Minimal LLM (not used)
-    neo4j_concurrency=25,         # Max Neo4j for ingestion
+    neo4j_concurrency=25,         # Max graph concurrency for ingestion
     neo4j_sync_concurrency=20,
 )
 result2 = await run_pipeline(
@@ -896,7 +909,7 @@ result2 = await run_pipeline(
 configure(
     llm=llm,
     llm_concurrency=16,           # Max LLM calls
-    neo4j_concurrency=15,         # Moderate Neo4j
+    neo4j_concurrency=15,         # Moderate graph load
 )
 result3 = await run_pipeline(
     stages=["annotation", "entity_extraction"],

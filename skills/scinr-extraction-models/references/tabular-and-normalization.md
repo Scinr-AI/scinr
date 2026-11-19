@@ -24,7 +24,7 @@ the source wrote it, and a nested submodel holds the same information cleaned up
 typed parts.
 
 **How it works in the tabular pipeline:** CSV row → column mapping → instance →
-`NormalizationEngine` → Neo4j write. The engine works in five steps:
+`NormalizationEngine` → graph write. The engine works in five steps:
 
 1. It finds fields marked `normalization_model: True`.
 2. It reads the `normalization_source_fields` values from the row. If they are all empty, it skips the row.

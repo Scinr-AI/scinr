@@ -1,7 +1,7 @@
 """
 Hook de normalización para integrar en el pipeline tabular.
 
-Se invoca entre la instanciación del modelo Pydantic y la escritura a Neo4j.
+Se invoca entre la instanciación del modelo Pydantic y la escritura al grafo.
 """
 
 from __future__ import annotations

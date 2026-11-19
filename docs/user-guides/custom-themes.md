@@ -4,7 +4,7 @@ Create and register custom extraction themes to extend scinr with domain-specifi
 
 !!! note "LLM setup"
     Running the pipeline with a custom theme needs an LLM — `configure(llm=...)`
-    (there is no `MODEL_ID` env var). The snippets below use a local open-source
+    (if `llm` is omitted and the env var `MODEL_ID` is set, a Bedrock model is built from it). The snippets below use a local open-source
     model via [Ollama](https://ollama.com/)
     (`pip install "scinr[ollama]"`, then `ollama pull llama3`):
 
@@ -251,7 +251,7 @@ class TrialProtocolModelList(ExtractionModel):
 | Every field has `description=` with >= 15 words | The LLM uses the description as its primary extraction signal |
 | List fields use `default_factory=list` | Never use `default=[]` — mutable default shared across instances |
 | Optional scalars use `default=None` | Explicit opt-in for None values |
-| Enums use `str` as base class | Guarantees JSON-serializable values and correct Neo4j storage |
+| Enums use `str` as base class | Guarantees JSON-serializable values and correct graph storage |
 | Relative imports for internal modules | `from .models import ...` — never bare `from models import ...` |
 
 For detailed model creation patterns (enums, validators, `entity_label`, `instance_relationships`, list wrappers, etc.), see [Custom Models](custom-models.md) and the [Model Creation Guide](https://github.com/scinr-ai/scinr/blob/main/src/scinr/newton/model-creation/AGENTS.md).

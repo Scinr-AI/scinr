@@ -2,8 +2,10 @@
 
 `GraphStore` is the interface the pipeline uses to write to the graph (and to
 make the reads that go with the writes). It is the interface to implement for a
-new graph backend: the library ships one implementation, `Neo4jGraphStore`,
-which runs the same Cypher the pipeline always has. Read-only exploration of
+new graph backend. The library ships two implementations: `Neo4jGraphStore`
+(`scinr.newton.graph.neo4j.store`), which runs the same Cypher the pipeline always
+had, and `SqlGraphStore` (`scinr.newton.graph.sql.store`), which serves PostgreSQL
+and SQLite through SQLAlchemy Core. Read-only exploration of
 the graph goes through [Navigation](navigation.md), not through the store.
 
 Obtain the process-wide store with `get_graph_store()`. It is a singleton chosen
@@ -23,9 +25,15 @@ Rules every backend follows:
 The contract test suite that every backend must pass lives in `tests/contract/`.
 It uses only `GraphStore` (never query text or engine objects), runs every test
 once per registered backend and observes the graph through a neutral dump;
-`tests/contract/conftest.py` explains how to register a new backend. It wipes its
-databases, so it only runs against the disposable containers of the golden
-harness and is skipped otherwise.
+`tests/contract/conftest.py` explains how to register a new backend. It wipes the
+database it runs against, so each backend refuses to run unless that is safe:
+
+- `neo4j` (with MongoDB for storage) runs only against the disposable containers of
+  the golden harness, with `SCINR_GOLDEN_ALLOW_WIPE=1`, and is skipped otherwise.
+- `sqlite` always runs: every test uses a new database file in a temporary directory.
+- `postgres` runs only against the disposable `postgres-test` container with
+  `SCINR_SQL_ALLOW_WIPE=1` (it drops its own test schema before each test) and is
+  skipped otherwise.
 
 ## Obtaining the store
 
@@ -62,6 +70,18 @@ implements four methods (`create_table`, `write_row_batch`,
 session per call instead of sharing one.
 
 ::: scinr.newton.graph.sinks
+
+## SQL implementation
+
+`SqlGraphStore` has the same nine operation groups as `Neo4jGraphStore`, written
+in SQLAlchemy Core against the tables created by the migrations in
+`scinr.newton.sql`. It uses the process-wide engines of `scinr.newton.sql.engine`
+and is selected with `graph_backend="postgres"` or `"sqlite"` plus `sql_url`.
+Driver errors are translated to the same graph exceptions by
+`scinr.newton.sql.errors`. See the
+[SQL graph backends guide](../user-guides/sql-graph.md).
+
+::: scinr.newton.graph.sql.store
 
 ## Types
 

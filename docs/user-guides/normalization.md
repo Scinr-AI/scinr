@@ -1,6 +1,6 @@
 # LLM Normalization System
 
-The normalization system turns free-text fields into structured nested Pydantic models via LLM calls. It is wired exclusively into the **tabular pipeline** (CSV/XLSX/XLS), running between column mapping and Neo4j write. The unstructured pipeline (PDF/DOCX) does not use the normalization engine — the LLM fills nested fields directly during entity extraction.
+The normalization system turns free-text fields into structured nested Pydantic models via LLM calls. It is wired exclusively into the **tabular pipeline** (CSV/XLSX/XLS), running between column mapping and the graph write. The unstructured pipeline (PDF/DOCX) does not use the normalization engine — the LLM fills nested fields directly during entity extraction.
 
 ---
 
@@ -37,14 +37,14 @@ CSV Row → Column Mapping → Model Instance
                                   │
                        Apply to Instance (setattr)
                                   │
-                          Write to Neo4j
+                          Write to the graph
 ```
 
-The normalization step sits between Pydantic model instantiation and Neo4j graph write. It is a **tabular-only hook**: it never runs during the unstructured pipeline (Stages 3-4).
+The normalization step sits between Pydantic model instantiation and graph write. It is a **tabular-only hook**: it never runs during the unstructured pipeline (Stages 3-4).
 
 ### Why it matters
 
-Tabular data often contains messy, inconsistent, or composite values in a single column. A "Manufacturer Address" column might contain street, city, state, and country all jammed together. Without normalization, you get one unstructured string property on your Neo4j node. With normalization, you get a properly structured `:ModelInstance` node with queryable, comparable, and deduplicatable fields.
+Tabular data often contains messy, inconsistent, or composite values in a single column. A "Manufacturer Address" column might contain street, city, state, and country all jammed together. Without normalization, you get one unstructured string property on your graph node. With normalization, you get a properly structured `:ModelInstance` node with queryable, comparable, and deduplicatable fields.
 
 ### Key characteristics
 
@@ -84,7 +84,7 @@ CSV Row → Column Mapping → Model Instance
                        Apply to Instance
                        (setattr + fallback)
                               ▼
-                       Write to Neo4j
+                       Write to the graph
 ```
 
 ### Step-by-step
@@ -206,9 +206,9 @@ def _apply_to_instance(self, instance_id, field_name, normalized, all_instances)
             return
 ```
 
-#### Phase 6: Write to Neo4j
+#### Phase 6: Write to the graph
 
-Once all normalization fields are populated, the instances proceed to the Neo4j write phase. The graph mapper treats the normalized nested models as regular `:ModelInstance` nodes, creating them with their properties and any `entity_label` or `instance_key` relationships they declare.
+Once all normalization fields are populated, the instances proceed to the graph write phase. The graph mapper treats the normalized nested models as regular `:ModelInstance` nodes, creating them with their properties and any `entity_label` or `instance_key` relationships they declare.
 
 ### Missing results retry
 
@@ -745,7 +745,7 @@ The normalization-first write path in `tabular/graph_writer.py` performs a **pre
 2. Groups unique keys by target type
 3. Dispatches all key batches concurrently via `asyncio.gather()`
 4. Instantiates composites with cached normalization results
-5. Writes to Neo4j in row batches
+5. Writes to the graph in row batches
 
 This approach ensures:
 - **Single-pass dedup** — all rows scanned once before any LLM call
@@ -1165,7 +1165,7 @@ asyncio.run(main())
    Row 3: normalized_address ← cached[ghi789], normalized_substance ← cached[pqr678]
    Row 4: normalized_address ← cached[abc123], normalized_substance ← cached[stu901]
 
-9. Neo4j Write
+9. Graph Write
    4 ManufacturerContact :ModelInstance nodes
    4 NormalizedAddress :ModelInstance nodes (3 unique, row 4 shares with row 1)
    4 NormalizedSubstance :ModelInstance nodes
@@ -1173,7 +1173,7 @@ asyncio.run(main())
    ActiveSubstance :LabeledEntity nodes (deduplicated by entity_label)
 ```
 
-### Step 6: Neo4j graph result
+### Step 6: Graph result
 
 Field values live as **properties on the `:ModelInstance` node itself**; nested normalized models are **separate child `:ModelInstance` nodes** linked via `[:HAS_<FIELDNAME>]`. The `[:HAS_<FIELD>]` type from `:ExtractionResult` to the row's instance is derived from the composite-schema field name.
 

@@ -1,8 +1,8 @@
 # Graph Navigation
 
 `scinr.newton.navigation` is a **read-only**, fully `async` API for exploring the
-knowledge graph the pipeline produces — without writing Cypher by hand. It turns
-the [Neo4j graph model](neo4j-graph.md) into small, composable, typed methods:
+knowledge graph the pipeline produces — without writing Cypher or SQL by hand. It turns
+the [graph model](neo4j-graph.md) into small, composable, typed methods:
 list root documents, walk children to a given depth, pull the `StructureNode`s /
 `InfoUnit`s / `ModelInstance`s of a document, filter model instances by class and
 properties, jump from a model instance back to its structure node, and so on.
@@ -12,15 +12,20 @@ Nothing in this module mutates the graph. It is separate from `ingest/`,
 
 !!! note "Pluggable backend"
     The graph store is abstracted the same way storage is. `GraphNavigator` is
-    an engine-agnostic interface; `Neo4jGraphNavigator` is the only backend
-    today, chosen by the `graph_backend` config field (default `"neo4j"`).
+    an engine-agnostic interface with two implementations: `Neo4jGraphNavigator`
+    (`graph_backend="neo4j"`, the default) and `SqlGraphNavigator`
+    (`graph_backend="postgres"` or `"sqlite"`). `get_graph_navigator()` and
+    `graph_navigator()` pick the one that matches the `graph_backend` config
+    field, so your code does not name an engine. See
+    [SQL Graph Backends](sql-graph.md).
 
 ---
 
 ## Configuration
 
-Navigation reuses your existing Neo4j connection settings. The only new field is
-`graph_backend`:
+Navigation reuses the connection settings of your graph backend: the Neo4j
+credentials, or `sql_url` for PostgreSQL and SQLite. The field that selects the
+engine is `graph_backend`:
 
 | Setting | Env | Default |
 |---|---|---|
@@ -39,12 +44,31 @@ configure(
 )
 ```
 
-### No LLM required
-
-Graph navigation is read-only and does **not** require any LLM. Configure only the Neo4j connection:
+On PostgreSQL or SQLite, set `graph_backend` and `sql_url` instead of the Neo4j
+credentials (the Neo4j credentials are required only for `graph_backend="neo4j"`):
 
 ```python
-configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")
+configure(
+    graph_backend="postgres",
+    sql_url="postgresql://newton:secret@db.internal:5432/scinr",
+)
+
+# or, with no server:
+configure(graph_backend="sqlite", sql_url="sqlite:///newton.db")
+```
+
+The `sql_url` scheme must match `graph_backend`, or `configure()` raises a
+`ConfigurationError`. The SQL backends need `pip install "scinr[postgres]"` or
+`pip install "scinr[sqlite]"`; the default `neo4j` backend needs
+`pip install "scinr[neo4j]"`.
+
+### No LLM required
+
+Graph navigation is read-only and does **not** require any LLM. Configure only the graph connection:
+
+```python
+configure(neo4j_user="neo4j", neo4j_password="...", neo4j_database="neo4j")  # Neo4j
+configure(graph_backend="sqlite", sql_url="sqlite:///newton.db")             # or SQLite
 ```
 
 Then use `graph_navigator()` (async context manager) or `get_graph_navigator()`.
@@ -556,12 +580,33 @@ rows = await nav.execute_raw(
 one  = await nav.execute_raw_one("MATCH (d:Document) RETURN count(d) AS c")
 ```
 
-`execute_raw` is **non-portable** — the query is Cypher, coupling the call to
-`nav.dialect == "cypher"`. It is read-only enforced: any write clause (`CREATE`,
-`MERGE`, `SET`, `DELETE`, `REMOVE`, `DROP`, `FOREACH`, `LOAD CSV`,
+`execute_raw` is **non-portable** — the query is written in the engine's own
+language, coupling the call to `nav.dialect`. On Neo4j (`nav.dialect ==
+"cypher"`) the query is Cypher. It is read-only enforced: any write clause
+(`CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, `DROP`, `FOREACH`, `LOAD CSV`,
 `CALL { … } IN TRANSACTIONS`) is rejected, and the statement runs in a READ
 transaction. Pass `dialect="cypher"` to fail fast on the wrong engine. A backend
 with no raw path raises `UnsupportedOperationError`.
+
+### On PostgreSQL and SQLite
+
+On the SQL backends `nav.dialect` is `"postgres"` or `"sqlite"`, and the query is
+read-only SQL with `:name` parameters, run against the [tables of the graph](sql-graph.md#table-summary):
+
+```python
+rows = await nav.execute_raw(
+    "SELECT path FROM documents WHERE latest = true ORDER BY path LIMIT :n",
+    {"n": 5},
+    dialect="postgres",   # or "sqlite"; a mismatch raises NavigationError
+)
+```
+
+The engine enforces read-only: Postgres runs the query in a `READ ONLY`
+transaction with the configured `sql_schema` first in the `search_path` (so
+table names need no schema prefix), and SQLite with `PRAGMA query_only`. A
+statement that writes fails with a `NavigationError`. Like on Neo4j,
+`execute_raw` cannot be scoped to a tenant: it is an administrative tool outside
+the isolation contract.
 
 ---
 

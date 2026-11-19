@@ -34,7 +34,7 @@ async def run_annotation(
     Parameters
     ----------
     document_name:
-        Name of the document node already present in Neo4j. Used to select the
+        Name of the document node already present in the graph database. Used to select the
         document only when *doc_path* is not given (then every latest document
         of *tenant_id* with that name is processed).
     manual:
@@ -48,7 +48,7 @@ async def run_annotation(
         When True, only process StructureNodes without a :HAS_MODEL_DECISION
         relationship. Ignored when *manual* is True.
     context_instructions_override:
-        When provided, use this context string instead of fetching from Neo4j.
+        When provided, use this context string instead of fetching from the graph database.
     tenant_id:
         Owner of the document (``None`` = public document). Only that tenant's
         documents are read or written.

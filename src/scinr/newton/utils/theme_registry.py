@@ -2,7 +2,7 @@
 ThemeRegistry — dynamic discovery and management of annotation themes.
 
 Scans the models/ directory for theme folders (those containing a catalog.py),
-builds a tree of ThemeNode objects, and provides catalog lookup and Neo4j export.
+builds a tree of ThemeNode objects, and provides catalog lookup and graph export.
 
 Convention for catalog.py files:
     THEME_DESCRIPTION: str         — one-line description for LLM classification
@@ -703,12 +703,12 @@ class ThemeRegistry:
         return sorted(all_classes)
 
     # ------------------------------------------------------------------
-    # Neo4j export
+    # graph export
     # ------------------------------------------------------------------
 
     def get_neo4j_theme_structure(self) -> list[dict[str, Any]]:
         """
-        Return the full theme tree as a list of dicts for Neo4j ingestion.
+        Return the full theme tree as a list of dicts for graph ingestion.
 
         Each dict has:
             path        — str, e.g. "structural_specs/nta"
@@ -814,7 +814,7 @@ class ThemeRegistry:
     def _get_docstring_description(cls: type, full_docstring: bool = True) -> str:
         """
         Build the model description used in the LLM catalog and in
-        ``CatalogModel.description`` (Neo4j).
+        ``CatalogModel.description`` (graph).
 
         When ``full_docstring`` is True (default), returns the complete class
         docstring, dedented and stripped. When False, returns only the first

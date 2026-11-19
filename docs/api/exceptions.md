@@ -8,7 +8,8 @@ family can be caught with one clause.
 ```
 ScinrError
 ├── ConfigurationError
-│   └── GraphConfigurationError        the graph backend is not configured
+│   ├── GraphConfigurationError        the graph backend is not configured
+│   └── SchemaVersionError             (also a GraphConnectionError) see below
 ├── PreconditionError
 ├── ExtractionError
 ├── IngestionError
@@ -22,16 +23,31 @@ ScinrError
 │   └── ScopeError                     (also a StorageError)
 └── GraphError                         anything that comes from the graph engine
     ├── GraphConnectionError           the engine is unreachable
-    │   └── GraphAuthenticationError   the engine rejected the credentials
+    │   ├── GraphAuthenticationError   the engine rejected the credentials
+    │   └── SchemaVersionError         (also a ConfigurationError) see below
     ├── TransientGraphError            transient error, retries exhausted
     ├── GraphResourceError             the engine ran out of resources
     ├── GraphConstraintError           a write violated a constraint
     │   └── DocumentVersionConflict    the document version was already ingested
-    └── GraphQueryError                the engine rejected the query
+    ├── GraphQueryError                the engine rejected the query
+    └── TenantAccessError              (also a StorageError) the database refused the
+                                       operation for the tenant (Row-Level Security)
 ```
 
-Each class has a single parent: there are no compatibility bases. In particular
-`GraphConnectionError` is a `GraphError`, **not** a `NavigationError`.
+Three classes have two parents and appear twice in the tree:
+
+| Class | Parents |
+|---|---|
+| `ScopeError` | `NavigationError`, `StorageError` |
+| `TenantAccessError` | `GraphError`, `StorageError` |
+| `SchemaVersionError` | `GraphConnectionError`, `ConfigurationError` |
+
+`SchemaVersionError` (a row-level-security schema that is not at the version this
+release needs, and the connected user cannot migrate it) is not exported from
+`scinr.newton`; import it from `scinr.newton.sql.schema`.
+
+Every other class has a single parent: there are no compatibility bases. In
+particular `GraphConnectionError` is a `GraphError`, **not** a `NavigationError`.
 
 ## What to catch
 
@@ -45,27 +61,27 @@ Each class has a single parent: there are no compatibility bases. In particular
 | Any other write that violates a graph constraint | `GraphConstraintError` |
 | A query the engine rejects (a bug, not a condition to retry) | `GraphQueryError` |
 | Any failure of the graph engine | `GraphError` |
-| Graph credentials not configured | `GraphConfigurationError` (or `ConfigurationError`) |
+| The database refused the operation for the tenant (row-level security) | `TenantAccessError` (on the storage path, also a `StorageError`) |
+| A row-level-security schema older than this release needs, and the user cannot migrate it | `SchemaVersionError` (a `GraphConnectionError` and a `ConfigurationError`) |
+| Graph backend not configured | `ConfigurationError` (`GraphConfigurationError` is its subclass) |
 | Bad input to the navigation API | `NavigationError` |
 
 The graph store translates the engine's own exceptions (for Neo4j,
 `neo4j.exceptions.*`) at its boundary, **after** the retries: the message is
-the engine's and the original exception is chained in `__cause__`.
+the engine's and the original exception is chained in `__cause__`. The SQL
+backends do the same for their drivers in `scinr.newton.sql.errors`: the message
+is the driver's, scrubbed of secrets and never containing the SQL statement or
+its parameters. On the storage path the same driver errors become `StorageError`
+(or `TenantAccessError` for a refusal).
 
 ## Breaking changes (0.6.0)
 
 | Before | Now | Write this instead |
 |---|---|---|
 | A version conflict raised `IngestionError` | `DocumentVersionConflict` (no longer an `IngestionError`) | `except DocumentVersionConflict` |
-| Missing Neo4j credentials raised `ValueError` | `GraphConfigurationError` (no longer a `ValueError`) | `except GraphConfigurationError` or `except ConfigurationError` |
+| Missing Neo4j credentials raised `ValueError` | `ConfigurationError` from `configure()`; `GraphConfigurationError` (also a `ConfigurationError`) from the driver (neither is a `ValueError`) | `except ConfigurationError` |
 | `GraphConnectionError` was a `NavigationError` | It is a `GraphError` | `except (NavigationError, GraphConnectionError)` |
 | Errors of `neo4j.exceptions.*` escaped from the write path | The classes above | `except GraphError` |
-
-!!! note
-    The version conflict still surfaces as `IngestionError` and the driver
-    exceptions still escape from the write path until the graph store takes over
-    those operations; the classes above are already importable from
-    `scinr.newton`.
 
 ## Reference
 

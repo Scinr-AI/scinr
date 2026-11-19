@@ -6,5 +6,5 @@
   "homepage": "https://scinr-ai.github.io/scinr/",
   "repository": "https://github.com/Scinr-AI/scinr",
   "license": "Apache-2.0",
-  "keywords": ["scinr", "knowledge-graph", "neo4j", "pydantic", "life-sciences", "document-extraction"]
+  "keywords": ["scinr", "knowledge-graph", "neo4j", "postgres", "sqlite", "pydantic", "life-sciences", "document-extraction"]
 }

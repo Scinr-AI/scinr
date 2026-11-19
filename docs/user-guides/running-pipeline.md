@@ -4,8 +4,9 @@ This is the definitive reference for `run_pipeline()` — the single entry point
 
 !!! note "LLM setup"
     The extraction, annotation and entity-extraction stages (and tabular
-    normalization) need an LLM. Set it with `configure(llm=...)` — there is
-    no `MODEL_ID` env var. `configure()` itself does not require it. The
+    normalization) need an LLM. Set it with `configure(llm=...)` (if `llm` is
+    omitted and the env var `MODEL_ID` is set, a Bedrock model is built from it).
+    `configure()` itself does not require it. The
     examples below use a local open-source model through
     [Ollama](https://ollama.com/) — `pip install "scinr[ollama]"`, then
     `ollama pull llama3`:
@@ -21,7 +22,7 @@ This is the definitive reference for `run_pipeline()` — the single entry point
 
 ## Quick Start
 
-The simplest possible pipeline run — convert raw files, extract structure, ingest to Neo4j, annotate, and extract entities:
+The simplest possible pipeline run — convert raw files, extract structure, ingest to the graph, annotate, and extract entities:
 
 ```python
 import asyncio
@@ -47,7 +48,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`configure()` automatically reads `.env` via `python-dotenv`, so Neo4j / storage / OCR settings can come from the environment. Pass `llm=` when the run includes an LLM stage.
+The `.env` file is loaded via `python-dotenv` when `scinr.newton` is imported (not by `configure()`), so graph / storage / OCR settings can come from the environment. Pass `llm=` when the run includes an LLM stage.
 
 ---
 
@@ -59,7 +60,7 @@ The pipeline consists of six named stages. The default run executes Stages 0-4 i
 | :--- | :--- | :--- |
 | 0 | `"preprocess"` | Convert raw files (PDF, DOCX, XLSX, XLS, CSV) to intermediate JSON/Markdown |
 | 1 | `"extraction"` | Parse document structure into hierarchical sections via LLM |
-| 2 | `"ingestion"` | Write `:Document` and `:StructureNode` nodes into Neo4j |
+| 2 | `"ingestion"` | Write `:Document` and `:StructureNode` nodes into the graph |
 | 3 | `"annotation"` | LLM agent assigns extraction models to each structure node |
 | 4 | `"entity_extraction"` | Extract typed Pydantic entities and write graph subgraphs |
 | 5 | `"tabular"` | Process CSV/XLSX/XLS with normalization and table understanding |
@@ -283,7 +284,7 @@ These parameters select which documents to process when running annotation (`"an
 
 #### `document_names`
 
-An explicit list of Neo4j `document_name` values. The pipeline looks up each document in Neo4j and processes only those documents. Documents ingested since 0.5.0 are named with their extension (`report.pdf`); older ones keep their extension-less name.
+An explicit list of `document_name` values in the graph. The pipeline looks up each document in the graph and processes only those documents. Documents ingested since 0.5.0 are named with their extension (`report.pdf`); older ones keep their extension-less name.
 
 ```python
 # Run annotation on specific documents
@@ -295,7 +296,7 @@ result = await run_pipeline(
 
 #### `document_names_dir`
 
-A directory containing `extract-*.json` files. The pipeline extracts document names from these files and processes the corresponding documents in Neo4j.
+A directory containing `extract-*.json` files. The pipeline extracts document names from these files and processes the corresponding documents in the graph.
 
 ```python
 # Derive document names from extraction JSON files
@@ -336,7 +337,7 @@ Use this when you already know which extraction model applies to a document and 
 
 **Type:** `bool`  **Default:** `False`
 
-When `True`, Stage 3 (`"annotation"`) skips structure nodes that already have an annotation decision (a `model_class` property set in Neo4j). This is the primary mechanism for resuming an interrupted annotation run.
+When `True`, Stage 3 (`"annotation"`) skips structure nodes that already have an annotation decision (a `model_class` property set in the graph). This is the primary mechanism for resuming an interrupted annotation run.
 
 ```python
 # First run: annotate all nodes
@@ -415,7 +416,7 @@ result = await run_pipeline(
 
 **Type:** `bool`  **Default:** `False`
 
-When `True`, Stage 2 (`"ingestion"`) replaces the latest version of an existing document in Neo4j **without incrementing the version number**. This is designed for single-document correction runs where you want to fix a document in place.
+When `True`, Stage 2 (`"ingestion"`) replaces the latest version of an existing document in the graph **without incrementing the version number**. This is designed for single-document correction runs where you want to fix a document in place.
 
 ```python
 # Re-ingest a single document, overwriting the existing version
@@ -436,7 +437,7 @@ result = await run_pipeline(
 
 **Type:** `str | None`  **Default:** `None`
 
-The `document_name` of an existing document that is superseded by the newly ingested document (with its extension for documents ingested since 0.5.0, e.g. `report_v1.pdf`). After ingestion completes, the pipeline creates a replacement relationship in Neo4j linking the new document as the successor of the old one.
+The `document_name` of an existing document that is superseded by the newly ingested document (with its extension for documents ingested since 0.5.0, e.g. `report_v1.pdf`). After ingestion completes, the pipeline creates a replacement relationship in the graph linking the new document as the successor of the old one.
 
 ```python
 # Ingest a new version that replaces an old document
@@ -446,7 +447,7 @@ result = await run_pipeline(
 )
 ```
 
-The pipeline performs a pre-flight check before ingestion to verify that the document named in `replaces` actually exists in Neo4j. If it does not exist, the pipeline raises an error before processing any documents.
+The pipeline performs a pre-flight check before ingestion to verify that the document named in `replaces` actually exists in the graph. If it does not exist, the pipeline raises an error before processing any documents.
 
 > **Mutual exclusion:** `replaces` and `update_mode` cannot be used together. `update_mode` fixes the current version in-place; `replaces` creates a new version linked as the successor.
 
@@ -552,7 +553,7 @@ The effect of `on_partial_failure` depends on which stage failed:
 | :--- | :--- |
 | `"preprocess"` | **Always** stops the document — no valid artifact exists for subsequent stages. |
 | `"extraction"` | **Always** stops the document — no valid document object for subsequent stages. |
-| `"ingestion"` | **Always** stops the document — no valid Neo4j document for subsequent stages. |
+| `"ingestion"` | **Always** stops the document — no valid graph document for subsequent stages. |
 | `"annotation"` | Partial failure (`nodes_failed > 0`). `"abort"` stops the document; `"continue"` / `"warn"` let it advance. |
 | `"entity_extraction"` | Partial failure (`nodes_failed > 0`). `"abort"` stops the document; `"continue"` / `"warn"` let it advance. |
 
@@ -614,7 +615,7 @@ With `None` (the default) no event is built and no extra task or thread is start
 
 ### 1. First-Time Full Ingestion
 
-The canonical first run — convert raw files, extract structure, ingest to Neo4j, annotate, and extract entities.
+The canonical first run — convert raw files, extract structure, ingest to the graph, annotate, and extract entities.
 
 ```python
 import asyncio
@@ -649,7 +650,7 @@ asyncio.run(main())
 
 ### 2. Re-Run Annotation Only
 
-Re-run annotation and entity extraction on documents already in Neo4j, without touching Stages 0-2.
+Re-run annotation and entity extraction on documents already in the graph, without touching Stages 0-2.
 
 ```python
 import asyncio
@@ -681,7 +682,7 @@ asyncio.run(main())
 
 ### 3. Add New Documents to Existing Graph
 
-Ingest new documents into a Neo4j graph that already contains previously ingested documents.
+Ingest new documents into a graph that already contains previously ingested documents.
 
 ```python
 import asyncio
@@ -964,7 +965,7 @@ if result.ingestion:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `document_name` | `str` | The Neo4j `document_name` (or filename stem) of the processed document. |
+| `document_name` | `str` | The graph `document_name` (or filename stem) of the processed document. |
 | `nodes_processed` | `int` | Nodes (or files) successfully processed. For Stages 0-2: 1 for success, 0 for failure. For Stages 3-4: number of structure nodes processed. |
 | `nodes_failed` | `int` | Nodes (or files) that failed processing. |
 | `errors` | `list[str]` | Error messages for this document. Empty on full success. |
@@ -1005,7 +1006,7 @@ async def main():
     )
     print(f"Step 2 (extraction): {r2.success}")
 
-    # ── Step 3: Ingest extracted documents into Neo4j ───────────────────
+    # ── Step 3: Ingest extracted documents into the graph ───────────────────
     r3 = await run_pipeline(
         ingestion_input_dir="./data/extracted/",
         stages=["ingestion"],
@@ -1057,7 +1058,7 @@ async def main():
     try:
         result = await run_pipeline(input_raw="./raw_docs")
     except ConfigurationError as e:
-        # Missing Neo4j or LLM configuration
+        # Missing graph (e.g. Neo4j credentials, sql_url) or LLM configuration
         print(f"Configuration error: {e}")
     except PreconditionError as e:
         # Invalid parameter combination
@@ -1235,6 +1236,7 @@ asyncio.run(resume_pipeline("Large_Document.pdf"))
 - **[Custom Models](custom-models.md)** — Defining domain-specific Pydantic extraction models.
 - **[Tabular Pipeline](tabular-pipeline.md)** — Tabular data normalization and processing.
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results.
+- **[SQL Graph Backends](sql-graph.md)** — Running the graph on PostgreSQL or SQLite.
 - **[Progress Tracking](progress-tracking.md)** — Following a run live with `ProgressTracker` or your own callbacks.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.
 - **[Results API](../api/results.md)** — Auto-generated documentation for `PipelineResult`, `StageResult`, and `DocumentResult`.

@@ -1,6 +1,6 @@
 # Document Freezing
 
-`freeze_document()` archives the subgraph of a document to a **snapshot** in a document store and reduces the document in Neo4j to a **stub**: the `:Document` node stays (so the document is still listed and its version history is kept), but its structure tree, InfoUnits, annotations and extraction results can leave the graph. `restore_document()` rebuilds the subgraph from the snapshot. `export_document_snapshot()` produces the same snapshot without touching the graph.
+`freeze_document()` archives the subgraph of a document to a **snapshot** in a document store and reduces the document in the graph to a **stub**: the `:Document` node stays (so the document is still listed and its version history is kept), but its structure tree, InfoUnits, annotations and extraction results can leave the graph. `restore_document()` rebuilds the subgraph from the snapshot. `export_document_snapshot()` produces the same snapshot without touching the graph.
 
 Use it to keep the graph small without losing documents you may need again. Unlike `delete_document()`, freezing is reversible. Unlike re-ingesting, restoring gives you back exactly what was frozen, with no LLM calls.
 
@@ -33,12 +33,14 @@ Snapshots live in a **freeze backend**, configured next to the storage backend:
 `freeze_backend` has no default of its own: when neither the argument nor `FREEZE_BACKEND` is set, it **inherits the resolved `storage_backend`**. With `storage_backend="mongodb"` you therefore get snapshots in the same MongoDB database with no extra configuration. The MongoDB backend reuses `mongodb_uri` / `mongodb_database` and the `mongodb_ensure_indexes` setting of the storage backend.
 
 - `"none"` — `freeze_document()`, `restore_document()` and `export_document_snapshot(destination="storage")` raise `ConfigurationError`. The `"dict"` and `"file"` destinations of the export still work.
+- `"postgres"` / `"sqlite"` — each snapshot is a row of `frozen_snapshots` plus its bytes (chunks in the database on Postgres, a file in the SQLite files folder). They need `sql_url` and the same engine as the other SQL axes; see [Storage Backends](storage-backends.md#freeze-backend-document-snapshots).
 - `"mongodb"` — the snapshot JSON goes to GridFS (`frozen_snapshots`), and a metadata document goes to `frozen_documents`. The metadata document holds the tenant, `created_by_user_id`, `job_id`, the size, the SHA-256 checksum, `frozen_at` and the keep flags. Its `_id` is the snapshot's id (`frozen_blob_id`).
 - `"custom"` — pass an instance of `scinr.newton.freeze.base.FreezeRepository` as `custom_freeze_storage`. It has three mandatory methods, `store_snapshot`, `read_snapshot_to_file` and `delete_snapshot`, and an optional one, `find_snapshots`, which `restore_document()` needs to find the snapshot of a document that is no longer in the graph. All of them are tenant-scoped.
 
 ```python
 configure(..., storage_backend="mongodb")                          # snapshots in MongoDB too
 configure(..., storage_backend="none", freeze_backend="mongodb")   # snapshots only
+configure(..., storage_backend="sqlite", sql_url="sqlite:///newton.db")  # snapshots in SQLite too
 ```
 
 ---
@@ -95,7 +97,7 @@ The duration of each phase is logged at `INFO` level at the end of the freeze (`
 
 ### Memory and interruptions
 
-Steps 4 and 5 are **not atomic**. A transaction keeps everything it deletes in memory until it commits, and Neo4j caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura). Deleting the subtree of a few hundred documents in one transaction goes over that cap and fails with `MemoryPoolOutOfMemoryError`. So the subtree is deleted in pieces:
+Steps 4 and 5 are **not atomic**. On Neo4j, a transaction keeps everything it deletes in memory until it commits, and Neo4j caps the memory of all running transactions together (`dbms.memory.transaction.total.max`, a fixed size on Aura). Deleting the subtree of a few hundred documents in one transaction goes over that cap and fails with `MemoryPoolOutOfMemoryError`. So the subtree is deleted in pieces:
 
 - the documents are processed 50 at a time;
 - each delete commits every 1,000 nodes (`CALL { ... } IN TRANSACTIONS`);
@@ -199,7 +201,7 @@ await restore_document("reports/2024.pdf", tenant_id="acme", concurrency=1)  # w
 - **`batch_size`** is the number of rows per write transaction, 1000 by default. A larger batch means fewer round trips, but each transaction lives longer. It keeps its locks longer, so other writers that touch the same shared nodes wait longer: catalog nodes and the tenant's `:ModelInstance` / `:LabeledEntity`, such as a running ingestion. Lock contention is usually the limit, not memory.
 - **`concurrency`** is the number of rebuild transactions in flight at once, 4 by default. Each one uses its own pooled connection. The reader waits for a free slot before preparing the next batch, so the Python side never holds more than `concurrency` batches in memory.
 
-Neo4j's transaction memory (`dbms.memory.transaction.total.max`) does not grow with the size of the restore, only with what is in flight at once. Measured on Neo4j 2026.08 with synthetic folders of 150 and 732 documents (the latter 475,000 nodes and 520,000 relationships):
+On Neo4j, the transaction memory (`dbms.memory.transaction.total.max`) does not grow with the size of the restore, only with what is in flight at once. Measured on Neo4j 2026.08 with synthetic folders of 150 and 732 documents (the latter 475,000 nodes and 520,000 relationships):
 
 | | Peak transaction memory |
 |---|---|
@@ -346,13 +348,14 @@ As with `delete_document()`, who may freeze or restore public documents (`tenant
 - **Ingestion does not check `frozen`.** `run_pipeline(update_mode=True)` re-ingests the `latest` version in place: if that version is frozen, it recreates the structure tree under the stub, which stays marked `frozen`, and a later restore merges the snapshot on top of it. Guard against it in your API layer by checking the `frozen` property of the `:Document`. Annotation and entity extraction skip frozen documents naturally, because they have no InfoUnits. See also [Changes made while frozen](#changes-made-while-frozen-the-snapshot-wins).
 - **`delete_document()` on a frozen document** leaves the snapshot and, with `keep_structure_nodes=False`, the kept annotations and extraction results behind. Restore first, then delete (see [Document Deletion — Frozen Documents](document-deletion.md#frozen-documents)).
 - **Indexes.** The restore looks nodes up by `uid` and creates the indexes it needs if they are missing (step 1). Creating an index on a large graph takes a while the first time, and needs schema privileges; without them the restore still works, but each lookup scans the label.
-- Until the first freeze in a database, the Neo4j driver may log a notification that the property `frozen` does not exist. It is harmless.
+- On Neo4j, until the first freeze in a database, the driver may log a notification that the property `frozen` does not exist. It is harmless.
 
 ---
 
 ## See Also
 
 - **[Document Deletion](document-deletion.md)** — The irreversible counterpart, with the same selector and GC.
-- **[Storage Backends](storage-backends.md)** — The MongoDB backend the freeze backend inherits from.
+- **[Storage Backends](storage-backends.md)** — The MongoDB, PostgreSQL and SQLite backends the freeze backend inherits from.
 - **[Neo4j Graph Storage](neo4j-graph.md)** — The node types a snapshot contains.
+- **[SQL Graph Backends](sql-graph.md)** — Freezing on PostgreSQL or SQLite.
 - **[Freezing API](../api/freezing.md)** — Auto-generated reference.

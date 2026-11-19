@@ -39,10 +39,10 @@ async def run_tabular_agent(
     ----------
     file_path : Path to the source file (absolute).
     document_name : Display name (source file name with extension, e.g. ``ventas.xlsx``).
-    doc_path : Relative path used as Neo4j Document key.
+    doc_path : Relative path used as graph Document key.
     resolved_version : Pre-computed batch version.
     update_mode : If True, existing Table/Row subgraph is wiped before re-inserting.
-    raw_file_id : MongoDB ObjectId string for the stored raw file, or "" when no storage backend is configured.
+    raw_file_id : ObjectId string for the stored raw file, or "" when no storage backend is configured.
     tenant_id : Optional caller-supplied tenant (``None`` = public document).
         Normalized here, once, with :func:`~scinr.newton.utils.tenancy.tenant_key`;
         the stored key is part of the :Document key and is carried in the graph

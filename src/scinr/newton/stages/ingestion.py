@@ -1,5 +1,5 @@
 """
-stages/ingestion.py — Stage 2: Load Documents into Neo4j, plus replacement helpers.
+stages/ingestion.py — Stage 2: Load Documents into the graph database, plus replacement helpers.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ async def run_ingestion(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> StageResult:
-    """Load extracted documents into Neo4j.
+    """Load extracted documents into the graph database.
 
     Accepts documents either from disk (via *output_folder* or *files*) or
     directly as in-memory :class:`~models.document_structure.Document` objects
@@ -209,7 +209,7 @@ def preflight_check_replaces(replaces_name: str, *, tenant_id: str | None = None
 
     if len(rows) == 0:
         raise PreconditionError(
-            f"replaces={replaces_name!r} not found in Neo4j: no Document with "
+            f"replaces={replaces_name!r} not found in the graph: no Document with "
             f"name={replaces_name!r} and latest=true exists. Check the document name."
         )
     if len(rows) > 1:

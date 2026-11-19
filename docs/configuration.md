@@ -24,14 +24,17 @@ configure(llm_concurrency=8)  # final value: 8
 
 ## Environment Variables
 
-All environment variables are optional unless otherwise noted. They are read at configuration time (when `configure()` is first called or when the config is first accessed).
+All environment variables are optional unless otherwise noted. They are read when `configure()` runs. A `.env` file is not read by `configure()` itself: several `scinr.newton` modules call `load_dotenv()` when they are imported, so the file is loaded at import time.
 
 ### LLM / Model
 
-The LLM has **no environment variable** — build a LangChain chat model in code and pass it as `configure(llm=..., repair_llm=...)` (not required at `configure()` time; needed for LLM stages). Only concurrency is env-configurable:
+The usual way to set the LLM is to build a LangChain chat model in code and pass it as `configure(llm=..., repair_llm=...)` (not required at `configure()` time; needed for LLM stages). As a shortcut for AWS Bedrock, when `llm` is not passed and `MODEL_ID` is set, `configure()` builds a `ChatBedrockConverse` itself (temperature `0`) from the variables below; it requires `langchain-aws` and raises `ConfigurationError` if it is missing. `repair_llm` has no environment variable.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `MODEL_ID` | *(unset)* | Bedrock model id. Used only when `llm=` is not passed. |
+| `AWS_DEFAULT_REGION` | `us-east-1` | AWS region of that Bedrock client. Read only when `MODEL_ID` is used. |
+| `MAX_TOKENS` | `65536` | `max_tokens` of that Bedrock client. Read only when `MODEL_ID` is used. |
 | `LLM_CONCURRENCY` | `4` | Maximum number of concurrent LLM calls. |
 
 ### Neo4j
@@ -44,11 +47,14 @@ The Neo4j driver is an optional extra (`pip install "scinr[neo4j]"`). The creden
 | `NEO4J_USER` | *(required)* | Neo4j database username. **Note:** previous versions used `NEO4J_USERNAME` — this was renamed to `NEO4J_USER`. |
 | `NEO4J_PASSWORD` | *(required)* | Neo4j user password. |
 | `NEO4J_DATABASE` | *(required)* | Neo4j database name |
+| `NEO4J_AUTH` | *(unset)* | Fallback in `user/password` format, used for whichever of `NEO4J_USER` / `NEO4J_PASSWORD` is not set otherwise. |
 | `NEO4J_CONCURRENCY` | `10` | Maximum async Neo4j concurrency. |
 | `NEO4J_SYNC_CONCURRENCY` | `8` | Maximum sync Neo4j concurrency. |
 | `GRAPH_BACKEND` | `neo4j` | Backend for the graph (the pipeline's write path and the read-only navigation API): `neo4j`, `postgres` or `sqlite`. The Neo4j variables above are required only with `neo4j`; the Neo4j driver is the optional extra `pip install "scinr[neo4j]"`. |
 
-### Storage (MongoDB)
+### Storage and Freeze
+
+The backend selectors, and the settings of the MongoDB backend (the `MONGODB_*` variables apply only when the storage or freeze backend is `mongodb`). The PostgreSQL and SQLite settings are in the next section.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
@@ -131,6 +137,16 @@ See [Multimodal Ingestion](user-guides/multimodal-ingestion.md). `vision_llm` an
 | `NORMALIZATION_ENABLED` | `true` | Enable tabular data normalization via LLM. |
 | `NORMALIZATION_BATCH_SIZE` | `5` | Batch size for normalization LLM calls. |
 
+### Consolidation
+
+Used only by the `fast_extraction=True` consolidation step of Stage 1.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `CONSOLIDATION_TOKEN_SAFETY_MARGIN` | `0.75` | Fraction of `max_tokens` reserved for output. |
+| `CONSOLIDATION_MAX_OUTPUT_TOKENS` | *(unset)* | Explicit output-token ceiling; derived from the margin when unset. |
+| `CONSOLIDATION_MAX_INPUT_TOKENS` | `65536` | Input-token ceiling that sizes the consolidation batches. |
+
 ---
 
 ## Programmatic Configuration
@@ -155,9 +171,9 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
 | `neo4j_uri` | `str \| None` | Bolt URI. Default `bolt://localhost:7687`. |
-| `neo4j_user` | `str \| None` | Username. **Required** (via arg or `NEO4J_USER`). |
-| `neo4j_password` | `str \| None` | Password. **Required** (via arg or `NEO4J_PASSWORD`). |
-| `neo4j_database` | `str \| None` | Database name. **Required** (via arg or `NEO4J_DATABASE`). |
+| `neo4j_user` | `str \| None` | Username. Required when `graph_backend="neo4j"` (via arg, `NEO4J_USER` or `NEO4J_AUTH`). |
+| `neo4j_password` | `str \| None` | Password. Required when `graph_backend="neo4j"` (via arg, `NEO4J_PASSWORD` or `NEO4J_AUTH`). |
+| `neo4j_database` | `str \| None` | Database name. Required when `graph_backend="neo4j"` (via arg or `NEO4J_DATABASE`). |
 | `neo4j_concurrency` | `int \| None` | Max concurrent async Neo4j sessions. Default `10`. |
 | `neo4j_sync_concurrency` | `int \| None` | Max concurrent sync ingestion dispatches. Default `8`. |
 | `graph_backend` | `str \| None` | Graph backend (write path and navigation): `"neo4j"` (default), `"postgres"` or `"sqlite"`. The Neo4j credentials are required only for `"neo4j"`. |
@@ -186,8 +202,14 @@ The same settings as the [SQL environment variables](#sql-postgresql-and-sqlite)
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
+| `storage_backend` | `str \| None` | `"none"` (default), `"mongodb"`, `"postgres"`, `"sqlite"` or `"custom"`. |
+| `mongodb_uri` | `str \| None` | MongoDB connection string. Default `mongodb://localhost:27017`. |
+| `mongodb_database` | `str \| None` | MongoDB database name. Default `scinr`. |
+| `mongodb_raw_files_collection` | `str \| None` | Collection for raw file metadata. Default `raw_files`. |
+| `mongodb_pages_collection` | `str \| None` | Collection for converted pages. Default `converted_pages`. |
+| `mongodb_gridfs_bucket` | `str \| None` | GridFS bucket for binaries. Default `raw_binaries`. |
 | `mongodb_ensure_indexes` | `bool \| None` | Create the MongoDB indexes automatically (default `True`). `False` skips it, for users without the `createIndex` privilege. |
-| `custom_storage` | `tuple \| None` | Custom storage backend tuple (driver, connection). |
+| `custom_storage` | `tuple \| None` | `(RawFileRepository, PageRepository)` when `storage_backend="custom"`. |
 | `freeze_backend` | `str \| None` | Snapshot backend: `none`, `mongodb`, `postgres`, `sqlite` or `custom`. Unset → `FREEZE_BACKEND`, else the resolved `storage_backend`. |
 | `mongodb_frozen_collection` | `str \| None` | Collection for snapshot metadata (default `frozen_documents`). |
 | `mongodb_frozen_gridfs_bucket` | `str \| None` | GridFS bucket for snapshot files (default `frozen_snapshots`). |
@@ -256,7 +278,7 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 | `full_docstring` | `bool \| None` | Store the full model docstring (`True`) or only its first line (`False`). Default `True`. |
 | `consolidation_token_safety_margin` | `float \| None` | Fraction of `max_tokens` reserved for output during `fast_extraction=True` consolidation. Default `0.75`. |
 | `consolidation_max_output_tokens` | `int \| None` | Explicit output-token ceiling for consolidation; derived from the margin when unset. Default `None`. |
-| `consolidation_max_input_tokens` | `int \| None` | Explicit input-size ceiling for consolidation; no check when unset. Default `None`. |
+| `consolidation_max_input_tokens` | `int \| None` | Input-token ceiling that sizes the consolidation batches. Default `65536`. |
 
 > **Note:** `fast_extraction` itself is **not** a `configure()` setting — it is a per-call `run_pipeline(fast_extraction=...)` argument. See [Running the Pipeline](user-guides/running-pipeline.md#fast_extraction-parallel-stage-1-extraction-opt-in).
 
@@ -286,7 +308,7 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 
 ### Navigation Only (No LLM)
 
-Graph navigation (`scinr.newton.navigation`) is read-only and does not need any LLM. Configure only the Neo4j connection:
+Graph navigation (`scinr.newton.navigation`) is read-only and does not need any LLM. Configure only the graph connection. On Neo4j:
 
 ```python
 # Navigation only — no LLM required
@@ -297,9 +319,18 @@ configure(
 )  # storage_backend defaults to "none"; graph_backend to "neo4j"
 ```
 
+On PostgreSQL or SQLite, set the backend and the URL instead (see [SQL Graph Backends](user-guides/sql-graph.md)):
+
+```python
+configure(
+    graph_backend="sqlite",
+    sql_url="sqlite:////var/lib/scinr/newton.db",
+)
+```
+
 ### Minimal Setup
 
-Put Neo4j / OCR settings in `.env`; build the LLM in code and pass it to `configure()`. `configure()` always reads `.env` via `python-dotenv`, so you never need to import dotenv manually.
+Put Neo4j / OCR settings in `.env`; build the LLM in code and pass it to `configure()`. The `.env` file is loaded by `python-dotenv` when `scinr.newton` is imported (not by `configure()`), so you never need to import dotenv manually.
 
 ```bash
 # .env file
@@ -430,8 +461,8 @@ cp .env.example .env
 
 The `.env.example` file in the project root contains every available setting with inline comments. Key notes:
 
-- `configure()` loads the `.env` file from the **current working directory** automatically (via `python-dotenv`). You never import `dotenv` yourself.
-- `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` are strictly required. The LLM has no env var — pass it as `configure(llm=...)` when a run includes an LLM stage.
+- The `.env` file is loaded automatically (via `python-dotenv`) when `scinr.newton` is imported, not by `configure()`. You never import `dotenv` yourself.
+- `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` are required only when `GRAPH_BACKEND=neo4j` (the default); the SQL backends need `SQL_URL` instead. Pass the LLM as `configure(llm=...)` (or use the `MODEL_ID` Bedrock shortcut) when a run includes an LLM stage.
 - Environment values are **overridden** by explicit `configure(...)` arguments (see [Configuration Resolution](#configuration-resolution)).
 - Leaving an optional variable unset falls back to the hard-coded default in the [Complete Reference](#complete-reference-all-settings) table.
 
@@ -460,7 +491,7 @@ print(f"LLM Concurrency: {config.llm_concurrency}")
 print(f"Prompt Family: {config.prompt_family}")
 ```
 
-The `ScinrConfig` object is immutable after creation. To change configuration, call `configure()` again with the new values — it will produce a new `ScinrConfig` that replaces the previous one.
+The `ScinrConfig` object is a plain (not frozen) dataclass; treat it as read-only. To change configuration, call `configure()` again with the new values — it will produce a new `ScinrConfig` that replaces the previous one.
 
 ---
 
@@ -494,13 +525,13 @@ For quick lookup, here is every configurable setting with its resolution chain:
 
 | Setting | `configure()` param | Environment Variable | Default |
 | :--- | :--- | :--- | :--- |
-| **LLM Client** | `llm` | *(none)* | `None` |
+| **LLM Client** | `llm` | `MODEL_ID` (Bedrock shortcut, with `AWS_DEFAULT_REGION` and `MAX_TOKENS`) | `None` |
 | **Repair LLM Client** | `repair_llm` | *(none)* | `None` (falls back to `llm`) |
 | **Neo4j URI** | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` |
 | **Neo4j User** | `neo4j_user` | `NEO4J_USER` | *(required)* |
 | **Neo4j Password** | `neo4j_password` | `NEO4J_PASSWORD` | *(required)* |
 | **Neo4j Database** | `neo4j_database` | `NEO4J_DATABASE` | *(required)* |
-| **Neo4j Auth** | *(derived)* | `NEO4J_AUTH` | Fallback format |
+| **Neo4j Auth** | *(none)* | `NEO4J_AUTH` | Unset (fallback in `user/password` format) |
 | **Neo4j Async Concurrency** | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | `10` |
 | **Neo4j Sync Concurrency** | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | `8` |
 | **Graph Backend** | `graph_backend` | `GRAPH_BACKEND` | `neo4j` (`neo4j`, `postgres`, `sqlite`) |
@@ -562,7 +593,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Normalization** | `normalization_enabled` | `NORMALIZATION_ENABLED` | `true` |
 | **Normalization Batch** | `normalization_batch_size` | `NORMALIZATION_BATCH_SIZE` | `5` |
 | **Normalization LLM** | `normalization_llm` | *(none)* | `None` (falls back to `llm`) |
-| **Consolidation output margin** | `consolidation_token_safety_margin` | *(none)* | `0.75` (used only when `fast_extraction=True`) |
-| **Consolidation max output tokens** | `consolidation_max_output_tokens` | *(none)* | `None` (derived from the margin) |
-| **Consolidation max input tokens** | `consolidation_max_input_tokens` | *(none)* | `None` (no check) |
+| **Consolidation output margin** | `consolidation_token_safety_margin` | `CONSOLIDATION_TOKEN_SAFETY_MARGIN` | `0.75` (used only when `fast_extraction=True`) |
+| **Consolidation max output tokens** | `consolidation_max_output_tokens` | `CONSOLIDATION_MAX_OUTPUT_TOKENS` | `None` (derived from the margin) |
+| **Consolidation max input tokens** | `consolidation_max_input_tokens` | `CONSOLIDATION_MAX_INPUT_TOKENS` | `65536` |
 | **Log Level** | `log_level` | *(none)* | `"INFO"` |

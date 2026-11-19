@@ -162,7 +162,7 @@ class TestRunEntityExtractionAgentPrecondition:
 
         fake_graph_store.documents.count_latest_documents.return_value = 0
 
-        with pytest.raises(PreconditionError, match="not found in Neo4j"):
+        with pytest.raises(PreconditionError, match="not found in the graph database"):
             await run_entity_extraction_agent("docA", tenant_id="acme", doc_path="F/docA")
 
         fake_graph_store.documents.count_latest_documents.assert_awaited_once_with(

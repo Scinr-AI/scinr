@@ -28,7 +28,7 @@ async def load_sheets(state: TabularState) -> dict:
     are kept per sheet — the data rows are re-read in batches at write time.
     Reuses ``state.prefetched_scans`` when the caller already scanned the file.
 
-    Also ensures catalog models and theme structure exist in Neo4j (idempotent),
+    Also ensures catalog models and theme structure exist in the graph database (idempotent),
     mirroring the annotation pipeline's load_nodes() behaviour.
     """
     from scinr.newton.annotation.catalog import (
@@ -67,7 +67,7 @@ async def load_sheets(state: TabularState) -> dict:
         "load_sheets: found %d sheet(s) in %s", len(sheets), file_path.name
     )
 
-    # Store each sheet as a converted_page in MongoDB (graceful fallback)
+    # Store each sheet as a converted_page in the document store (graceful fallback)
     sheet_page_ids: list[str] = []
     raw_file_id = state.get("raw_file_id", "")
     if raw_file_id:

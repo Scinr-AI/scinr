@@ -636,7 +636,7 @@ def _instantiate_composite_with_normalization(
 
 
 def _sanitize_rel_type(col_name: str) -> str:
-    """Convert a column name to a valid Neo4j relationship type."""
+    """Convert a column name to a valid graph relationship type."""
     sanitized = re.sub(r"[^A-Z0-9_]", "_", col_name.upper().strip())
     if not sanitized or sanitized[0].isdigit():
         sanitized = "COL_" + sanitized

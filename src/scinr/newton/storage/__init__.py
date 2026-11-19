@@ -3,7 +3,7 @@ storage — Database abstraction layer for scinr-ingest.
 
 Provides repository interfaces and implementations for persisting:
 - Raw files (binary originals) via GridFS
-- Converted pages (Markdown text) via a MongoDB collection
+- Converted pages (Markdown text) via a document-store collection
 - Described page images and video frames (optional for custom backends,
   ``RawFileRepository.stores_images``) via their own collection and bucket
 

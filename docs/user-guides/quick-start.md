@@ -2,7 +2,7 @@
 
 Get from zero to a working knowledge graph in under 15 minutes.
 
-This guide walks you through installing `scinr`, configuring your environment, preparing documents, running the full ingestion pipeline (Stages 0–4, plus an auto-detected tabular path), and verifying the extracted knowledge graph in Neo4j.
+This guide walks you through installing `scinr`, configuring your environment, preparing documents, running the full ingestion pipeline (Stages 0–4, plus an auto-detected tabular path), and verifying the extracted knowledge graph. The main path uses Neo4j (the default graph backend); if you prefer PostgreSQL or SQLite, jump to [Running without Neo4j](#running-without-neo4j).
 
 ---
 
@@ -11,13 +11,15 @@ This guide walks you through installing `scinr`, configuring your environment, p
 Before you begin, make sure you have:
 
 1. **Python 3.11+** installed on your system.
-2. **Neo4j 5.0+** running and accessible via the Bolt protocol. If you do not have Neo4j installed, start one locally with Docker:
+2. **A graph engine**: **Neo4j 5.0+** (the default) accessible via the Bolt protocol, **or** PostgreSQL, **or** SQLite (no server). If you use Neo4j and do not have it installed, start one locally with Docker:
 
    ```bash
    docker run -p 7687:7687 -p 7474:7474 \
      -e NEO4J_AUTH=neo4j/your_password \
      neo4j:5
    ```
+
+   For PostgreSQL or SQLite, follow [Running without Neo4j](#running-without-neo4j).
 
 3. **LLM credentials** for at least one provider (AWS Bedrock, OpenAI, or Ollama).
 
@@ -41,13 +43,23 @@ pip install "scinr[ollama]"
 pip install "scinr[bedrock,openai,ollama,mongodb]"
 ```
 
+Then add the extra for your graph engine:
+
+```bash
+pip install "scinr[neo4j]"      # Neo4j driver (the default graph backend)
+pip install "scinr[postgres]"   # PostgreSQL
+pip install "scinr[sqlite]"     # SQLite
+```
+
+> **Important:** the default graph backend is `neo4j`, and the Neo4j driver is an optional extra. Without `scinr[neo4j]` the first use of the graph fails with `graph_backend='neo4j' requires the optional dependency: pip install 'scinr[neo4j]'`.
+
 > **Tip:** To process **any** PDF you need a [Mistral AI](https://console.mistral.ai/) API key — PDF conversion is done entirely through the Mistral OCR API. There is no fallback path for PDFs without a key.
 
 ---
 
 ## Step 2: Set up your environment
 
-`scinr` reads Neo4j, storage, and OCR settings from environment variables. The **LLM is configured in code** — you pass a ready-built LangChain model as `llm=` to `configure()` (see [Step 4](#step-4-run-the-pipeline)). The recommended approach for everything else is a `.env` file in your working directory.
+`scinr` reads graph (Neo4j or SQL), storage, and OCR settings from environment variables. The usual way to set the **LLM is in code** — you pass a ready-built LangChain model as `llm=` to `configure()` (see [Step 4](#step-4-run-the-pipeline)). The recommended approach for everything else is a `.env` file in your working directory.
 
 ### Create `.env` from the template
 
@@ -59,7 +71,7 @@ cp .env.example .env
 
 ### Fill in the required values
 
-At a minimum, you need to set the Neo4j credentials. Here is a minimal `.env` for a first run:
+At a minimum, with the default Neo4j backend you need to set the Neo4j credentials (they are required only when `GRAPH_BACKEND=neo4j`, which is the default). Here is a minimal `.env` for a first run:
 
 ```env
 # ─── Neo4j ──────────────────────────────────────────────────────────────────
@@ -77,15 +89,17 @@ MISTRAL_API_KEY=your_mistral_key
 | Variable | Required? | What to set |
 | :--- | :--- | :--- |
 | `NEO4J_URI` | No | Neo4j Bolt URI. Default: `bolt://localhost:7687`. |
-| `NEO4J_USER` | Yes | Neo4j username (usually `neo4j`). |
-| `NEO4J_PASSWORD` | Yes | Neo4j password. |
-| `NEO4J_DATABASE` | Yes | Neo4j database name (usually `neo4j`). |
+| `NEO4J_USER` | Yes, if `GRAPH_BACKEND=neo4j` | Neo4j username (usually `neo4j`). |
+| `NEO4J_PASSWORD` | Yes, if `GRAPH_BACKEND=neo4j` | Neo4j password. |
+| `NEO4J_DATABASE` | Yes, if `GRAPH_BACKEND=neo4j` | Neo4j database name (usually `neo4j`). |
+| `GRAPH_BACKEND` | No | `neo4j` (default), `postgres` or `sqlite`. |
+| `SQL_URL` | Yes, if any backend is `postgres` or `sqlite` | SQLAlchemy URL, e.g. `postgresql://user:pass@host:5432/db` or `sqlite:///newton.db`. |
 | `MISTRAL_API_KEY` | Yes, to process any PDF | Mistral OCR API key. PDF conversion has no non-Mistral path. |
-| `STORAGE_BACKEND` | No | `none` (default, in-memory) or `mongodb`. |
+| `STORAGE_BACKEND` | No | `none` (default, in-memory), `mongodb`, `postgres`, `sqlite` or `custom`. |
 
-> **LLM:** there is no `MODEL_ID` environment variable to set. Build a LangChain chat model in your script and pass it as `llm=` to `configure()`.
+> **LLM:** the usual way is to build a LangChain chat model in your script and pass it as `llm=` to `configure()`. If you omit `llm` and the environment variable `MODEL_ID` is set, newton builds an AWS Bedrock `ChatBedrockConverse` from it (it reads `AWS_DEFAULT_REGION`, default `us-east-1`, and `MAX_TOKENS`, default `65536`); this needs the `bedrock` extra.
 
-> **Note:** `python-dotenv` is included as a core dependency. When you call `configure()`, it automatically loads variables from a `.env` file in your current working directory. You do not need to import `dotenv` manually.
+> **Note:** `python-dotenv` is included as a core dependency. The `.env` file is loaded when `scinr.newton` is imported (several of its modules call `load_dotenv()` at import time), not by `configure()`. You do not need to import `dotenv` manually.
 
 ---
 
@@ -127,8 +141,8 @@ from scinr.newton import configure, run_pipeline
 
 
 async def main():
-    # The model is passed via llm= (no MODEL_ID env var). Neo4j and storage
-    # settings still come from .env (loaded automatically by configure()).
+    # The model is passed via llm=. Neo4j and storage settings may also come
+    # from .env (loaded when scinr.newton is imported).
     configure(
         llm=ChatBedrockConverse(model="us.anthropic.claude-sonnet-4-6", region_name="us-east-1"),
         neo4j_uri="bolt://localhost:7687",
@@ -181,7 +195,7 @@ The pipeline runs these stages in order:
 | :--- | :--- | :--- |
 | 0 | **Preprocess** | Converts raw files to an intermediate JSON/Markdown format |
 | 1 | **Extraction** | Uses the LLM to parse document structure and extract hierarchical sections |
-| 2 | **Ingestion** | Writes document and structure nodes into Neo4j |
+| 2 | **Ingestion** | Writes document and structure nodes into the graph |
 | 3 | **Annotation** | An LLM agent assigns an extraction model to each structural node |
 | 4 | **Entity Extraction** | Extracts typed Pydantic entities from annotated nodes and writes them as graph subgraphs |
 | 5 | **Tabular** | If `.csv`, `.xlsx`, or `.xls` files are detected in `input_raw`, they are processed through a separate tabular pipeline with LLM-powered normalization |
@@ -205,7 +219,73 @@ Stages executed: ['preprocess', 'extraction', 'ingestion', 'annotation', 'entity
 
 ---
 
+## Running without Neo4j
+
+The graph, the raw files and pages, and the document snapshots can live in PostgreSQL or SQLite instead of Neo4j. The pipeline code is the same; only `configure()` changes. See [SQL Graph Backends](sql-graph.md) for the full guide.
+
+### PostgreSQL with Docker
+
+newton creates the schema and tables **inside** an existing database. It does not create the database itself nor any role, so start the container with `POSTGRES_DB` (and a user) already set:
+
+```bash
+docker run -d --name newton-postgres -p 5432:5432 \
+  -e POSTGRES_USER=newton \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=scinr \
+  postgres:16
+
+pip install "scinr[postgres]"
+```
+
+Then configure the three backends (the graph, the storage and, by inheritance, the snapshots) with one `sql_url`:
+
+```python
+from scinr.newton import configure
+
+configure(
+    llm=...,                      # as in Step 4
+    graph_backend="postgres",
+    storage_backend="postgres",   # freeze_backend inherits it
+    sql_url="postgresql://newton:secret@localhost:5432/scinr",
+)
+```
+
+No `neo4j_*` settings are needed. On the first use newton creates the `newton` schema (`sql_schema`) and its tables in the `scinr` database; the user must be allowed to create them. The `sql_url` scheme must match the backends (`postgresql://` with `"postgres"`), or `configure()` raises a `ConfigurationError`.
+
+### SQLite (no Docker)
+
+```bash
+pip install "scinr[sqlite]"
+```
+
+```python
+from scinr.newton import configure
+
+configure(
+    llm=...,
+    graph_backend="sqlite",
+    storage_backend="sqlite",
+    sql_url="sqlite:///newton.db",
+)
+```
+
+The database is the file `newton.db` (created on first use), plus a folder for the stored binaries next to it (`newton.files/` by default, or `sqlite_files_dir`). Use this `configure()` call in the Step 4 script in place of the Neo4j one.
+
+### Verifying the data
+
+With the SQL backends the data lives in tables (`documents`, `structure_nodes`, `info_units`, …; see the [table summary](sql-graph.md#table-summary)). Use any SQL client on the database; on Postgres the tables are in the `newton` schema:
+
+```sql
+SELECT name, version, path FROM documents ORDER BY name;
+```
+
+Or use the read-only [navigation API](graph-navigation.md), which works on every backend: `async with graph_navigator() as nav: await nav.list_root_documents()`.
+
+---
+
 ## Step 5: Verify in Neo4j
+
+This step applies to the default Neo4j backend. If you used PostgreSQL or SQLite, see [Verifying the data](#verifying-the-data) above.
 
 After the pipeline completes, your data is available in Neo4j. Use the Neo4j Browser (`http://localhost:7474`) or any Cypher client to inspect the results.
 
@@ -373,15 +453,19 @@ configure(
 
 ### An LLM stage fails with "no LLM configured"
 
-The extraction, annotation, and entity-extraction stages (and tabular normalization) need a model. Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance (e.g. `ChatBedrockConverse`, `ChatOpenAI`, `ChatOllama`). There is no environment-variable shortcut for the model. `configure()` itself does not require it — only these stages do.
+The extraction, annotation, and entity-extraction stages (and tabular normalization) need a model. Pass an `llm=` argument to `configure()` with a LangChain `BaseChatModel` instance (e.g. `ChatBedrockConverse`, `ChatOpenAI`, `ChatOllama`). If `llm` is omitted and the environment variable `MODEL_ID` is set, newton builds an AWS Bedrock `ChatBedrockConverse` from it (reading `AWS_DEFAULT_REGION` and `MAX_TOKENS`); otherwise there is no model. `configure()` itself does not require it — only these stages do.
 
 ### `"Neo4j username is not configured"` / `"Neo4j password is not configured"`
 
-`configure()` raises these separately. Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`. `NEO4J_DATABASE` is also required.
+`configure()` raises these separately when `graph_backend` is `neo4j` (the default). Set `NEO4J_USER` and `NEO4J_PASSWORD` in your `.env` file, or pass them as arguments to `configure()`. `NEO4J_DATABASE` is also required. To run without Neo4j, see [Running without Neo4j](#running-without-neo4j).
+
+### `graph_backend='neo4j' requires the optional dependency`
+
+Install the Neo4j driver with `pip install 'scinr[neo4j]'`, or use PostgreSQL or SQLite as described in [Running without Neo4j](#running-without-neo4j).
 
 ### Neo4j connection refused
 
-Make sure your Neo4j instance is running and accessible:
+If you use Neo4j, make sure your instance is running and accessible:
 
 ```bash
 # Test Bolt connectivity
@@ -424,7 +508,7 @@ configure(
     neo4j_user="neo4j",
     neo4j_password="your_password",
     llm_concurrency=2,       # Reduce concurrent LLM calls
-    neo4j_concurrency=5,     # Reduce concurrent Neo4j writes
+    neo4j_concurrency=5,     # Reduce concurrent graph writes
 )
 ```
 

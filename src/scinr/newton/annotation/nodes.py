@@ -206,12 +206,12 @@ async def _write_decision(
     document_name: str,
     node_id: str,
 ) -> str | None:
-    """Write the AnnotationDecision to Neo4j.
+    """Write the AnnotationDecision to the graph database.
 
     Args:
-        full_id: Full StructureNode.id as stored in Neo4j.
+        full_id: Full StructureNode.id as stored in the graph database.
         decision: Parsed AnnotationDecision to persist.
-        document_name: Neo4j Document.name.
+        document_name: graph Document.name.
         node_id: Node identifier string (for logging).
 
     Returns:
@@ -228,7 +228,7 @@ async def _write_decision(
         return None
     except Exception as exc:
         logger.error(
-            "_write_decision: Neo4j write failed for '%s': %s", node_id, exc
+            "_write_decision: graph write failed for '%s': %s", node_id, exc
         )
         return f"write failed for {node_id}: {exc}"
 
@@ -249,14 +249,14 @@ async def process_single_annotation_node(
     ``bedrock_semaphore`` is held from the start of the node (context fetch,
     prompt building and the LLM + repair loop), bounding both the concurrent
     Bedrock calls and the number of per-node contexts/prompts alive at once.
-    The Neo4j write happens after the slot is released. Neo4j reads and writes
+    The graph write happens after the slot is released. Graph reads and writes
     are each wrapped in ``get_neo4j_semaphore()`` to prevent connection pool
     saturation under parallel load.
 
     Args:
         node_data: Node dict as returned by fetch_nodes_to_annotate.
             Expected keys: full_id, node_id, title, role, theme.
-        document_name: Neo4j Document.name — passed through to write_annotation.
+        document_name: graph Document.name — passed through to write_annotation.
         bedrock_semaphore: Process-wide asyncio.Semaphore controlling Bedrock concurrency.
         user_context: Optional freeform context string prepended to the LLM human message.
 
@@ -269,9 +269,9 @@ async def process_single_annotation_node(
     # The LLM slot is taken FIRST so that the context, prompt and messages of a
     # node only exist while it holds one of the ``llm_concurrency`` slots
     # (otherwise every node of the document would build them up front and wait
-    # here, holding them). Lock order is always LLM -> Neo4j, never the reverse.
+    # here, holding them). Lock order is always LLM -> graph, never the reverse.
     async with bedrock_semaphore:
-        # ── Fetch context (bounded by Neo4j semaphore) ────────────────────────
+        # ── Fetch context (bounded by graph semaphore) ────────────────────────
         async with neo4j_semaphore:
             ctx = await _fetch_node_context(node_data)
         if ctx is None:
@@ -285,7 +285,7 @@ async def process_single_annotation_node(
         decision, error = await _decide_model(ctx, node_id, theme, user_context)
 
     if decision is not None:
-        # ── Write decision (outside the LLM slot, bounded by Neo4j semaphore) ─
+        # ── Write decision (outside the LLM slot, bounded by graph semaphore) ─
         async with neo4j_semaphore:
             write_error = await _write_decision(
                 node_data["full_id"], decision, document_name, node_id

@@ -1,13 +1,13 @@
 # Tabular Pipeline
 
-The tabular pipeline is a **complete alternative path** to the standard Stages 0-4 of `scinr.newton`. It processes `.csv`, `.xlsx`, and `.xls` files directly — reading headers, mapping columns to extraction model fields, instantiating Pydantic models from row data, and writing structured graph subgraphs to Neo4j.
+The tabular pipeline is a **complete alternative path** to the standard Stages 0-4 of `scinr.newton`. It processes `.csv`, `.xlsx`, and `.xls` files directly — reading headers, mapping columns to extraction model fields, instantiating Pydantic models from row data, and writing structured graph subgraphs to the graph database.
 
-This is the definitive reference for the tabular pipeline. Every aspect of file discovery, header normalization, column mapping, model instantiation, normalization integration, and Neo4j output is documented here.
+This is the definitive reference for the tabular pipeline. Every aspect of file discovery, header normalization, column mapping, model instantiation, normalization integration, and graph output is documented here.
 
 !!! note "LLM setup"
     The tabular pipeline calls an LLM for theme classification, model decision
-    and column mapping, so it needs `configure(llm=...)` — there is no `MODEL_ID`
-    env var. The examples use a local open-source model via
+    and column mapping, so it needs `configure(llm=...)` (if `llm` is omitted and the env var
+    `MODEL_ID` is set, a Bedrock model is built from it). The examples use a local open-source model via
     [Ollama](https://ollama.com/) (`pip install "scinr[ollama]"`, then
     `ollama pull llama3`):
 
@@ -22,7 +22,7 @@ This is the definitive reference for the tabular pipeline. Every aspect of file 
 
 ### What the tabular pipeline is
 
-The tabular pipeline takes structured tabular files (CSV, XLSX) and converts each row into typed Pydantic model instances, which are then written as `:ModelInstance` and `:LabeledEntity` nodes in Neo4j. It bypasses the document-oriented Stages 0-4 entirely, using a dedicated LangGraph workflow instead:
+The tabular pipeline takes structured tabular files (CSV, XLSX) and converts each row into typed Pydantic model instances, which are then written as `:ModelInstance` and `:LabeledEntity` nodes in the graph. It bypasses the document-oriented Stages 0-4 entirely, using a dedicated LangGraph workflow instead:
 
 ```
 load_sheets → prepare_sheet → classify_theme → decide_model → map_columns → write_tabular → (loop for next sheet)
@@ -44,7 +44,7 @@ The tabular pipeline replaces this entire flow for structured data:
 | **Entity extraction** | LLM extracts from free text per section | Column values mapped to model fields directly |
 | **LLM calls** | One per section (annotation) + one per section (extraction) | Three per sheet: classify theme, decide model, map columns |
 | **Normalization** | Optional (LLM hint via `description=`) | **Primary use case** for `normalization_model` fields |
-| **Neo4j output** | `:Document` + `:StructureNode` tree + entities | `:Document` + `:Table` + `:Row` + `:ModelInstance` + `:LabeledEntity` |
+| **Graph output** | `:Document` + `:StructureNode` tree + entities | `:Document` + `:Table` + `:Row` + `:ModelInstance` + `:LabeledEntity` |
 
 ### When to use it
 
@@ -97,7 +97,7 @@ The tabular pipeline uses a LangGraph `StateGraph` that processes one file at a 
        │
        ▼
 ┌───────────────┐
-│ write_tabular │  Write Table + Row subgraph + entities to Neo4j
+│ write_tabular │  Write Table + Row subgraph + entities to the graph
 └──────┬────────┘
        │
        ▼
@@ -118,7 +118,7 @@ Each sheet goes through three LLM calls:
 
 3. **`map_columns`** — The LLM maps each column header to a field in the selected model, producing a `ColumnMapping` with confidence scores and notes. Unmapped columns are tracked separately.
 
-After mapping, `write_tabular` instantiates Pydantic models from each row, runs normalization (if enabled), and writes the complete subgraph to Neo4j.
+After mapping, `write_tabular` instantiates Pydantic models from each row, runs normalization (if enabled), and writes the complete subgraph to the graph.
 
 ### 2.3 Validation and outcome of each file
 
@@ -598,11 +598,11 @@ The `NormalizationEngine` caches results by a hash of the source values. If two 
 
 ---
 
-## 9. Neo4j Output
+## 9. Graph Output
 
 ### 9.1 Graph Structure
 
-The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subgraph` in `entity_extraction/graph_mapper.py`) as the unstructured pipeline, so the node and relationship types match the [Neo4j Graph Model](neo4j-graph.md). One sheet becomes a `:StructureNode:Table`; each data row becomes a `:StructureNode:Row`:
+The tabular pipeline reuses the **same** subgraph writer (`write_extraction_subgraph` in `entity_extraction/graph_mapper.py`) as the unstructured pipeline, so the node and relationship types match the [Neo4j Graph Model](neo4j-graph.md) (the same graph on every backend). One sheet becomes a `:StructureNode:Table`; each data row becomes a `:StructureNode:Row`:
 
 ```
 (:Document)
@@ -831,7 +831,7 @@ asyncio.run(main())
 
 ### 12.2 Debugging Column Mapping
 
-To inspect the column mapping for a specific sheet, query Neo4j:
+To inspect the column mapping for a specific sheet, query the graph (Cypher, on the Neo4j backend):
 
 ```cypher
 MATCH (t:Table)

@@ -2,7 +2,7 @@
 
 > **Audience:** AI coding agents (Claude, GPT, Cursor, etc.) creating or modifying extraction models for `scinr.newton`.
 >
-> **Stack:** Python 3.11+ · Pydantic v2 · Neo4j 5.x · `scinr.newton`
+> **Stack:** Python 3.11+ · Pydantic v2 · graph backend (Neo4j 5.x, Postgres or SQLite) · `scinr.newton`
 
 ---
 
@@ -360,7 +360,7 @@ for type coercion here.** All row instantiation in the tabular pipeline goes thr
 component instance creation), and `model_construct()` explicitly **bypasses Pydantic's
 entire validation machinery** — every `field_validator` and every `model_validator`, in
 `mode="before"`, `"after"`, or `"wrap"`, is skipped unconditionally. There is no later
-point in the tabular flow (Neo4j write via `store.extraction` (`graph/neo4j/extraction.py`), or the `NormalizationEngine`
+point in the tabular flow (graph write via `store.extraction` (on Neo4j: `graph/neo4j/extraction.py`), or the `NormalizationEngine`
 for a plain scalar field) that re-validates the value either. A validator you add to a
 model used by the tabular pipeline will look correct, pass tests that call the model
 normally (e.g. `BatchRecord(year="2023")`), and then silently never execute in production

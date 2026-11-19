@@ -32,13 +32,13 @@ class TabularState(TypedDict):
     # Input (set once before graph runs)
     file_path: str                  # absolute path to the source CSV/XLSX file
     document_name: str              # display name (file name with extension)
-    doc_path: str                   # relative path for Neo4j Document key
+    doc_path: str                   # relative path for graph Document key
     tenant_id: str                  # stored tenant key (utils.tenancy.tenant_key applied) — part of the Document key
     created_by_user_id: str | None  # provenance of the upload (stored raw file / pages); None when omitted
     job_id: str | None              # provenance of the upload (stored raw file / pages); None when omitted
     update_mode: bool               # run_tabular_pipeline(update_mode=...)
     resolved_version: int           # pre-computed batch version
-    raw_file_id: str                # MongoDB ObjectId str, or "" when no storage backend is configured
+    raw_file_id: str                # ObjectId str, or "" when no storage backend is configured
     sheet_page_ids: list            # list[str] — one page_id per sheet (from storage/mongodb/pages.py), or [] when no storage backend
     delimiter: str | None           # CSV field delimiter; None = sniffed from the file
     prefetched_scans: list | None   # list[SheetScan] already read by the caller, or None (load_sheets scans the file)

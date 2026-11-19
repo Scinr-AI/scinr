@@ -101,6 +101,7 @@ nav:
       - Utilities: api/utilities.md
       - Exceptions: api/exceptions.md
       - Graph Store (GraphStore interface): api/graph-store.md
+      - SQL Administration (setup_sql_schema / tenant access): api/sql-admin.md
       - Deletion (delete_document / collect_orphans): api/deletion.md
       - Freezing (freeze_document / restore_document): api/freezing.md
       - Results: api/results.md

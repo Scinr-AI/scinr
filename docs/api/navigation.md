@@ -4,9 +4,9 @@ Read-only, engine-abstracted traversal of the knowledge graph. For tutorials and
 recipes see the [Graph Navigation user guide](../user-guides/graph-navigation.md).
 
 The graph store is pluggable, exactly like the [storage layer](storage.md): an
-engine-agnostic `GraphNavigator` ABC plus a concrete `Neo4jGraphNavigator`,
-selected by the `graph_backend` config field (env `GRAPH_BACKEND`, default
-`"neo4j"`).
+engine-agnostic `GraphNavigator` ABC with two concrete implementations,
+`Neo4jGraphNavigator` and `SqlGraphNavigator` (PostgreSQL and SQLite), selected by
+the `graph_backend` config field (env `GRAPH_BACKEND`, default `"neo4j"`).
 
 ## Factory
 
@@ -33,6 +33,14 @@ selected by the `graph_backend` config field (env `GRAPH_BACKEND`, default
 ## Neo4j Backend
 
 ::: scinr.newton.navigation.neo4j.navigator
+
+## SQL Backend
+
+`SqlGraphNavigator` serves `graph_backend="postgres"` and `"sqlite"` and needs
+`sql_url`. See the [SQL graph backends guide](../user-guides/sql-graph.md) for
+the behavior that differs from Neo4j.
+
+::: scinr.newton.navigation.sql.navigator
 
 ## Source-Text Bridge
 

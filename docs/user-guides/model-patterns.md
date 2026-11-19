@@ -25,7 +25,7 @@ Production-grade extraction models in `scinr.newton` use a set of interconnected
 
 Advanced patterns for robust extraction models that produce clean, deduplicated knowledge graphs.
 
-A well-designed extraction model does more than define fields and descriptions. It declares *how* those fields interact with the pipeline: which values should be globally deduplicated, which fields form a unique identity, which raw fields feed a normalization step, and which values need domain-specific cleaning before they reach Neo4j.
+A well-designed extraction model does more than define fields and descriptions. It declares *how* those fields interact with the pipeline: which values should be globally deduplicated, which fields form a unique identity, which raw fields feed a normalization step, and which values need domain-specific cleaning before they reach the graph.
 
 These patterns are expressed entirely through Pydantic `Field()` annotations and `json_schema_extra` metadata. The pipeline reads this metadata at runtime to wire up entity labeling, instance deduplication, normalization batching, and graph relationships — all without any changes to pipeline code.
 
@@ -107,7 +107,7 @@ class ContactRecord(ExtractionModel):
 |---|---|---|
 | **Purpose** | Preserves original text verbatim | Enables structured querying and matching |
 | **LLM tolerance** | High — free-text, no structure required | Lower — must conform to nested schema |
-| **Neo4j representation** | Scalar property on parent node | Separate `:ModelInstance` child node |
+| **Graph representation** | Scalar property on parent node | Separate `:ModelInstance` child node |
 | **Cross-document matching** | None (unstructured) | Via `entity_label` fields within |
 
 The raw field captures the source text with maximum fidelity. The normalized field breaks that text into queryable, comparable components. Together they give you both provenance and utility.
@@ -129,7 +129,7 @@ The raw field captures the source text with maximum fidelity. The normalized fie
 
 ## 3. Entity Labels (`entity_label`)
 
-Entity labels create `:LabeledEntity` nodes in Neo4j that are globally deduplicated by `(label, normalized_value)`. This is the primary mechanism for cross-document entity matching.
+Entity labels create `:LabeledEntity` nodes in the graph that are globally deduplicated by `(label, normalized_value)`. This is the primary mechanism for cross-document entity matching.
 
 ### Good usage
 
@@ -189,7 +189,7 @@ is_active: bool | None = Field(
 | **Don't use for** | Long descriptions, narratives, free-text paragraphs |
 | **Don't use for** | Measurements in context, timestamps, booleans |
 | **Label naming** | Use `CamelCase` (e.g. `ActiveSubstance`, `Country`, `ProcedureType`) |
-| **Neo4j effect** | Creates `:LabeledEntity {label, value, normalized_value}` nodes merged by `(label, normalized_value)` |
+| **Graph effect** | Creates `:LabeledEntity {label, value, normalized_value}` nodes merged by `(label, normalized_value)` |
 
 ### How deduplication works
 
@@ -452,8 +452,8 @@ Tabular file (CSV/XLSX)
          │
          ▼
   ┌─────────────┐
-  │ Write to     │  Neo4j with populated nested fields
-  │ Neo4j        │
+  │ Write to     │  graph with populated nested fields
+  │ graph        │
   └─────────────┘
 ```
 
@@ -1154,7 +1154,7 @@ class VariationList(ExtractionModel):
 | `VariationModel` | **All patterns**: dual-field, entity labels, instance keys, validators, instance relationships, normalization model |
 | `VariationList` | List wrapper for multi-instance sections |
 
-### Neo4j graph produced
+### Graph produced
 
 Processing a document with `VariationModel` produces:
 

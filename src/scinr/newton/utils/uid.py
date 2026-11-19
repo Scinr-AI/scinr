@@ -47,7 +47,7 @@ def make_uid(*parts: str) -> str:
 
     ⚠️  Breaking change vs. the previous implementation: UIDs produced by this
     function differ from those produced by the old `"||".join(parts)` formula
-    for any input. Existing Neo4j nodes whose UIDs were generated with the old
+    for any input. Existing graph nodes whose UIDs were generated with the old
     formula will have stale UIDs after this update.
 
     Examples:
@@ -69,7 +69,7 @@ def make_instance_uid(
 
     The UID is stable across extractions: any two ModelInstance nodes of the same
     model_class with the same key_fields values *and the same tenant_id* will
-    always receive the same UID, allowing Neo4j MERGE to deduplicate them
+    always receive the same UID, allowing graph MERGE to deduplicate them
     (analogous to how LabeledEntity nodes are deduplicated by label +
     normalized_value).
 
@@ -85,7 +85,7 @@ def make_instance_uid(
 
     ⚠️  Breaking change: folding ``tenant_id`` in changes every UID this function
     produces versus the pre-multi-tenancy formula (even when ``tenant_id`` is
-    ``None`` — the reserved "tenant" part is always present). Existing Neo4j
+    ``None`` — the reserved "tenant" part is always present). Existing graph
     nodes keep their old UIDs until re-ingested.
 
     Args:
