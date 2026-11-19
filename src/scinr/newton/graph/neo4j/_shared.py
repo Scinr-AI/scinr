@@ -14,11 +14,8 @@ from typing import Any
 
 from scinr.newton.graph.neo4j.retry import with_neo4j_retry_sync
 
-DELETE_BATCH_ROWS = 1000
-"""Nodes deleted per write transaction (deletion, GC, freeze, restore)."""
-
-DOCUMENTS_PER_QUERY = 50
-"""Documents whose subtree one query walks."""
+# The batch sizes are engine-neutral: they live in graph/types.py (re-exported here).
+from scinr.newton.graph.types import DELETE_BATCH_ROWS, DOCUMENTS_PER_QUERY  # noqa: F401
 
 # Every bulk query of deletion, freeze and restore starts from explicit
 # (tenant_id, path, version) keys: the document set resolved before any mutation.
@@ -38,6 +35,7 @@ def run_count_query(driver, database: str, query: str, **params: Any) -> int:
             return record["n"] if record else 0
 
     return with_neo4j_retry_sync(_do_query)
+
 
 # Leaf-first deletion of the ModelDecision subtree hanging from StructureNodes
 # (ProposedField → ProposedModel → SupplementaryField → ComplementaryMatch →

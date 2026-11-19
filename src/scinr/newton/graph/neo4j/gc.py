@@ -60,25 +60,13 @@ from scinr.newton.graph.neo4j._shared import DELETE_BATCH_ROWS
 from scinr.newton.graph.neo4j.deletion import SUBTREE_STRUCTURE
 from scinr.newton.graph.neo4j.errors import neo4j_errors
 from scinr.newton.graph.neo4j.retry import with_neo4j_retry_sync
-from scinr.newton.graph.types import GC_MAX_PASSES
+from scinr.newton.graph.types import (  # noqa: F401 — re-exported: the GC bounds live there
+    GC_FLUSH_CANDIDATES,
+    GC_MAX_PASSES,
+    GC_REACHABILITY_MAX_HOPS,
+)
 
 logger = logging.getLogger(__name__)
-
-GC_REACHABILITY_MAX_HOPS = 7
-"""Hop bound of the "still reachable from an :ExtractionResult" check.
-
-Not to be confused with :data:`GC_MAX_PASSES`. The same bound limits what
-``export_document_snapshot()`` archives from each :ExtractionResult, so that
-export, GC and ``keep_extraction_results`` agree on what hangs from one.
-"""
-
-GC_FLUSH_CANDIDATES = 100_000
-"""Candidates an :class:`OrphanCollector` holds before it collects them.
-
-Bounds the memory of the client on a large operation. Collecting early is
-safe: a node still reachable from an :ExtractionResult not deleted yet is
-left alone, and is a candidate again when that one goes.
-"""
 
 _NOT_REACHABLE = (
     f"NOT EXISTS {{ MATCH (:ExtractionResult)-[*1..{GC_REACHABILITY_MAX_HOPS}]->(mi) }}"

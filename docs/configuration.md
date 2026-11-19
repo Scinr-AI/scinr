@@ -36,6 +36,8 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 
 ### Neo4j
 
+The Neo4j driver is an optional extra (`pip install "scinr[neo4j]"`). The credentials below are required only when `GRAPH_BACKEND` is `neo4j` (the default).
+
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `NEO4J_URI` | `bolt://localhost:7687` | Bolt URI for the Neo4j instance. |
@@ -44,24 +46,36 @@ The LLM has **no environment variable** — build a LangChain chat model in code
 | `NEO4J_DATABASE` | *(required)* | Neo4j database name |
 | `NEO4J_CONCURRENCY` | `10` | Maximum async Neo4j concurrency. |
 | `NEO4J_SYNC_CONCURRENCY` | `8` | Maximum sync Neo4j concurrency. |
-| `GRAPH_BACKEND` | `neo4j` | Backend for the read-only graph-navigation API (`scinr.newton.navigation`). Validated like `STORAGE_BACKEND`; reserved for future engines. |
+| `GRAPH_BACKEND` | `neo4j` | Backend for the graph (the pipeline's write path and the read-only navigation API): `neo4j`, `postgres` or `sqlite`. The Neo4j variables above are required only with `neo4j`; the Neo4j driver is the optional extra `pip install "scinr[neo4j]"`. |
 
 ### Storage (MongoDB)
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `STORAGE_BACKEND` | `none` | Storage backend: `none` (no persistence), `mongodb`, or `custom`. |
+| `STORAGE_BACKEND` | `none` | Storage backend: `none` (no persistence), `mongodb`, `postgres`, `sqlite`, or `custom`. |
 | `MONGODB_URI` | `mongodb://localhost:27017` | MongoDB connection string. |
 | `MONGODB_DATABASE` | `scinr` | MongoDB database name. |
 | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` | Collection name for raw file metadata. |
 | `MONGODB_PAGES_COLLECTION` | `converted_pages` | Collection name for converted document pages. |
 | `MONGODB_GRIDFS_BUCKET` | `raw_binaries` | GridFS bucket name for binary file storage. |
 | `MONGODB_ENSURE_INDEXES` | `true` | Create the MongoDB indexes automatically on the first `get_storage()` call of the process. Set to `false` when the database user lacks the `createIndex` privilege and operations manage the indexes. |
-| `FREEZE_BACKEND` | *(inherits `STORAGE_BACKEND`)* | Backend for document snapshots (`freeze_document()`, `restore_document()`): `none`, `mongodb` or `custom`. See [Document Freezing](user-guides/document-freezing.md). |
+| `FREEZE_BACKEND` | *(inherits `STORAGE_BACKEND`)* | Backend for document snapshots (`freeze_document()`, `restore_document()`): `none`, `mongodb`, `postgres`, `sqlite` or `custom`. See [Document Freezing](user-guides/document-freezing.md). |
 | `MONGODB_FROZEN_COLLECTION` | `frozen_documents` | Collection for snapshot metadata. |
 | `MONGODB_FROZEN_GRIDFS_BUCKET` | `frozen_snapshots` | GridFS bucket for snapshot files. |
 | `MONGODB_IMAGES_COLLECTION` | `page_images` | Collection for the metadata of stored images and video frames. |
 | `MONGODB_IMAGES_GRIDFS_BUCKET` | `page_image_binaries` | GridFS bucket for the bytes of stored images and video frames. |
+
+### SQL (PostgreSQL and SQLite)
+
+Used when `GRAPH_BACKEND`, `STORAGE_BACKEND` or `FREEZE_BACKEND` is `postgres` or `sqlite`. Install `scinr[postgres]` or `scinr[sqlite]`. See [SQL Graph Backends](user-guides/sql-graph.md).
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SQL_URL` | *(required for SQL axes)* | Connection URL shared by every SQL axis: `postgresql://user:pass@host:5432/db` or `sqlite:///path/newton.db` (`sqlite:////abs/path.db` for an absolute path). Its scheme must match the axes, and the axes cannot mix Postgres and SQLite. A driver suffix (`postgresql+psycopg://`) is accepted and ignored. Redacted in logs and in `repr(config)`. |
+| `SQL_SCHEMA` | `newton` | Postgres schema that holds the tables. Ignored by SQLite. Must be a plain identifier. |
+| `SQL_POOL_SIZE` | `10` | Connection pool size of each SQL engine (minimum `1`). |
+| `SQL_FULLTEXT_CONFIG` | `simple` | Postgres text-search configuration of the full-text index on `info_units`. Applied only when the schema is created. Must be a plain identifier. |
+| `SQLITE_FILES_DIR` | *(empty: `<db path without extension>.files/`)* | Folder for the binaries (raw files, images, snapshots) kept by the SQLite backend. Required for an in-memory database. |
 
 ### PDF / Mistral OCR
 
@@ -146,7 +160,19 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 | `neo4j_database` | `str \| None` | Database name. **Required** (via arg or `NEO4J_DATABASE`). |
 | `neo4j_concurrency` | `int \| None` | Max concurrent async Neo4j sessions. Default `10`. |
 | `neo4j_sync_concurrency` | `int \| None` | Max concurrent sync ingestion dispatches. Default `8`. |
-| `graph_backend` | `str \| None` | Read-only navigation backend. Default `"neo4j"`. |
+| `graph_backend` | `str \| None` | Graph backend (write path and navigation): `"neo4j"` (default), `"postgres"` or `"sqlite"`. The Neo4j credentials are required only for `"neo4j"`. |
+
+### SQL Parameters
+
+The same settings as the [SQL environment variables](#sql-postgresql-and-sqlite), passed as lowercase keyword arguments.
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `sql_url` | `str \| None` | Connection URL shared by the SQL axes. Required when any axis is `"postgres"` or `"sqlite"`. Default `""`. |
+| `sql_schema` | `str \| None` | Postgres schema. Default `"newton"`. |
+| `sql_pool_size` | `int \| None` | Connection pool size. Default `10`. |
+| `sql_fulltext_config` | `str \| None` | Postgres text-search configuration. Default `"simple"`. |
+| `sqlite_files_dir` | `str \| None` | Folder for the SQLite binaries. Default `""` (next to the `.db`). |
 
 ### Models / Themes Parameters
 
@@ -162,7 +188,7 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 | :--- | :--- | :--- |
 | `mongodb_ensure_indexes` | `bool \| None` | Create the MongoDB indexes automatically (default `True`). `False` skips it, for users without the `createIndex` privilege. |
 | `custom_storage` | `tuple \| None` | Custom storage backend tuple (driver, connection). |
-| `freeze_backend` | `str \| None` | Snapshot backend: `none`, `mongodb` or `custom`. Unset → `FREEZE_BACKEND`, else the resolved `storage_backend`. |
+| `freeze_backend` | `str \| None` | Snapshot backend: `none`, `mongodb`, `postgres`, `sqlite` or `custom`. Unset → `FREEZE_BACKEND`, else the resolved `storage_backend`. |
 | `mongodb_frozen_collection` | `str \| None` | Collection for snapshot metadata (default `frozen_documents`). |
 | `mongodb_frozen_gridfs_bucket` | `str \| None` | GridFS bucket for snapshot files (default `frozen_snapshots`). |
 | `mongodb_images_collection` | `str \| None` | Collection for stored images and frames (default `page_images`). |
@@ -376,6 +402,22 @@ configure(
 )
 ```
 
+### With SQLite (No Neo4j, No MongoDB)
+
+The graph, the navigation API, raw files, pages and snapshots in one SQLite file.
+
+```python
+from scinr.newton import configure
+
+configure(
+    graph_backend="sqlite",
+    storage_backend="sqlite",   # freeze_backend inherits it
+    sql_url="sqlite:////var/lib/scinr/newton.db",
+)
+```
+
+For PostgreSQL (and Row-Level Security) see [SQL Graph Backends](user-guides/sql-graph.md).
+
 ---
 
 ## Using a `.env` File
@@ -461,9 +503,9 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Neo4j Auth** | *(derived)* | `NEO4J_AUTH` | Fallback format |
 | **Neo4j Async Concurrency** | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | `10` |
 | **Neo4j Sync Concurrency** | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | `8` |
-| **Graph Navigation Backend** | `graph_backend` | `GRAPH_BACKEND` | `neo4j` |
+| **Graph Backend** | `graph_backend` | `GRAPH_BACKEND` | `neo4j` (`neo4j`, `postgres`, `sqlite`) |
 | **LLM Concurrency** | `llm_concurrency` | `LLM_CONCURRENCY` | `4` |
-| **Storage Backend** | `storage_backend` | `STORAGE_BACKEND` | `none` |
+| **Storage Backend** | `storage_backend` | `STORAGE_BACKEND` | `none` (`none`, `mongodb`, `postgres`, `sqlite`, `custom`) |
 | **MongoDB URI** | `mongodb_uri` | `MONGODB_URI` | `mongodb://localhost:27017` |
 | **MongoDB Database** | `mongodb_database` | `MONGODB_DATABASE` | `scinr` |
 | **MongoDB Raw Files** | `mongodb_raw_files_collection` | `MONGODB_RAW_FILES_COLLECTION` | `raw_files` |
@@ -477,6 +519,11 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **MongoDB Images Collection** | `mongodb_images_collection` | `MONGODB_IMAGES_COLLECTION` | `page_images` |
 | **MongoDB Images GridFS** | `mongodb_images_gridfs_bucket` | `MONGODB_IMAGES_GRIDFS_BUCKET` | `page_image_binaries` |
 | **Custom Freeze Storage** | `custom_freeze_storage` | *(none)* | `None` |
+| **SQL URL** | `sql_url` | `SQL_URL` | `""` (required for SQL axes) |
+| **SQL Schema** | `sql_schema` | `SQL_SCHEMA` | `newton` |
+| **SQL Pool Size** | `sql_pool_size` | `SQL_POOL_SIZE` | `10` |
+| **SQL Full-text Config** | `sql_fulltext_config` | `SQL_FULLTEXT_CONFIG` | `simple` |
+| **SQLite Files Dir** | `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` (`<db path>.files/`) |
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
 | **OCR Max Pages** | `mistral_ocr_safe_max_pages` | `MISTRAL_OCR_SAFE_MAX_PAGES` | `900` |
 | **OCR Max Bytes** | `mistral_ocr_safe_max_bytes` | `MISTRAL_OCR_SAFE_MAX_BYTES` | `47185920` |

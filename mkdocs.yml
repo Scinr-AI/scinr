@@ -80,6 +80,7 @@ nav:
       - Normalization: user-guides/normalization.md
       - Tabular Pipeline: user-guides/tabular-pipeline.md
       - Neo4j Graph Storage: user-guides/neo4j-graph.md
+      - SQL Graph Backends: user-guides/sql-graph.md
       - Graph Navigation: user-guides/graph-navigation.md
       - Document Deletion: user-guides/document-deletion.md
       - Document Freezing: user-guides/document-freezing.md

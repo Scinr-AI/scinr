@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -97,7 +98,10 @@ def configure_harness(**overrides: Any) -> None:
     """``configure()`` the library for the harness databases and a scripted LLM.
 
     *overrides* replace any of the default arguments (the memory bench changes the models
-    folder and the concurrency).
+    folder and the concurrency). With a SQL ``graph_backend`` in *overrides*, the Neo4j
+    connection arguments, the MongoDB ones and the default ``storage_backend`` are left out
+    (the SQL engine comes with its own ``storage_backend`` / ``freeze_backend`` / ``sql_url``);
+    the concurrency settings stay, so the scenarios run the same way on every engine.
     """
     from scinr.newton.config import (
         configure,
@@ -126,26 +130,61 @@ def configure_harness(**overrides: Any) -> None:
         normalization_enabled=True,
         log_level="WARNING",
     )
+    if overrides.get("graph_backend", "neo4j") != "neo4j":
+        for name in _ENGINE_CONNECTION_SETTINGS:
+            settings.pop(name)
     configure(**{**settings, **overrides})
 
 
-async def run_scenario(name: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Run scenario *name* and return its normalized ``(trace, graph)``."""
-    from neo4j import GraphDatabase
+#: Defaults of :func:`configure_harness` that only make sense for Neo4j + MongoDB.
+_ENGINE_CONNECTION_SETTINGS = (
+    "neo4j_uri",
+    "neo4j_user",
+    "neo4j_password",
+    "neo4j_database",
+    "storage_backend",
+    "mongodb_uri",
+    "mongodb_database",
+)
 
-    guard()
-    wipe_databases()
-    configure_harness()  # also resets the catalog memoization and the async driver
+
+async def run_scenario(
+    name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    dump: Callable[[], dict[str, Any]] | None = None,
+    with_trace: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run scenario *name* and return its normalized ``(trace, graph)``.
+
+    By default on the harness Neo4j + MongoDB (wiped first). With *settings* (the
+    ``configure_harness()`` arguments of another engine, already emptied by the caller) and
+    *dump* (its neutral dump), on that engine instead; the trace then only holds what was
+    sent to Neo4j (nothing, for a SQL engine). Without *with_trace* the trace is dropped
+    before the normalization (the ObjectId placeholders are then numbered from the graph and
+    the extras only, so runs on different engines are comparable).
+    """
+    if settings is None:
+        guard()
+        wipe_databases()
+        configure_harness()  # also resets the catalog memoization and the async driver
+    else:
+        configure_harness(**settings)
     prepare_script()
     with tempfile.TemporaryDirectory(prefix="scinr_golden_") as tmp:
         with deterministic_uuid4(), recording() as rec:
             extras = await SCENARIOS[name](Env(tmp=Path(tmp)))
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-    try:
-        graph = dump_graph(driver, NEO4J_DATABASE)
-    finally:
-        driver.close()
-    trace, graph = normalize_artifacts(rec.entries, graph, extras)
+    if dump is None:
+        from neo4j import GraphDatabase
+
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        try:
+            graph = dump_graph(driver, NEO4J_DATABASE)
+        finally:
+            driver.close()
+    else:
+        graph = dump()
+    trace, graph = normalize_artifacts(rec.entries if with_trace else [], graph, extras)
     # Same types as when read back from the artifacts (tuples -> lists, ...).
     return json.loads(json.dumps(trace)), json.loads(json.dumps(graph))
 

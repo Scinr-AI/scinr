@@ -136,6 +136,102 @@ class TestDelete:
         assert not tenant_nodes(graph, TENANT_A)
 
 
+#: The subtree of a Document as the Cypher of ``graph/neo4j/deletion.py`` defines it: the
+#: StructureNodes (``HAS_STRUCTURE`` then ``HAS_CHILD*``) and, from each one, these paths.
+_SUBTREE_PATHS: tuple[tuple[str, ...], ...] = (
+    ("HAS_INFO_UNIT",),
+    ("HAS_MODEL_DECISION",),
+    ("HAS_MODEL_DECISION", "HAS_PROPOSED_MODEL"),
+    ("HAS_MODEL_DECISION", "HAS_PROPOSED_MODEL", "HAS_PROPOSED_FIELD"),
+    ("HAS_MODEL_DECISION", "HAS_COMPLEMENTARY_MATCH"),
+    ("HAS_MODEL_DECISION", "HAS_SUPPLEMENTARY_FIELD"),
+    ("HAS_EXTRACTION",),
+)
+
+#: Every relationship type of those paths (what ``reachable`` may walk in the SQL check).
+_OWNERSHIP_TYPES = frozenset({"HAS_STRUCTURE", "HAS_CHILD"} | {t for p in _SUBTREE_PATHS for t in p})
+
+
+def cypher_subtree(graph: dict[str, Any], document_key: str) -> set[str]:
+    """Dump keys of the subtree of a Document, walking the dump like the Cypher does."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for rel in graph["relationships"]:
+        out.setdefault((rel["from"], rel["type"]), []).append(rel["to"])
+
+    def step(keys: set[str], rel_type: str) -> set[str]:
+        return {dst for key in keys for dst in out.get((key, rel_type), [])}
+
+    structure = step({document_key}, "HAS_STRUCTURE")
+    frontier = set(structure)
+    while frontier:
+        frontier = step(frontier, "HAS_CHILD") - structure
+        structure |= frontier
+    found = set(structure)
+    for path in _SUBTREE_PATHS:
+        keys = set(structure)
+        for rel_type in path:
+            keys = step(keys, rel_type)
+        found |= keys
+    return found
+
+
+def sql_reachable_subtree(backend_name: str, tenant: str, path: str, version: int) -> set[str]:
+    """Dump keys of what ``reachable()`` finds below the Document over the ownership types."""
+    import sqlalchemy as sa
+
+    from scinr.newton.graph.sql import _common as c
+    from scinr.newton.graph.sql._traversal import reachable
+    from scinr.newton.sql.keys import decode_key
+    from tests.golden._dump import node_key
+
+    start = c.nodes_with_keys("Document", [c.document_key(tenant, path, version)])
+    below = reachable(start, max_hops=100, rel_types=_OWNERSHIP_TYPES, name="subtree")
+    statement = sa.select(below.c.label, below.c.key).distinct()
+    rows = c.sync_read(lambda connection: connection.execute(statement).all())
+    return {node_key([label], decode_key(label, key)) for label, key in rows}
+
+
+class TestCascadeScope:
+    async def test_cascade_deletes_exactly_the_cypher_subtree(
+        self, graph_store, backend, env, dump, tmp_path
+    ):
+        """``cascade_delete`` removes exactly what the Cypher subtree patterns reach.
+
+        The SQL store selects the subtree by ``_document_key`` instead of walking the
+        relationships; this checks that both definitions give the same nodes (a full
+        pipeline document and a tabular one, next to a document that stays).
+        """
+        from scinr.newton.stages import run_tabular_pipeline
+
+        await env.full("cut.txt", tenant=TENANT_A)
+        await env.full("stay.txt", tenant=TENANT_A)
+        root = tmp_path / "tab"
+        root.mkdir()
+        (root / "plain.csv").write_text("sku,item,qty,x_note\nS1,Bolt,10,a\n", encoding="utf-8")
+        result = await run_tabular_pipeline(
+            input_raw=str(root), tenant_id=TENANT_A, created_by_user_id=USER, job_id="job-tab"
+        )
+        assert result.success, [d.errors for d in result.documents]
+
+        deletion = graph_store.deletion
+        for path in ("cut.txt", "plain.csv"):
+            before = dump()
+            doc = next(d for d in documents(before) if d["props"]["path"].endswith(path))
+            expected = cypher_subtree(before, doc["key"])
+            assert expected, f"{path}: empty subtree"
+            if backend.name != "neo4j":
+                props = doc["props"]
+                found = sql_reachable_subtree(
+                    backend.name, TENANT_A, props["path"], props["version"]
+                )
+                assert found == expected
+            keys, _, _ = deletion.fetch_document_keys(select(path=doc["props"]["path"]))
+            await in_thread(deletion.cascade_delete, TENANT_A, keys, None, caller="contract")
+            after = dump()
+            deleted = {n["key"] for n in before["nodes"]} - {n["key"] for n in after["nodes"]}
+            assert deleted == expected, (sorted(deleted - expected), sorted(expected - deleted))
+
+
 class TestGc:
     async def _orphaned(self, env) -> None:
         """A document whose extraction results were deleted by an update-mode reload,

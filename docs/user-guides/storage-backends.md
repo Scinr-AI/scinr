@@ -4,23 +4,25 @@
 
 Neo4j remains the primary output store. Storage is supplementary — it exists for raw file archival, audit trails, and compliance requirements. You can run the full pipeline with Neo4j alone and never touch storage.
 
-Three backends are available:
+Five backends are available:
 
 - **`none`** (default) — no persistent storage; all data stays in-memory during pipeline execution.
 - **`mongodb`** — MongoDB with GridFS for raw files and a document collection for converted pages.
+- **`postgres`** — PostgreSQL: metadata and pages in tables, raw files in chunks inside the database.
+- **`sqlite`** — SQLite: metadata and pages in tables, raw files as files in a folder next to the `.db`.
 - **`custom`** — user-defined repositories implementing the `RawFileRepository` and `PageRepository` interfaces.
 
 ---
 
 ## Backend Comparison
 
-| Feature | `none` | `mongodb` | `custom` |
-|---|---|---|---|
-| Raw file storage | No | Yes (GridFS) | User-defined |
-| Page content | No | Yes (document collection) | User-defined |
-| Document metadata | No | Yes (raw_files collection) | User-defined |
-| Dependencies | None | `motor`, `pymongo` | User-defined |
-| Use case | Dev/testing, Neo4j-only workflows | Production with audit trail | Custom infrastructure needs |
+| Feature | `none` | `mongodb` | `postgres` | `sqlite` | `custom` |
+|---|---|---|---|---|---|
+| Raw file storage | No | Yes (GridFS) | Yes (chunks in `raw_file_chunks`) | Yes (files next to the `.db`) | User-defined |
+| Page content | No | Yes (document collection) | Yes (`pages` table) | Yes (`pages` table) | User-defined |
+| Document metadata | No | Yes (raw_files collection) | Yes (`raw_files` table) | Yes (`raw_files` table) | User-defined |
+| Dependencies | None | `motor`, `pymongo` | `scinr[postgres]` | `scinr[sqlite]` | User-defined |
+| Use case | Dev/testing, Neo4j-only workflows | Production with audit trail | Production on an existing Postgres; one database for graph and storage | Local tools, single-machine setups, tests | Custom infrastructure needs |
 
 ---
 
@@ -474,6 +476,91 @@ async def main():
 
 asyncio.run(main())
 ```
+
+---
+
+## PostgreSQL and SQLite Backends
+
+The two SQL backends are one implementation (`scinr.newton.storage.sql`) with two dialects. They store the same things as the MongoDB backend — raw files, converted pages, described images and video frames — and also the snapshots of the [freeze backend](#freeze-backend-document-snapshots). Together with `graph_backend="postgres"` / `"sqlite"` they let you run the whole pipeline without Neo4j or MongoDB; see [SQL Graph Backends](sql-graph.md).
+
+All the SQL axes (`graph_backend`, `storage_backend`, `freeze_backend`) share one `sql_url`, so they must use the same engine: you cannot keep the graph in Postgres and the storage in SQLite. You can still mix a SQL engine with MongoDB (graph in SQL and storage in MongoDB, or the other way round).
+
+### Installation
+
+```bash
+pip install "scinr[postgres]"   # SQLAlchemy + psycopg 3
+pip install "scinr[sqlite]"     # SQLAlchemy + aiosqlite
+```
+
+### Configuration
+
+```python
+from scinr.newton import configure
+
+# PostgreSQL 14+ (no extension required)
+configure(
+    storage_backend="postgres",
+    sql_url="postgresql://newton:secret@db.internal:5432/scinr",
+    sql_schema="newton",        # Postgres schema that holds the tables (default)
+)
+
+# SQLite
+configure(
+    storage_backend="sqlite",
+    sql_url="sqlite:////var/lib/scinr/newton.db",
+)
+```
+
+Or via environment variables:
+
+```bash
+# .env
+STORAGE_BACKEND=sqlite
+SQL_URL=sqlite:////var/lib/scinr/newton.db
+SQLITE_FILES_DIR=/var/lib/scinr/files   # optional
+```
+
+`sql_url` is required as soon as one axis is `"postgres"` or `"sqlite"`, and its scheme (`postgresql://`, `postgres://` or `sqlite:///`) must match the engine of the axes. A driver suffix (`postgresql+psycopg://`) is accepted and ignored. The URL is redacted in logs and in `repr(config)`. `freeze_backend` inherits the resolved `storage_backend` as usual, so `storage_backend="sqlite"` also stores the snapshots in SQLite.
+
+The first `get_storage()` call of the process creates the tables (or migrates them, or only verifies them in Postgres [RLS mode](sql-graph.md#row-level-security-postgres-only)). See [SQL Graph Backends — Version upgrades](sql-graph.md#version-upgrades).
+
+### Tables
+
+| Table | What it holds |
+|---|---|
+| `raw_files` | One row per raw file: `id`, `tenant_id`, `created_by_user_id`, `job_id`, `filename`, `folder_path`, `content_type`, `size_bytes`, `checksum_sha256`, `stored_at` |
+| `raw_file_chunks` | **Postgres only.** The binary of each raw file, split in 1 MiB chunks (`file_id`, `n`, `data`) |
+| `pages` | The converted pages (`raw_file_id`, `page_index`, `markdown`, …), unique per `(raw_file_id, page_index)` |
+| `page_images`, `page_image_chunks` | The stored described images and video frames; `page_image_chunks` is Postgres only |
+| `frozen_snapshots`, `frozen_snapshot_chunks` | The [freeze](#freeze-backend-document-snapshots) snapshots; `frozen_snapshot_chunks` is Postgres only |
+
+Ids are text generated by newton (24 hexadecimal characters), not MongoDB `ObjectId`s. The graph stores `raw_file_id` and `frozen_blob_id` as opaque text, so the axes stay combinable. Every row carries the stored `tenant_id` (`"__public__"` for public uploads) and the repositories apply the same [scope](#multi-tenancy) as the other backends.
+
+### Where the bytes live
+
+- **Postgres: chunks in the database.** The binary is split in chunks of 1 MiB and written to the `*_chunks` table of its kind **in the same transaction** as its row: a failure leaves neither the row nor chunks, and deleting the row deletes its chunks. At most one chunk is held in memory while reading or writing. Because the chunk tables carry `tenant_id`, they fall under Row-Level Security like every other table.
+- **SQLite: files next to the `.db`.** There are no chunk tables. The binary is a file under `<database path without extension>.files/` (so `/var/lib/scinr/newton.db` uses `/var/lib/scinr/newton.files/`), in `raw_files/`, `page_images/` and `snapshots/` sub-folders, named after the id (`raw_files/ab/cd/abcd….bin`). Set `sqlite_files_dir` (`SQLITE_FILES_DIR`) to put them elsewhere. An in-memory SQLite database (`sqlite:///:memory:`) has no folder next to it: `sqlite_files_dir` is then required. The row stores the relative path of its file, and paths are always built from the validated id, never from the file name.
+
+A backup of a SQLite deployment is the `.db` file **and** the files folder.
+
+### Consistency of the SQLite files: `find_inconsistencies()`
+
+The file is written first (to a `.tmp` file, flushed and renamed) and the row after it; a delete removes the row first and the file after. A crash between the two steps leaves a file without a row or a row without a file. newton never repairs this on its own. After a crash, run:
+
+```python
+import asyncio
+from scinr.newton import configure
+from scinr.newton.storage.sql.blobs import find_inconsistencies
+
+configure(storage_backend="sqlite", sql_url="sqlite:////var/lib/scinr/newton.db")
+
+report = asyncio.run(find_inconsistencies())
+print(report.clean)                 # True when nothing is out of sync
+print(report.files_without_row)     # paths (relative to the files folder), temporary files included
+print(report.rows_without_file)     # [(kind, id), ...] with kind in "raw_file", "page_image", "snapshot"
+```
+
+It only reports; deleting what it lists is up to you. With Postgres the result is always clean, because the bytes live in the transaction of their row.
 
 ---
 
@@ -931,6 +1018,7 @@ class InMemoryPageRepository(PageRepository):
 
 ```python
 configure(..., storage_backend="mongodb")                          # raw files, pages and snapshots in MongoDB
+configure(..., storage_backend="sqlite", sql_url="sqlite:///...")  # the same, in SQLite
 configure(..., storage_backend="mongodb", freeze_backend="none")   # storage without freezing
 configure(..., storage_backend="none", freeze_backend="mongodb")   # snapshots only
 ```
@@ -966,6 +1054,10 @@ Every read and delete looks the metadata document up by `_id` **and** tenant fir
 
 `delete_document()` does not delete snapshots. A freeze snapshot is deleted by `restore_document()` once no `:Document` references it; backups and exports stay until you delete them.
 
+### PostgreSQL and SQLite
+
+With `freeze_backend="postgres"` or `"sqlite"` (or inherited from `storage_backend`), each snapshot is one row of `frozen_snapshots` plus its bytes: chunks in `frozen_snapshot_chunks` in Postgres, a file under `snapshots/` of the files folder in SQLite (see [PostgreSQL and SQLite Backends](#postgresql-and-sqlite-backends)). The row id is the `frozen_blob_id` written on the frozen `:Document`, and the row carries `tenant_id`, `mode` (`freeze`, `backup` or `export`), `frozen_at`, `size_bytes` and the list of `documents` it holds. Reads and deletes look the row up by id **and** tenant first, as in MongoDB. The snapshot format is the same as everywhere (`SNAPSHOT_SCHEMA_VERSION = 1`), so a snapshot made on Neo4j and MongoDB can be restored on Postgres or SQLite, and the other way round.
+
 ### Custom
 
 Pass an instance of `scinr.newton.freeze.base.FreezeRepository` as `custom_freeze_storage`:
@@ -987,6 +1079,8 @@ Reads, lookups and deletes receive the **stored** tenant key, the `tenant_id` pr
 |---|---|---|
 | Development / Testing | `none` | Zero infrastructure, fastest iteration. |
 | Production with audit trail | `mongodb` | Full durability, queryable, GridFS for large files. |
+| Production on an existing PostgreSQL | `postgres` | No extra database to operate; graph, storage and snapshots can share one `sql_url`. |
+| Local or single-machine tool | `sqlite` | No server at all; one `.db` file plus a files folder. |
 | Production with existing cloud infrastructure | `custom` | Reuse S3, Azure Blob, or other storage you already manage. |
 | Neo4j-only workflow | `none` | Storage is optional; Neo4j is the primary output. |
 | Compliance (raw file retention) | `mongodb` or `custom` | Persistent archive of every ingested file. |
@@ -1064,6 +1158,10 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | GridFS bucket | `mongodb_gridfs_bucket` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` |
 | Create indexes automatically | `mongodb_ensure_indexes` | `MONGODB_ENSURE_INDEXES` | `True` |
 | Custom storage | `custom_storage` | *(none)* | `None` |
+| SQL connection URL (`postgres` / `sqlite`) | `sql_url` | `SQL_URL` | `""` (required for SQL axes) |
+| Postgres schema | `sql_schema` | `SQL_SCHEMA` | `"newton"` |
+| SQL connection pool size | `sql_pool_size` | `SQL_POOL_SIZE` | `10` |
+| SQLite folder for binaries | `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` (`<db path without extension>.files/`) |
 | Snapshot backend ([Document Freezing](document-freezing.md)) | `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` |
 | Snapshot metadata collection | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` |
 | Snapshot GridFS bucket | `mongodb_frozen_gridfs_bucket` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` |
@@ -1082,7 +1180,10 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | `StorageError: Cannot connect to MongoDB` | Wrong URI or MongoDB not running | Verify `mongodb_uri`; check MongoDB is accessible. Use `storage_backend="none"` to bypass. |
 | Warning `Could not create MongoDB indexes` | The MongoDB user lacks the `createIndex` privilege | Grant it, or create the indexes out of band and set `mongodb_ensure_indexes=False`. See [Indexes](#indexes). |
 | `ConfigurationError: storage_backend='custom' requires passing custom_storage` | Missing `custom_storage` tuple | Pass `custom_storage=(raw_repo, page_repo)` to `configure()`. |
-| `ConfigurationError: Unknown storage_backend` | Invalid backend name | Use one of: `"none"`, `"mongodb"`, `"custom"`. |
+| `ConfigurationError: Unknown storage_backend` | Invalid backend name | Use one of: `"none"`, `"mongodb"`, `"postgres"`, `"sqlite"`, `"custom"`. |
+| `ConfigurationError: ... requires sql_url` or `... does not match sql_url` | A SQL axis without `sql_url`, or a URL of the other engine | Set `sql_url` (or `SQL_URL`) with the scheme of the engine. All the SQL axes share it. |
+| `ConfigurationError: An in-memory SQLite database has nowhere to keep binary files` | `sqlite:///:memory:` without `sqlite_files_dir` | Set `sqlite_files_dir`, or use a file database. |
+| `StorageError: The binary of raw_file ... is missing` | A SQLite row whose file is gone (crash, or the files folder was not backed up with the `.db`) | Run [`find_inconsistencies()`](#consistency-of-the-sqlite-files-find_inconsistencies) and clean up. |
 | Pages not found after ingestion | Storage backend was `none` during pipeline run | Re-run with `storage_backend="mongodb"` or `custom`. |
 | GridFS errors on large files | Very old MongoDB, or a driver/server mismatch | Use a currently supported MongoDB (4.4+ / 5.0+) or a managed MongoDB service. GridFS itself is available in every modern MongoDB release. |
 | `ImportError: No module named 'motor'` | MongoDB extras not installed | Run `pip install "scinr[mongodb]"`. |
@@ -1127,6 +1228,7 @@ DEBUG:scinr.newton.storage.mongodb.client:MongoDB indexes ensured.
 - **[Configuration](../configuration.md)** — Complete reference for `configure()`, environment variables, and all settings.
 - **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, stage selection, and workflow patterns.
 - **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results.
+- **[SQL Graph Backends](sql-graph.md)** — The graph, navigation and storage on PostgreSQL or SQLite; Row-Level Security.
 - **[Document Freezing](document-freezing.md)** — Freezing, restoring and exporting documents, and the snapshot format.
 - **[Architecture](../architecture.md)** — Detailed walkthrough of each pipeline stage and data flow.
 - **[Pipeline API](../api/pipeline.md)** — Auto-generated docstring for `run_pipeline()`.

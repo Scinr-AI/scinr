@@ -33,6 +33,8 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 7. [Neo4j Schema](#7-neo4j-schema)
 8. [Storage Backends](#8-storage-backends)
    - [Graph Layer (GraphStore)](#8d-graph-layer-graphstore)
+   - [Graph Backends (Neo4j and SQL)](#8e-graph-backends-neo4j-and-sql)
+     - [Adding a SQL engine](#adding-a-sql-engine)
    - [Document Lifecycle: Delete, Freeze, Restore](#8c-document-lifecycle-delete-freeze-restore)
 9. [Prompt System](#9-prompt-system)
 10. [Error Handling](#10-error-handling)
@@ -705,15 +707,17 @@ scinr.newton/
 ├── freeze/                     # Freeze backend: where document snapshots are stored
 │   ├── base.py                 # FreezeRepository ABC, SnapshotRecord
 │   ├── factory.py              # get_freeze_storage() — backend factory
-│   └── mongodb/
-│       └── repository.py       # MongoDBFreezeRepository (GridFS + metadata collection)
+│   ├── mongodb/
+│   │   └── repository.py       # MongoDBFreezeRepository (GridFS + metadata collection)
+│   └── sql/
+│       └── repository.py       # SqlFreezeRepository (Postgres / SQLite)
 │
 ├── graph/                      # Write-path interface to the graph (GraphStore)
 │   ├── base.py                 # GraphStore ABC and its sub-interfaces
 │   ├── types.py                # Domain types that cross the interface
 │   ├── sinks.py                # Sink protocols (extraction, tabular, catalog)
 │   ├── factory.py              # Chooses the implementation for graph_backend
-│   └── neo4j/                  # Neo4j implementation
+│   ├── neo4j/                  # Neo4j implementation
 │       ├── store.py            # Neo4jGraphStore, sync_scope()
 │       ├── schema.py           # Neo4jSchemaOps (store.schema): setup(), ensure_indexes() — constraints and indexes
 │       ├── documents.py        # Neo4jDocumentOps (store.documents): versions, document load, replacement, leaf resolution
@@ -728,6 +732,7 @@ scinr.newton/
 │       ├── driver.py           # get_driver(), get_async_driver() — Neo4j driver factories
 │       ├── retry.py            # Neo4j operation retry with exponential backoff
 │       └── errors.py           # neo4j.exceptions → GraphError hierarchy
+│   └── sql/                    # PostgreSQL / SQLite implementation: SqlGraphStore (store.py) and one module per sub-interface
 │
 ├── ingest/                     # Stage 2: Neo4j ingestion, and the document lifecycle
 │   ├── loader.py               # load_documents(), load_files(), load_folder(), version resolution
@@ -747,18 +752,28 @@ scinr.newton/
 │   ├── models.py               # Engine-neutral Pydantic return types
 │   ├── filters.py              # where= operator objects (Eq, In, Gte, Contains, …)
 │   ├── pages.py                # Source-text bridge (uses the storage abstraction)
-│   └── neo4j/                  # Neo4j (Cypher) backend
+│   ├── neo4j/                  # Neo4j (Cypher) backend
 │       ├── navigator.py        # Neo4jGraphNavigator (composed from Group mixins)
 │       ├── _common.py          # _Neo4jRuntime — driver lifecycle + read helpers
 │       ├── _translate.py       # where= operators → Cypher predicates
 │       ├── _safe.py            # identifier validation, depth resolution, read-only guard
 │       └── _documents/_structure/_instances/…  # one mixin per method group
+│   └── sql/                    # PostgreSQL / SQLite backend: SqlGraphNavigator (navigator.py), one mixin per method group
 │
 ├── prompts/                    # System prompt templates
 │   ├── system_prompt.py        # Prompt family dispatcher
 │   ├── system_prompt_generic.py  # GENERIC system prompts
 │   ├── system_prompt_claude.py   # CLAUDE system prompts
 │   └── system_prompt_gpt_reasoning.py # GPT_REASONING system prompts
+│
+├── sql/                        # Shared runtime of the SQL backends (the only code, with graph/sql, navigation/sql, storage/sql and freeze/sql, that imports SQLAlchemy)
+│   ├── dialect.py              # Dialect ABC, PostgresDialect, SqliteDialect, get_dialect()
+│   ├── engine.py               # Lazy sync / async engines (get_sync_engine, get_async_engine, reset_engines)
+│   ├── tables.py, names.py, keys.py, rows.py  # Table objects, naming, business-key encoding, row <-> node mapping
+│   ├── errors.py, retry.py     # Driver errors → GraphError / StorageError / TenantAccessError; retries
+│   ├── schema.py               # ensure_schema(): create / migrate / verify (simple vs RLS mode)
+│   ├── admin.py                # setup_sql_schema(), grant_tenant_access(), revoke_tenant_access(), list_tenant_access()
+│   └── migrations/             # Own runner + numbered .sql files per dialect (postgres/, postgres/rls/, sqlite/)
 │
 ├── stages/                     # Stage orchestrators
 │   ├── __init__.py             # Re-exports all public stage functions
@@ -776,10 +791,14 @@ scinr.newton/
 │   ├── null.py                 # NullRawFileRepository, NullPageRepository (no-op)
 │   ├── config.py               # Storage configuration
 │   ├── models.py               # RawFileRecord, PageRecord Pydantic models
-│   └── mongodb/                # MongoDB implementation
-│       ├── client.py           # Motor async client singleton
-│       ├── raw_files.py        # MongoDBRawFileRepository (GridFS)
-│       └── pages.py            # MongoDBPageRepository (collection)
+│   ├── mongodb/                # MongoDB implementation
+│   │   ├── client.py           # Motor async client singleton
+│   │   ├── raw_files.py        # MongoDBRawFileRepository (GridFS)
+│   │   └── pages.py            # MongoDBPageRepository (collection)
+│   └── sql/                    # PostgreSQL / SQLite implementation
+│       ├── raw_files.py        # SqlRawFileRepository
+│       ├── pages.py            # SqlPageRepository
+│       └── blobs.py            # Binaries: chunks in the database (Postgres) or files next to the .db (SQLite); find_inconsistencies()
 │
 ├── tabular/                    # Tabular pipeline (Stage 5)
 │   ├── agent.py                # run_tabular_agent(), run_tabular_agent_sync()
@@ -942,6 +961,7 @@ The storage layer abstracts raw file and converted page persistence behind repos
 |---|---|---|
 | `"none"` | No persistence; null repositories | Default |
 | `"mongodb"` | MongoDB with GridFS for binaries | `mongodb_uri`, `mongodb_database`, etc. |
+| `"postgres"` / `"sqlite"` | SQL tables; binaries in chunks in the database (Postgres) or as files next to the `.db` (SQLite) | `sql_url`, `sql_schema`, `sqlite_files_dir`; see [8e](#8e-graph-backends-neo4j-and-sql) |
 | `"custom"` | User-provided repository pair | `custom_storage=(raw_repo, page_repo)` |
 
 ### MongoDB Structure
@@ -967,7 +987,8 @@ Null implementations (`NullRawFileRepository`, `NullPageRepository`) are used wh
 
 Document snapshots (see [8c](#8c-document-lifecycle-delete-freeze-restore)) are stored by a separate repository, `FreezeRepository` (`freeze/base.py`), obtained with `get_freeze_storage()`:
 
-- `freeze_backend` is `"none"`, `"mongodb"` or `"custom"`. Unset, it inherits the resolved `storage_backend`.
+- `freeze_backend` is `"none"`, `"mongodb"`, `"postgres"`, `"sqlite"` or `"custom"`. Unset, it inherits the resolved `storage_backend`.
+- With `"postgres"` or `"sqlite"`, a snapshot is a row of `frozen_snapshots` plus its bytes (chunks or a file), in the same database as the SQL storage.
 - With `"mongodb"`, the snapshot file goes to the GridFS bucket `mongodb_frozen_gridfs_bucket` (default `"frozen_snapshots"`) and its metadata to `mongodb_frozen_collection` (default `"frozen_documents"`), in the same database as the storage backend.
 - With `"custom"`, `custom_freeze_storage` is a `FreezeRepository`: `store_snapshot`, `read_snapshot_to_file`, `delete_snapshot`, and optionally `find_snapshots`. Every method is tenant-scoped.
 
@@ -988,7 +1009,7 @@ GraphNavigator (ABC)   ~90 async, engine-neutral read methods; engine-neutral Py
 Neo4jGraphNavigator    one mixin per method group over a shared _Neo4jRuntime
       │                (READ transactions + with_neo4j_retry; borrows get_async_driver())
       ▼
-Neo4j
+Neo4j                  (graph_backend="postgres" / "sqlite" → SqlGraphNavigator, see 8e)
 ```
 
 - **Interface** (`navigation/base.py`): documents & folder hierarchy, structure
@@ -998,7 +1019,8 @@ Neo4j
   (`Eq`, `In`, `Gte`, `Contains`, …); the backend translates them to parameterised
   predicates. Values are matched verbatim.
 - **`execute_raw` / `execute_raw_one`** — an optional, non-portable escape hatch:
-  a Cypher string, read-only enforced (write-keyword guard + READ transaction),
+  a Cypher string on Neo4j (read-only enforced by a write-keyword guard + READ
+  transaction), or read-only SQL on Postgres / SQLite (enforced by the engine),
   with a `dialect=` fail-fast guard. The base ABC raises
   `UnsupportedOperationError`.
 - **Source text** (`navigation/pages.py`) bridges to the storage abstraction to
@@ -1014,8 +1036,9 @@ See the [Graph Navigation user guide](user-guides/graph-navigation.md) and the
 The pipeline never talks to Neo4j directly. Every write to the graph, and the
 internal reads that go with it, goes through `GraphStore`
 (`scinr.newton.graph`), obtained with `get_graph_store()`. `Neo4jGraphStore`
-is the only implementation today and runs exactly the Cypher the pipeline always
-ran. Read-only exploration is a separate layer ([8b](#8b-graph-navigation-layer)).
+runs exactly the Cypher the pipeline always ran; `SqlGraphStore` is the Postgres / SQLite
+implementation ([8e](#8e-graph-backends-neo4j-and-sql)). Read-only exploration is a separate
+layer ([8b](#8b-graph-navigation-layer)).
 
 ```
 get_graph_store()  ──reads──▶  cfg.graph_backend   (env GRAPH_BACKEND, default "neo4j")
@@ -1063,11 +1086,65 @@ Neo4j
   engine's message and the original exception in `__cause__`.
 - **Boundaries.** Outside `graph/neo4j/` and `navigation/neo4j/` nothing imports
   `neo4j`, catches `neo4j.exceptions` or contains Cypher text;
-  `tests/unit/test_graph_boundaries.py` enforces it.
+  `tests/unit/test_graph_boundaries.py` enforces it. The same holds for the SQL
+  drivers outside the `sql/` packages (`tests/unit/test_sql_boundaries.py`).
 - **Contract.** `tests/contract/` runs the same tests against every registered
   backend using only `GraphStore`.
 
 See the [Graph Store API reference](api/graph-store.md).
+
+---
+
+## 8e. Graph Backends (Neo4j and SQL)
+
+`graph_backend` picks the engine behind **two** interfaces that always travel together, plus the repositories of the storage layer. The pipeline only ever talks to the interfaces.
+
+| Interface | Role | Neo4j | PostgreSQL / SQLite |
+|---|---|---|---|
+| `GraphStore` (`graph/base.py`) | Write path and the pipeline's internal reads ([8d](#8d-graph-layer-graphstore)) | `Neo4jGraphStore` (`graph/neo4j/`) | `SqlGraphStore` (`graph/sql/`) |
+| `GraphNavigator` (`navigation/base.py`) | Read-only public API, ~90 methods ([8b](#8b-graph-navigation-layer)) | `Neo4jGraphNavigator` (`navigation/neo4j/`) | `SqlGraphNavigator` (`navigation/sql/`) |
+| `RawFileRepository`, `PageRepository` (`storage/base.py`) | Raw files, pages, images ([8](#8-storage-backends)) | MongoDB (`storage/mongodb/`) | `SqlRawFileRepository`, `SqlPageRepository` (`storage/sql/`) |
+| `FreezeRepository` (`freeze/base.py`) | Snapshots ([8c](#8c-document-lifecycle-delete-freeze-restore)) | MongoDB (`freeze/mongodb/`) | `SqlFreezeRepository` (`freeze/sql/`) |
+
+The three configuration axes are independent — `graph_backend` (`neo4j`, `postgres`, `sqlite`), `storage_backend` and `freeze_backend` (`none`, `mongodb`, `postgres`, `sqlite`, `custom`) — except that every SQL axis shares **one** `sql_url`, so they must name the same engine. The factories (`graph/factory.py`, `navigation/factory.py`, `storage/factory.py`, `freeze/factory.py`) import the implementation inside the branch of their backend, so `import scinr.newton` works without Neo4j or the SQL drivers installed; a missing extra surfaces as an error naming the `pip install` to run.
+
+```
+GraphStore / GraphNavigator / RawFileRepository / PageRepository / FreezeRepository
+      │
+      ├── Neo4j*       Cypher, one driver per flavor
+      └── Sql*         one implementation for both engines, written with SQLAlchemy Core
+              │
+              └── Dialect (sql/dialect.py)
+                    ├── PostgresDialect   JSONB, ARRAY, tsvector, Row-Level Security
+                    └── SqliteDialect     JSON1, FTS5, WAL, one writer
+```
+
+**One SQL implementation, one `Dialect`.** `SqlGraphStore`, `SqlGraphNavigator` and the SQL repositories are written once. Everything that differs between engines lives in `Dialect` (`sql/dialect.py`): driver URLs, per-connection setup (the SQLite PRAGMAs and the `regexp` function), `INSERT ... ON CONFLICT`, JSON and list columns, case-insensitive containment, regular expressions, text ordering, full-text search, the read-only transaction behind `execute_raw`, error classification, the migration lock and the number of concurrent write transactions. Asking the engine's name outside `sql/dialect.py` is a design error: add a method to the dialect.
+
+**Rules of the SQL layer.**
+
+- SQLAlchemy Core only, no ORM. Queries are built from the table objects of `sql/tables.py` (including the recursive CTEs that replace Cypher's variable-length paths); `sa.text()` is confined to the migrations, `execute_raw` and column defaults. Values are always parameters; the only interpolated names are validated identifiers (`Dialect.validate_identifier`).
+- Each method keeps the transaction boundary of its Neo4j counterpart, and the batch sizes (`DELETE_BATCH_ROWS`, `DOCUMENTS_PER_QUERY`, the GC bounds) are shared engine-neutral constants in `graph/types.py`.
+- One table per node type, one `edges` table (plus `catalog_edges`), typed columns plus a JSON `props`. Keys are computed in Python, so the same document has the same keys on every engine. See the [SQL Graph Backends](user-guides/sql-graph.md#table-summary) guide.
+- Engine errors leave as the same `GraphError` / `StorageError` hierarchy as Neo4j (`sql/errors.py`); a Row-Level Security rejection becomes `TenantAccessError`.
+- Retries (`sql/retry.py`) live inside the implementation. SQLite serializes writers (WAL, `busy_timeout`, `BEGIN IMMEDIATE`) and treats `SQLITE_BUSY` as transient.
+- Only `sql/`, `graph/sql/`, `navigation/sql/`, `storage/sql/` and `freeze/sql/` import `sqlalchemy` or a driver, and the drivers are imported lazily (`sql/engine.py`).
+
+**Schema management** (`sql/schema.py`, `sql/migrations/`). Migrations are numbered `.sql` files per dialect (`migrations/postgres/`, `migrations/sqlite/`), applied by an own runner (no Alembic) and recorded in the `newton_schema` table; the Row-Level Security files are a second track (`migrations/postgres/rls/`). `ensure_schema()` runs once per process and target and detects the mode from the schema itself: no schema, newton creates it; schema present and not RLS, newton migrates it if it is behind; schema in RLS mode, newton only verifies the version. The administrator API (`sql/admin.py`) is `setup_sql_schema`, `grant_tenant_access`, `revoke_tenant_access` and `list_tenant_access`.
+
+**Equivalence with Neo4j.** The Neo4j implementation is the specification. `tests/contract/` runs the `GraphStore` contract on every backend; `tests/equivalence/` runs the same scenarios on Neo4j + MongoDB and on each SQL engine and compares the written graph and the results of every navigation call, with the accepted differences in `KNOWN_DIFFERENCES`; `tests/storage_contract/` does the same for the repositories; `tests/sql_rls/` checks that a restricted Postgres role cannot read or write other tenants.
+
+<a id="añadir-un-motor-sql"></a>
+
+### Adding a SQL engine
+
+A new SQL engine (for example DuckDB) is a new dialect, not a new implementation: the stores, the navigator and the repositories are shared. This is what it takes:
+
+1. **Implement the `Dialect` ABC** (`sql/dialect.py`) in a new subclass: set `name`, `json_type` and `list_type`, and implement every abstract method — URLs for the sync and async drivers, `engine_kwargs`, `on_connect` / `on_begin`, `schema_translate_map`, `insert` (with `on_conflict_do_update`), the list and JSON helpers (`append_unique`, `json_set_keys`, `json_remove_keys`, `json_get`, `json_text`, `json_kind`, `json_number`, `json_bool`, `list_contains`, `list_overlaps`), `instance_key_index_sql`, the text helpers (`contains_ci`, `regex_match`, `text_cmp`, `order_text`), the full-text trio (`fulltext_match`, `fulltext_score`, `fulltext_units`), `read_only` (the guarantee behind `execute_raw`), `use_schema`, `classify_error` (transient, unique violation, access denied, connection, authentication, resource), `migration_lock` and `verbatim`. Override `max_concurrent_writes` if the engine has a single writer.
+2. **Register it in `get_dialect()`** by URL scheme, and add the scheme to `_SQL_BACKENDS` and `_SQL_URL_SCHEMES` in `config.py` (and, for the new `graph_backend` / `storage_backend` / `freeze_backend` value, to `_GRAPH_BACKENDS` and `_STORAGE_BACKENDS` and the factories' lists), plus its extra in `pyproject.toml`.
+3. **Write its migrations** in `sql/migrations/<name>/`: `NNNN_description.sql` files numbered from `0001`, with statements separated by a line containing only `-- statement`, reproducing the tables of the other dialects (`{schema}` and `{fulltext_config}` are substituted by the runner). Decide how binaries are stored: the storage tables (`storage_tables()` in `sql/tables.py`) either have `*_chunks` tables (Postgres) or keep a file path (SQLite).
+4. **Add it to the test registries:** the `BACKENDS` dict of `tests/contract/conftest.py` (the `GraphStore` contract) and of `tests/storage_contract/conftest.py`, and the `sql_engine` fixture of `tests/equivalence/conftest.py` (with a neutral dump in `tests/sql/_dump.py`). Every contract test then runs on the new engine.
+5. **Run the suites and record the differences.** Anything the engine cannot reproduce goes to `KNOWN_DIFFERENCES` in `tests/equivalence/test_read_equivalence.py` and to the [Known differences](user-guides/sql-graph.md#known-differences-from-neo4j) section of the user guide — only with the owner's agreement.
 
 ---
 

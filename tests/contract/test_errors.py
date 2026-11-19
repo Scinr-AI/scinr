@@ -90,7 +90,8 @@ class TestBadCredentials:
         store = broken_store("bad_credentials")
         with pytest.raises(GraphAuthenticationError) as caught:
             store.schema.setup()
-        assert backend.broken_configs["bad_credentials"]["neo4j_password"] not in str(caught.value)
+        assert backend.secret
+        assert backend.secret not in str(caught.value)
 
 
 class TestNoCredentials:

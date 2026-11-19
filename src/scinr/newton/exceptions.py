@@ -191,3 +191,7 @@ class ScopeError(NavigationError, StorageError):
     :class:`StorageError` — callers of either layer can keep catching their
     own error type.
     """
+
+
+class TenantAccessError(GraphError, StorageError):
+    """The database refused the operation for the tenant (Row-Level Security)."""
