@@ -10,7 +10,7 @@ This is the definitive guide to creating extraction models for `scinr.newton`. E
 
 ### What are extraction models?
 
-An extraction model is a Pydantic class that defines the schema for structured data extracted from a document section. When you run the `scinr.newton` pipeline, the annotation agent (Stage 3) reads your model definitions and decides which model to apply to each structural node. The entity extraction engine (Stage 4) then uses the LLM to populate the model fields from the document text and writes the resulting data as subgraphs in Neo4j.
+An extraction model is a Pydantic class that defines the schema for structured data extracted from a document section. When you run the `scinr.newton` pipeline, the annotation agent (Stage 3) reads your model definitions and decides which model to apply to each structural node. The entity extraction engine (Stage 4) then uses the LLM to populate the model fields from the document text and writes the resulting data as subgraphs in the graph database.
 
 ### Why `ExtractionModel` over `BaseModel`?
 
@@ -32,13 +32,13 @@ Models interact with three pipeline stages. Understanding the full flow — from
 
 **Stage 3 (Annotation)**: The annotation agent considers only the models from the theme selected in Stage 1. It reads each model's class docstring and field descriptions to decide which model best fits a given structural node.
 
-**Stage 4 (Entity Extraction)**: The extraction LLM receives the selected model's full schema (fields, descriptions, enums, `json_schema_extra`) and extracts the structured data. The resulting instance is written as a `:ModelInstance` node in Neo4j, with `:LabeledEntity` nodes and relationships created according to the model's graph annotations.
+**Stage 4 (Entity Extraction)**: The extraction LLM receives the selected model's full schema (fields, descriptions, enums, `json_schema_extra`) and extracts the structured data. The resulting instance is written as a `:ModelInstance` node in the graph, with `:LabeledEntity` nodes and relationships created according to the model's graph annotations.
 
 | Stage | Name | What themes/models do |
 | :--- | :--- | :--- |
 | 1 | **Extraction** | The LLM structures the document into information units AND selects a theme for each structural node based on `THEME_DESCRIPTION`. This determines which extraction models are available for that node. |
 | 3 | **Annotation** | The annotation LLM reads each model's class docstring and field descriptions to decide which model best fits a given structural node, choosing from the theme selected in Stage 1. |
-| 4 | **Entity Extraction** | The extraction LLM receives the selected model's full schema and extracts the structured data. The resulting instance is written as a `:ModelInstance` node in Neo4j. |
+| 4 | **Entity Extraction** | The extraction LLM receives the selected model's full schema and extracts the structured data. The resulting instance is written as a `:ModelInstance` node in the graph. |
 
 ---
 
@@ -66,7 +66,7 @@ Each setting serves a specific purpose:
 | `extra="forbid"` | Rejects any JSON field not declared in the model | Catches LLM hallucinations immediately — the extraction fails loudly instead of silently accepting garbage |
 | `validate_assignment=True` | Re-validates every field on mutation | Ensures programmatic changes (e.g., post-processing, normalization hooks) still pass validation |
 | `str_strip_whitespace=True` | Auto-trims leading/trailing whitespace on all string fields | Eliminates OCR artifacts and LLM formatting noise without manual `.strip()` calls |
-| `use_enum_values=True` | Serializes enum members as their plain string value | Stores `"IA"` instead of `ProcedureType.IA` in Neo4j; guarantees clean JSON output |
+| `use_enum_values=True` | Serializes enum members as their plain string value | Stores `"IA"` instead of `ProcedureType.IA` in the graph; guarantees clean JSON output |
 
 **Recommendation:** Inherit from `ExtractionModel` (or from a subclass of it) to get its built-in defaults. The only requirement is that the model is a valid Pydantic model — inheriting from `BaseModel` or any of its subclasses works. The `Triple` fallback model inherits directly from `BaseModel` as a historical exception.
 
@@ -180,7 +180,7 @@ class ProcedureType(str, Enum):
     Normalized procedure type code.
 
     Use str as the base class — guarantees JSON-serializable values and
-    correct Neo4j storage without extra serialization steps.
+    correct graph storage without extra serialization steps.
 
     Values:
       IA   — Type IA notification (immediate effect, notify within 12 months).
@@ -866,7 +866,7 @@ class ContactRecord(ExtractionModel):
 | Absolute own-package import: `from my_pkg.theme.models import X` | Breaks when `sys.path` changes | Relative: `from .models import X` |
 | Missing `__init__.py` in a subfolder | Python won't treat it as a package; relative imports fail with `ImportError` | Add empty `__init__.py` to every folder with `.py` files |
 | `entity_label` on a free-text description field | Creates meaningless `:LabeledEntity` singletons; degrades graph quality | Only add `entity_label` to short, stable, identifier-like values |
-| `field_relationships` pointing to a field without `entity_label` | The target node does not exist; Neo4j write silently ignored | Ensure `to_field` also has `entity_label` |
+| `field_relationships` pointing to a field without `entity_label` | The target node does not exist; graph write silently ignored | Ensure `to_field` also has `entity_label` |
 | Missing `instance_key: True` on target model key fields | Shell nodes created by `instance_relationships` never merge with real nodes | Mark ALL key fields on the target model with `instance_key: True` |
 | Fan-out `join_via` key name mismatch | Zero target nodes created — field name in `join_via` must exactly match Python field name | Double-check that `join_via` keys use the exact Python field names |
 | `Optional[str]` instead of `str \| None` | Verbose; inconsistent with the codebase style | Use `str \| None` (PEP 604 union syntax) |

@@ -27,7 +27,7 @@ from typing import Any, TextIO
 
 
 def _json_default(value: Any) -> Any:
-    """Serialise the non-JSON values a Neo4j record can hold.
+    """Serialise the non-JSON values a graph-database record can hold.
 
     Temporal values (``neo4j.time`` types expose ``iso_format()``; Python
     ``datetime``/``date``/``time`` expose ``isoformat()``) become ISO-8601

@@ -27,7 +27,7 @@ async def run_preprocess(
 ) -> tuple[StageResult, list]:
     """Convert raw source files to intermediate JSON using the converters module.
 
-    Also stores raw files (binary) and converted pages in MongoDB via the
+    Also stores raw files (binary) and converted pages in the document store via the
     storage layer when a backend is configured (``STORAGE_BACKEND`` env var).
 
     Parameters

@@ -32,7 +32,7 @@ class PreconditionError(ScinrError):
     Raised when a pipeline function is called out of order.
 
     Examples: run_entity_extraction called without prior run_annotation,
-    document not found in Neo4j.
+    document not found in the graph database.
     """
 
 
@@ -62,7 +62,7 @@ class ModelError(ScinrError):
 
 class StorageError(ScinrError):
     """
-    Raised when the storage backend (MongoDB) is unavailable or misconfigured.
+    Raised when the storage backend (MongoDB, Postgres or SQLite) is unavailable or misconfigured.
     """
 
 

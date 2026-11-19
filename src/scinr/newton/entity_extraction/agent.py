@@ -9,7 +9,7 @@ Usage:
     result = run_entity_extraction_agent_sync(document_name="MyDocument")
 
 When *document_name* refers to a folder document (one that has children via
-IS_COMPOSED_OF in Neo4j), all **leaf** descendants are processed sequentially.
+IS_COMPOSED_OF in the graph database), all **leaf** descendants are processed sequentially.
 A failure in one leaf is logged and the remaining leaves are still processed.
 
 Documents are always selected within one tenant (``tenant_id``, ``None`` =
@@ -89,7 +89,7 @@ async def _run_entity_extraction_parallel(
     Parameters
     ----------
     document_name:
-        Neo4j Document.name (provenance only).
+        graph Document.name (provenance only).
     only_unextracted:
         When True, skip nodes that already have a :HAS_EXTRACTION relationship.
     tenant_id, doc_path:
@@ -160,7 +160,7 @@ async def run_entity_extraction_agent(
     doc_path: str | None = None,
 ) -> dict:
     """
-    Run the full entity extraction pipeline for a document (or folder) already annotated in Neo4j.
+    Run the full entity extraction pipeline for a document (or folder) already annotated in the graph database.
 
     If *document_name* refers to a folder document that has children via
     IS_COMPOSED_OF, all leaf descendants are resolved and extracted.  Up to
@@ -169,10 +169,10 @@ async def run_entity_extraction_agent(
 
     Traverses all StructureNodes that have a matched ModelDecision and at least one
     unextracted InfoUnit, runs the composite LLM extraction, and writes the entity
-    subgraph to Neo4j. Marks each InfoUnit as extracted on completion.
+    subgraph to the graph database. Marks each InfoUnit as extracted on completion.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j. Selects the
+        document_name: The exact Document.name as stored in the graph database. Selects the
             root document(s) only when *doc_path* is not given (every latest
             document of the tenant with that name); otherwise it is only a label.
         parallel_docs: Maximum number of leaf documents to extract concurrently.
@@ -211,7 +211,7 @@ async def run_entity_extraction_agent(
     # Check 1: document exists
     if await store.documents.count_latest_documents(selector) == 0:
         raise PreconditionError(
-            f"Document {doc_label} not found in Neo4j (latest=true). "
+            f"Document {doc_label} not found in the graph database (latest=true). "
             f"Run run_ingestion() before run_entity_extraction_agent()."
         )
     # Check 2: at least one annotated node exists

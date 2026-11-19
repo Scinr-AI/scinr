@@ -139,7 +139,7 @@ class IntermediatePage(BaseModel):
     header: str | None = None
     footer: str | None = None
     confidence_scores: None = None
-    page_id: str | None = None  # MongoDB ObjectId of the ConvertedPageRecord stored by Stage 0
+    page_id: str | None = None  # ObjectId of the ConvertedPageRecord stored by Stage 0
     # Time range [start_ms, end_ms) of the page in the source medium (audio /
     # video segments). None for documents without a time axis.
     start_ms: int | None = None
@@ -160,7 +160,7 @@ class IntermediateDocument(BaseModel):
 
     pages: list[IntermediatePage]
     folder_path: str | None = None  # relative path of parent folder from input root (None for root files)
-    raw_file_id: str | None = None  # MongoDB ObjectId of the RawFileRecord stored by Stage 0
+    raw_file_id: str | None = None  # ObjectId of the RawFileRecord stored by Stage 0
     context_instructions: str | None = None  # Free-text user-provided ingestion context. Set via ``context_instructions=``.
     document_name: str | None = None  # Name of the original source file, extension included (``informe.pdf``). Injected by convert_folder() / convert_single_file().
     # Owner of the upload, stamped by convert_one() / convert_single_file() and

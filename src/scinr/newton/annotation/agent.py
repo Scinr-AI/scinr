@@ -15,7 +15,7 @@ Usage:
     count = run_manual_annotation_sync(document_name="MyDocument", model_class="DrugProductComposition")
 
 When *document_name* refers to a folder document (one that has children via
-IS_COMPOSED_OF in Neo4j), all **leaf** descendants are processed sequentially.
+IS_COMPOSED_OF in the graph database), all **leaf** descendants are processed sequentially.
 A failure in one leaf is logged and the remaining leaves are still processed.
 
 Documents are always selected within one tenant (``tenant_id``, ``None`` =
@@ -59,7 +59,7 @@ async def _run_annotation_for_single_document(
         only_unannotated: When True, only process nodes that do NOT already have
             a :HAS_MODEL_DECISION relationship.
         context_instructions_override: When provided, use this context string
-            instead of fetching context_instructions from Neo4j.
+            instead of fetching context_instructions from the graph database.
 
     Returns:
         Final state dict with keys: document_name, nodes_to_annotate, errors.
@@ -105,12 +105,12 @@ async def _run_annotation_parallel(
     Parameters
     ----------
     document_name:
-        Neo4j Document.name (provenance only).
+        graph Document.name (provenance only).
     only_unannotated:
         When True, skip nodes that already have a :HAS_MODEL_DECISION relationship.
     context_instructions_override:
         When provided, use this context string instead of fetching
-        context_instructions from Neo4j.
+        context_instructions from the graph database.
     tenant_id, doc_path:
         Select the latest :Document to annotate.
 
@@ -200,7 +200,7 @@ async def run_annotation_agent(
     doc_path: str | None = None,
 ) -> dict:
     """
-    Run the full annotation pipeline for a document (or folder) already ingested in Neo4j.
+    Run the full annotation pipeline for a document (or folder) already ingested in the graph database.
 
     If *document_name* refers to a folder document that has children via
     IS_COMPOSED_OF, all leaf descendants are resolved and annotated.  Up to
@@ -209,10 +209,10 @@ async def run_annotation_agent(
 
     Traverses all StructureNodes that have at least one InfoUnit, calls the
     two-step LLM pipeline (decide_model → format_decision) for each, and writes
-    the resulting AnnotationDecision subgraph back to Neo4j.
+    the resulting AnnotationDecision subgraph back to the graph database.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j. Selects the
+        document_name: The exact Document.name as stored in the graph database. Selects the
             root document(s) only when *doc_path* is not given (every latest
             document of the tenant with that name); otherwise it is only a label.
         parallel_docs: Maximum number of leaf documents to annotate concurrently.
@@ -220,7 +220,7 @@ async def run_annotation_agent(
         only_unannotated: When True, only process StructureNodes that do NOT already
             have a :HAS_MODEL_DECISION relationship. Defaults to False.
         context_instructions_override: When provided, use this context string instead
-            of fetching context_instructions from Neo4j. Defaults to None (Neo4j
+            of fetching context_instructions from the graph database. Defaults to None (graph
             fetch is used).
         tenant_id: Owner of the document (``None`` = public). Only that
             tenant's documents are read or written.
@@ -252,7 +252,7 @@ async def run_annotation_agent(
     if await get_graph_store().documents.count_latest_documents(selector) == 0:
         raise PreconditionError(
             f"Document '{doc_path or document_name}' (tenant={tenant_id!r}) not found in "
-            f"Neo4j (latest=true). Run run_ingestion() before run_annotation_agent()."
+            f"the graph database (latest=true). Run run_ingestion() before run_annotation_agent()."
         )
 
     leaves = await resolve_leaf_documents_async(
@@ -367,7 +367,7 @@ async def run_manual_annotation(
     continue processing.
 
     Args:
-        document_name: The exact Document.name as stored in Neo4j (root
+        document_name: The exact Document.name as stored in the graph database (root
                        selector only when *doc_path* is not given).
         model_class:   CamelCase name of the Pydantic model class to assign.
                        Must exist in the model registry.
@@ -386,7 +386,7 @@ async def run_manual_annotation(
     if not model_class:
         raise ValueError("model_class must be a non-empty string.")
 
-    # Validate that the model exists in the registry before touching Neo4j.
+    # Validate that the model exists in the registry before touching the graph database.
     # resolve_model_class raises KeyError with the full list of available classes.
     from scinr.newton.entity_extraction.model_resolver import resolve_model_class
     resolve_model_class(model_class)

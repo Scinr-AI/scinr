@@ -71,7 +71,7 @@ packages = ["src/scinr"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "integration: requires running Neo4j and/or MongoDB",
+    "integration: requires running Neo4j, MongoDB and/or Postgres",
     "sql_rls: Postgres Row-Level-Security suite (restricted roles); needs the postgres-test container",
 ]
 

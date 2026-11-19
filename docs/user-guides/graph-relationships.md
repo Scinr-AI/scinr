@@ -1,12 +1,12 @@
 # Graph Relationships
 
-Define edges between extracted entities in your Pydantic extraction models. Relationships declared in `json_schema_extra` become Neo4j graph edges during Stage 4 (entity extraction).
+Define edges between extracted entities in your Pydantic extraction models. Relationships declared in `json_schema_extra` become graph edges during Stage 4 (entity extraction).
 
 ---
 
 ## Overview
 
-`scinr.newton` builds a Neo4j knowledge graph from extracted entities. Relationships between entities are declared in model field definitions using `json_schema_extra`. Two relationship types exist:
+`scinr.newton` builds a knowledge graph from extracted entities. Relationships between entities are declared in model field definitions using `json_schema_extra`. Two relationship types exist:
 
 | Type | Connects | Scope | Node Type |
 | :--- | :--- | :--- | :--- |
@@ -107,7 +107,7 @@ class VariationLink(ExtractionModel):
     )
 ```
 
-### Resulting Neo4j Graph
+### Resulting Graph
 
 ```
 (:LabeledEntity {label:"VariationCode", value:"Q.I.a.1"})
@@ -160,7 +160,7 @@ class DrugInteraction(ExtractionModel):
     )
 ```
 
-### Resulting Neo4j Graph
+### Resulting Graph
 
 ```
 (:LabeledEntity {label:"Drug", value:"Warfarin"})
@@ -209,7 +209,7 @@ class DocumentReference(ExtractionModel):
     )
 ```
 
-### Resulting Neo4j Graph
+### Resulting Graph
 
 ```
 (:ModelInstance {model_class:"DocumentReference", reference_id:"REF-001"})
@@ -309,7 +309,7 @@ class ConditionGroup(ExtractionModel):
     )
 ```
 
-### Resulting Neo4j Graph
+### Resulting Graph
 
 ```
 (:ModelInstance {model_class:"ConditionGroup", variation_code:"Q.I.a.1"})
@@ -404,7 +404,7 @@ class VariationRecord(ExtractionModel):
     )
 ```
 
-### Resulting Neo4j Graph
+### Resulting Graph
 
 ```
 Level 1 (entity_label):
@@ -736,7 +736,7 @@ Multi-hop query:
 
 | Anti-Pattern | Why It Fails | Fix |
 | :--- | :--- | :--- |
-| `field_relationships` pointing to a field without `entity_label` | The target `:LabeledEntity` node does not exist; Neo4j write is silently skipped | Add `entity_label` to the target field |
+| `field_relationships` pointing to a field without `entity_label` | The target `:LabeledEntity` node does not exist; graph write is silently skipped | Add `entity_label` to the target field |
 | Missing `instance_key: True` on target model key fields | Shell nodes created by `instance_relationships` never merge with real nodes when the target is extracted | Mark ALL key fields on the target model with `instance_key: True` |
 | `join_via` field name mismatch | Zero target nodes created — the field name in `join_via` must exactly match the Python field name | Double-check that `join_via` keys use the exact Python field names |
 | `entity_label` on free-text narrative fields | Creates meaningless `:LabeledEntity` singletons; degrades cross-document deduplication quality | Only add `entity_label` to short, stable, identifier-like values |
@@ -748,7 +748,9 @@ Multi-hop query:
 
 ## Verification
 
-### Verify Entity Relationships in Neo4j
+The queries below are Cypher, so they run on the Neo4j backend. On PostgreSQL and SQLite, use the [navigation API](graph-navigation.md) or the tables described in the [SQL Graph Backends guide](sql-graph.md).
+
+### Verify Entity Relationships
 
 ```cypher
 -- List all field_relationships (LabeledEntity → LabeledEntity)
@@ -760,7 +762,7 @@ RETURN a.label AS source,
 ORDER BY count DESC;
 ```
 
-### Verify Instance Relationships in Neo4j
+### Verify Instance Relationships
 
 ```cypher
 -- List all instance_relationships (ModelInstance → ModelInstance)

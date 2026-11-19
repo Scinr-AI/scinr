@@ -1,5 +1,5 @@
 """
-ingest/loader.py — Loading JSON extractions into Neo4j.
+ingest/loader.py — Loading JSON extractions into the graph database.
 
 Usage:
     from scinr.newton.ingest.loader import load_file, load_folder, load_documents
@@ -48,7 +48,7 @@ def _apply_metadata_overrides(
     omitted (None) argument leaves whatever the Document already carries
     (e.g. a value baked into an ``extract-*.json`` at extraction time)
     untouched. The resulting ``doc.tenant_id`` / ``doc.created_by_user_id`` /
-    ``doc.job_id`` are then always written to Neo4j by
+    ``doc.job_id`` are then always written to the graph database by
     ``insert_document_graph`` (null when still None). ``doc.tenant_id`` keeps
     its public-API form (``None`` = public); ``insert_document_graph``
     normalizes it to the stored key.
@@ -129,11 +129,11 @@ def load_file(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
-    """Load a single extracted JSON file into Neo4j.
+    """Load a single extracted JSON file into the graph database.
 
     Version resolution:
     - If *shared_version* is provided (batch context), use it directly.
-    - Otherwise, resolve from Neo4j: next version (normal) or current latest (update).
+    - Otherwise, resolve from the graph database: next version (normal) or current latest (update).
 
     Parameters
     ----------
@@ -199,10 +199,10 @@ def load_files(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> list[str]:
-    """Load a specific list of extracted JSON files into Neo4j.
+    """Load a specific list of extracted JSON files into the graph database.
 
     All files in the list share a single resolved version (batch versioning):
-    the version is computed once from Neo4j before any writes, ensuring
+    the version is computed once from the graph database before any writes, ensuring
     consistent versioning across all documents loaded together.
 
     Parameters
@@ -276,7 +276,7 @@ def _load_document_object(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
-    """Load a single in-memory Document object into Neo4j.
+    """Load a single in-memory Document object into the graph database.
 
     Analogous to load_file() but receives a validated Document instance
     instead of a file path. Skips all disk I/O.
@@ -384,7 +384,7 @@ async def ingest_one(
     IngestionError
         If ``doc.raw_file_id`` is set but is not a stored raw file of the
         document's effective tenant (see ``ingest.raw_file_check``). Nothing is
-        written to Neo4j in that case.
+        written to the graph database in that case.
     """
     from scinr.newton.config import get_neo4j_sync_semaphore
     from scinr.newton.ingest.raw_file_check import verify_document
@@ -443,7 +443,7 @@ async def ingest_one_from_path(
     IngestionError
         If the file's ``raw_file_id`` is set but is not a stored raw file of the
         document's effective tenant (see ``ingest.raw_file_check``). Nothing is
-        written to Neo4j in that case.
+        written to the graph database in that case.
     """
     from scinr.newton.config import get_neo4j_sync_semaphore
     from scinr.newton.ingest.raw_file_check import verify_json_file
@@ -470,7 +470,7 @@ def load_documents(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> list[str]:
-    """Load a list of in-memory Document objects into Neo4j.
+    """Load a list of in-memory Document objects into the graph database.
 
     Analogous to load_files() but operates entirely in memory — no disk I/O.
     All documents in the list share a single resolved version (batch versioning),
@@ -546,7 +546,7 @@ def load_folder(
     created_by_user_id: str | None = None,
     job_id: str | None = None,
 ) -> list[str]:
-    """Load all extracted JSON files in a folder (recursively) into Neo4j.
+    """Load all extracted JSON files in a folder (recursively) into the graph database.
 
     All files in the folder share a single resolved version (batch versioning).
 

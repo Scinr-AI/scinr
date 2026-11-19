@@ -23,7 +23,7 @@ Document storage backends for raw file and page content archival.
 ## Scope Filters
 
 The read / delete scope is shared with the navigation API
-(`scinr.newton.utils.scope`); this module renders it for MongoDB.
+(`scinr.newton.utils.scope`); `scinr.newton.storage.filters` renders it for MongoDB.
 
 ::: scinr.newton.storage.filters
 
@@ -42,6 +42,33 @@ The read / delete scope is shared with the navigation API
 ### Raw File Repository
 
 ::: scinr.newton.storage.mongodb.raw_files
+
+## SQL Backend
+
+The PostgreSQL and SQLite repositories (`storage_backend="postgres"` or `"sqlite"`,
+configured with `sql_url`). Where the bytes live depends on the engine: PostgreSQL
+stores them in chunk tables in the same transaction as the owner row; SQLite writes
+one file per binary in `sqlite_files_dir` (by default a folder next to the database
+file). `find_inconsistencies()` reports files without a row and rows without a file
+after a crash; the library never calls it. On PostgreSQL the result is always clean.
+
+### Raw File Repository
+
+::: scinr.newton.storage.sql.raw_files
+
+### Page Repository
+
+::: scinr.newton.storage.sql.pages
+
+### Blob Storage
+
+::: scinr.newton.storage.sql.blobs
+    options:
+      members:
+        - find_inconsistencies
+        - Inconsistencies
+        - get_blob_store
+        - BlobStore
 
 ## Null Backend
 

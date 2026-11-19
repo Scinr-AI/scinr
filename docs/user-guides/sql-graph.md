@@ -2,7 +2,7 @@
 
 Neo4j is the default graph backend, but `scinr.newton` can keep the **whole graph** — the write path of the pipeline, the read-only [navigation API](graph-navigation.md), the raw files and pages, and the document snapshots — in **PostgreSQL** or **SQLite** instead. The public API does not change: the engine is chosen by configuration.
 
-- **PostgreSQL** (14 or later, no extension required) suits a team that already runs Postgres and does not want to operate two more databases. It can isolate tenants in the database itself with [Row-Level Security](#row-level-security-postgres-only).
+- **PostgreSQL** (no extension required; tested on 14 and 16, and the code enforces no minimum version) suits a team that already runs Postgres and does not want to operate two more databases. It can isolate tenants in the database itself with [Row-Level Security](#row-level-security-postgres-only).
 - **SQLite** needs no server: one `.db` file (plus a folder of binaries). It suits local tools, single-machine setups and tests.
 
 Neo4j keeps working exactly as before and remains the default (`graph_backend="neo4j"`).
@@ -16,7 +16,10 @@ pip install "scinr[postgres]"   # SQLAlchemy + psycopg 3
 pip install "scinr[sqlite]"     # SQLAlchemy + aiosqlite
 ```
 
-Neo4j is an optional extra since this version: install it with `pip install "scinr[neo4j]"` if you use `graph_backend="neo4j"`. See the [CHANGELOG](https://github.com/scinr-ai/scinr/blob/main/CHANGELOG.md). Without the SQL extras, `import scinr.newton` still works; the error appears when a SQL backend is first used.
+Neo4j is an optional extra since this version: install it with `pip install "scinr[neo4j]"` if you use `graph_backend="neo4j"`. Without the extras, `import scinr.newton` and `configure()` still work. What happens when a backend is first used without its extra depends on the component:
+
+- **Graph store** (`get_graph_store()`): an error that names the `pip install` to run (`ConfigurationError` for the SQL backends, `GraphConnectionError` for Neo4j).
+- **Navigator, storage and freeze factories** with a SQL backend: no friendly message. The SQL modules import SQLAlchemy directly, so you get the plain `ImportError` (`ModuleNotFoundError`). Install `scinr[postgres]` or `scinr[sqlite]` before using them.
 
 ---
 
@@ -39,6 +42,8 @@ configure(
 
 No Neo4j or MongoDB settings are needed: the Neo4j credentials are required only when `graph_backend="neo4j"`.
 
+newton creates the `.db` file on the first connection, but not its directory: the directory of `sql_url` (and of `sqlite_files_dir`, if you set it) must exist and be writable by the process.
+
 ### PostgreSQL
 
 ```python
@@ -52,6 +57,16 @@ configure(
     llm=...,
 )
 ```
+
+Quick local recipe with Docker. The database must exist before newton connects: `POSTGRES_DB` creates it. newton never runs `CREATE DATABASE` and never creates roles; it creates its schema and tables inside the database.
+
+```bash
+docker run -d --name scinr-pg -p 5432:5432 \
+  -e POSTGRES_USER=newton -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=scinr \
+  postgres:16
+```
+
+With that container the URL above works as is (the `newton` user it creates is a superuser, which is fine for trying simple mode and is **not** what you want for RLS, see below). On an existing server, create the database yourself and connect with a role that can create the schema in it. Roles are global to the server, so a role created once is valid for every database; if the server revoked `CONNECT` from `PUBLIC`, also run `GRANT CONNECT ON DATABASE scinr TO <role>`.
 
 Or with environment variables:
 
@@ -85,6 +100,31 @@ Isolation between tenants is the tenant filter newton adds to every query — th
 In **RLS mode** the database itself enforces which tenants a Postgres user can read and write, on top of the tenant filter newton always adds. newton connects with a **restricted** user that owns nothing and cannot create anything; an administrator prepares the schema and declares who sees what. SQLite has no RLS and always uses simple mode.
 
 The mode is detected from the schema, with no setting: the first call of `setup_sql_schema(..., enable_rls=True)` marks the schema as RLS, and from then on newton only verifies it.
+
+### Who does what
+
+| Who | Does | Must not |
+|---|---|---|
+| **Administrator** (the connection of `admin_url`, normally the owner of the tables) | `setup_sql_schema`, `grant_tenant_access`, `revoke_tenant_access`, `list_tenant_access`, version upgrades | Be used as the connection of the pipeline or the navigator (see below) |
+| **Runtime role** (`LOGIN`, not a superuser, no `BYPASSRLS`, not the owner of the tables) | Ingestion and queries on the tenants granted to it. On `newton_tenant_access` it can only `SELECT`, and only its own rows | Create objects or change grants |
+
+Why the administrator should not run the pipeline. The tables are created with `FORCE ROW LEVEL SECURITY`, so the policies apply to their owner as well as to the runtime role: an owner with no grant sees no tenant data. That does not make the administrator connection safe to use at runtime: superusers and roles with `BYPASSRLS` skip the policies entirely, and the owner can alter or disable the policies and edit `newton_tenant_access` (that table has RLS enabled but not forced, and the owner can change it). Keep those credentials out of the processes that handle tenant data.
+
+How many roles to create: one per isolation boundary, that is, one per set of tenants that must not see each other's data. Grant each role only the tenants it serves, one `grant_tenant_access` call per tenant, with `write=True` only for roles that ingest. A role that only reads uses the default `write=False`. `tenant_id=None` grants the public documents (stored as `'*'` in `newton_tenant_access`).
+
+### Why RLS is safe
+
+- One schema holds all tenants. Every data table has a policy that calls the functions `newton_can_read(tenant_id)` / `newton_can_write(tenant_id)`, and those look for a row in `newton_tenant_access` for `current_user` (the connected role) and that tenant.
+- A grant is a row in `newton_tenant_access`, not DDL: granting and revoking takes effect in the next transaction and changes no table or policy. The schema changes only when you upgrade `scinr` to a version with a new migration.
+- Because identity comes from `current_user`, the application cannot choose its tenants by setting a session variable: what a role sees is what the administrator inserted for it.
+
+Limits to keep in mind:
+
+- The isolation is per database role, not per tenant inside a process (see [Limitation](#limitation)).
+- Whoever has the administrator credentials (or a superuser or `BYPASSRLS` role) defeats it.
+- The catalog tables (`catalog_models`, `model_fields`, `entity_labels`, `themes`, `catalog_edges`) have no policy: every role sees them.
+
+**Connection poolers.** newton keeps no identity in session variables (it uses `current_user`), but it does issue `SET LOCAL search_path` and `SET TRANSACTION READ ONLY` inside each transaction. Both are transaction-scoped, which should be compatible with a pooler in transaction mode, but this has **not been verified against PgBouncer**.
 
 ### Step 1 — Create the runtime role (by hand)
 
@@ -191,7 +231,7 @@ The schema carries its version in the table `newton_schema`; migrations only go 
 | Mode | What to do when you upgrade `scinr` |
 |---|---|
 | Simple (default, and SQLite) | Nothing. The first use of the new version migrates the schema. |
-| RLS | Run `setup_sql_schema(admin_url, enable_rls=True, runtime_role=...)` again with the administrator. Until you do, the runtime role fails with a `SchemaVersionError` (a `GraphConnectionError` and a `ConfigurationError`) that says so. |
+| RLS | Run `setup_sql_schema(admin_url, enable_rls=True, runtime_role=...)` again with the administrator. Until you do, the runtime role fails with a `SchemaVersionError` (a `GraphConnectionError` and a `ConfigurationError`) that says so. It is not exported from `scinr.newton`: import it from `scinr.newton.sql.schema`. |
 
 A schema that is **newer** than the installed newton raises a `ConfigurationError` asking you to upgrade `scinr`.
 
@@ -205,13 +245,15 @@ The SQL backends are validated against Neo4j with the same scenarios and the sam
 |---|---|---|---|
 | **Full-text search** (`search_info_units`) | Lucene query syntax | `websearch_to_tsquery`: words are AND-ed, `"quoted phrases"`, `or`, and `-word` to exclude | FTS5: words and `"quoted phrases"` are AND-ed, a bare `or` becomes OR; `-word` exclusions are **dropped** (FTS5 has no unary NOT) |
 | **Full-text score** | Lucene score | `ts_rank` | `bm25` (sign-flipped so higher is better) |
-| **`Regex` filter** (`where=`) | Java regex, whole-string match (`=~`) | POSIX (`~`), anchored to the whole string | Python `re`, anchored to the whole string |
+| **`Regex` filter** (`where=`) | Java regex, whole-string match (`=~`) | POSIX (`~`) | Python `re` (`re.search`) |
 
 - **Score and order.** The set of results of a full-text search is what the equivalence suite compares; the score, and therefore the order by score, differs between engines. Do not depend on its absolute value.
-- **Regular expressions.** Common syntax (`\d`, classes, alternation, quantifiers) behaves alike; engine-specific constructs (lookarounds, flags, Unicode classes) do not. Write portable patterns if you may switch engines.
+- **Regular expressions.** The translator wraps the pattern as `^(?:pattern)$` for every engine. On SQLite the match is a `re.search` of that pattern, and in Python `$` also matches just before a trailing newline, so a value that ends in `\n` can match where Neo4j and PostgreSQL would not. Common syntax (`\d`, classes, alternation, quantifiers) behaves alike; engine-specific constructs (lookarounds, flags, Unicode classes) do not. Write portable patterns if you may switch engines.
 - **Restore (D1).** The Neo4j restore creates a relationship unless one with *all* the same properties already exists between the two nodes. In SQL a relationship is unique by its identity (type, ends and the properties that form part of its `MERGE`: `field_name`, `list_index`, `role`), so a snapshot relationship whose identity already exists with other properties is not created. It only differs for a snapshot holding two relationships of equal identity and different properties, which the pipeline never produces.
 - **`execute_raw`.** It takes **read-only SQL** with `:name` parameters (`dialect="postgres"` or `"sqlite"`, or omitted), not Cypher. The engine enforces it: a `READ ONLY` transaction in Postgres, `PRAGMA query_only` in SQLite; a statement that writes raises `NavigationError`. SQL is not parsed. On Postgres the configured schema is first in the `search_path`, so table names need no prefix; under RLS the query only sees the rows of the role's tenants. A `dialect=` that does not match the backend fails fast.
-- **`get_graph_summary` filtered by `created_by_user_id` or `job_id`.** On Neo4j this call currently fails with a `CypherSyntaxError`; the SQL backends answer it.
+- **`get_graph_summary` filtered by `created_by_user_id` or `job_id`.** On Neo4j this call fails with a `CypherSyntaxError` (the alias of the scoped count is also the variable of the array-provenance predicate); the SQL backends answer it. The equivalence suite records it in `KNOWN_DIFFERENCES` (`tests/equivalence/test_read_equivalence.py`).
+- **`shortest_path`.** The SQL backends run a bidirectional breadth-first search. When several shortest paths have the same length, the one chosen is the smallest by code-point order of its path string, the same on both engines; Neo4j returns one of them without a defined rule.
+- **Variable-length walks and performance.** `neighbors`, `subgraph` and the other variable-length walks search an index per direction and edge table instead of scanning every relationship.
 - **Unspecified order.** Where the API does not guarantee an order and the Neo4j query has no total `ORDER BY` (for example `neighbors`, `get_triples`, `list_entity_labels` on ties), Neo4j's order changes from run to run; the SQL backends return a deterministic one.
 - **Concurrency on SQLite.** There is one writer: write transactions are serialized (WAL mode, a 30-second busy timeout and `BEGIN IMMEDIATE`), so `parallel_docs > 1` works without `database is locked` errors, but writes do not run in parallel.
 - **Tenant isolation on SQLite** is the software filter only (no RLS).
@@ -223,7 +265,7 @@ Snapshots are portable: the format is the same on every backend (`SNAPSHOT_SCHEM
 
 ## Table Summary
 
-One table per node type (typed columns for what is filtered or sorted, plus a JSON `props` column for the rest) and one table of relationships. The columns are described in sections 5 and 6 of the [functional specification](https://github.com/scinr-ai/scinr/blob/main/plans/sql-graph-backends.md).
+One table per node type (typed columns for what is filtered or sorted, plus a JSON `props` column for the rest) and one table of relationships. The authoritative definition is the migrations in `scinr.newton.sql` (`migrations/postgres/` and `migrations/sqlite/`).
 
 | Group | Tables |
 |---|---|

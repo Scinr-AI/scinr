@@ -249,9 +249,9 @@ class Document(StrictModel):
     version: int = Field(
         default=1,
         description=(
-            "Version number of this document in Neo4j. "
+            "Version number of this document in the graph database. "
             "Informational only — the actual persisted version is always resolved "
-            "from Neo4j at ingest time and may differ from this default. "
+            "from the graph database at ingest time and may differ from this default. "
             "Never populated by the LLM."
         ),
     )

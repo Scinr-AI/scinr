@@ -433,9 +433,9 @@ class OrphanCollector(Protocol):
     gone; ``collect()`` deletes the candidates that ended up orphaned, and then
     the orphans among what those pointed at, until a round deletes nothing.
 
-    The candidates are opaque handles the collector keeps (in Neo4j, element
-    ids); the pipeline never inspects them. They only live in the process, so an
-    operation that dies between deleting the extraction results and ``collect()``
+    The candidates are opaque handles the collector keeps (e.g. element
+    ids in a graph database); the pipeline never inspects them. They only live in the
+    process, so an operation that dies between deleting the extraction results and ``collect()``
     loses them: its caller must leave a mark in the graph first and run
     ``GcOps.sweep_tenant`` instead when it finds the mark.
 

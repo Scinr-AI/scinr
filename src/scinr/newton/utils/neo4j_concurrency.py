@@ -1,5 +1,5 @@
 """
-utils/neo4j_concurrency.py — Compatibility shim for Neo4j concurrency semaphore.
+utils/neo4j_concurrency.py — Compatibility shim for the graph-store concurrency semaphore.
 
 The semaphore logic has moved to config.py alongside get_llm_semaphore() and
 reset_llm_semaphore(). This module re-exports those functions for backward

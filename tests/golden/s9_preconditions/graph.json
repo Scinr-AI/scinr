@@ -1,7 +1,7 @@
 {
   "extras": {
-    "annotation_missing": "Document 'ghost.txt' (tenant='golden-a') not found in Neo4j (latest=true). Run run_ingestion() before run_annotation_agent().",
-    "extraction_missing": "Document 'ghost.txt' (tenant='golden-a') not found in Neo4j (latest=true). Run run_ingestion() before run_entity_extraction_agent().",
+    "annotation_missing": "Document 'ghost.txt' (tenant='golden-a') not found in the graph database (latest=true). Run run_ingestion() before run_annotation_agent().",
+    "extraction_missing": "Document 'ghost.txt' (tenant='golden-a') not found in the graph database (latest=true). Run run_ingestion() before run_entity_extraction_agent().",
     "extraction_unannotated": "Document 'plain.txt' (tenant='golden-a') has no annotated StructureNodes. Run run_annotation_agent() before run_entity_extraction_agent()."
   },
   "nodes": [

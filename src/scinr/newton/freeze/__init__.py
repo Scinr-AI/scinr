@@ -2,8 +2,8 @@
 freeze — Pluggable backend for frozen-document snapshots.
 
 Mirrors ``storage/``: an abstract repository (:class:`FreezeRepository`), a
-factory driven by ``ScinrConfig.freeze_backend`` and a MongoDB/GridFS
-implementation. The graph side (export, freeze, restore) lives in
+factory driven by ``ScinrConfig.freeze_backend`` and the available
+implementations. The graph side (export, freeze, restore) lives in
 ``ingest/freeze.py`` and ``ingest/restore.py``.
 
 Usage

@@ -91,10 +91,10 @@ def _ocr_body_suffix(image_options: dict | None) -> bytes:
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 _BEST_EFFORT_HINT = (
-    "Sugerencia: si prefiere continuar la conversión omitiendo únicamente "
-    "las páginas que fallen (modo best-effort) en lugar de abortar el "
-    "documento completo, configure mistral_ocr_error_strategy='best_effort' "
-    "(o la variable de entorno MISTRAL_OCR_ERROR_STRATEGY=best_effort)."
+    "Hint: if you prefer to continue the conversion skipping only the "
+    "pages that fail (best-effort mode) instead of aborting the "
+    "whole document, set mistral_ocr_error_strategy='best_effort' "
+    "(or the environment variable MISTRAL_OCR_ERROR_STRATEGY=best_effort)."
 )
 
 

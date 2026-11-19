@@ -115,7 +115,7 @@ _VALID_REL_TYPE_RE = _re.compile(r'^[A-Z][A-Z0-9_]*$')
 
 
 def _validate_rel_type(rel_type: str, context: str) -> bool:
-    """Return True if rel_type is a valid Neo4j relationship type identifier.
+    """Return True if rel_type is a valid graph relationship type identifier.
 
     Valid: SCREAMING_SNAKE_CASE starting with a letter (e.g. HAS_PROCEDURE_TYPE).
     Logs a warning and returns False if invalid, preventing unsafe Cypher interpolation.
@@ -373,7 +373,7 @@ async def ensure_theme_structure(registry: ThemeRegistry, sink: CatalogSink) -> 
 # ensure_catalog_models()/ensure_theme_structure() are idempotent in the graph (they
 # use MERGE), but not idempotent at the Python-process level: if called N
 # times concurrently (e.g. once per document/task), they perform N redundant
-# round-trips to Neo4j. These "_once" wrappers ensure the underlying function
+# round-trips to the graph database. These "_once" wrappers ensure the underlying function
 # runs exactly once per process, even under concurrent asyncio callers, using
 # a check-lock-check pattern (a plain bool is not safe here: two tasks could
 # both read False before the first finishes writing).
@@ -406,7 +406,7 @@ async def ensure_catalog_models_once(registry: ThemeRegistry) -> None:
     """
     Process-memoized wrapper around :func:`ensure_catalog_models`.
 
-    Runs the real (Neo4j-idempotent) setup exactly once per process, even if
+    Runs the real (idempotent in the graph) setup exactly once per process, even if
     called concurrently from multiple tasks. Subsequent calls are a no-op.
     Use reset_catalog_memoization() to force a re-run (e.g. in tests or after
     configure() changes the underlying registry/driver).
@@ -426,7 +426,7 @@ async def ensure_theme_structure_once(registry: ThemeRegistry) -> None:
     """
     Process-memoized wrapper around :func:`ensure_theme_structure`.
 
-    Runs the real (Neo4j-idempotent) setup exactly once per process, even if
+    Runs the real (idempotent in the graph) setup exactly once per process, even if
     called concurrently from multiple tasks. Subsequent calls are a no-op.
     Use reset_catalog_memoization() to force a re-run (e.g. in tests or after
     configure() changes the underlying registry/driver).
@@ -448,7 +448,7 @@ def reset_catalog_memoization() -> None:
     and ensure_theme_structure_once.
 
     Call this after configure() so the next pipeline run re-executes the
-    Neo4j schema setup (e.g. after the theme registry or driver changed).
+    Graph schema setup (e.g. after the theme registry or driver changed).
     Also drops the cached locks, since an asyncio.Lock created under a
     now-closed event loop should not be reused by a later run.
     """

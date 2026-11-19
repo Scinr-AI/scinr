@@ -22,7 +22,7 @@ class RawFileRecord(BaseModel):
     Attributes
     ----------
     id:
-        ``str(ObjectId)`` of the document in the ``raw_files`` MongoDB
+        ``str(ObjectId)`` of the document in the ``raw_files`` document-store
         collection.  Use this value as ``raw_file_id`` when referencing
         this record from :class:`ConvertedPageRecord`.
     filename:
@@ -65,7 +65,7 @@ class ConvertedPageRecord(BaseModel):
     ----------
     id:
         ``str(ObjectId)`` of the document in the ``converted_pages``
-        MongoDB collection.
+        document-store collection.
     raw_file_id:
         Reference to the parent :attr:`RawFileRecord.id`.
     filename:
@@ -120,7 +120,7 @@ class PageImageRecord(BaseModel):
     Attributes
     ----------
     id:
-        ``str(ObjectId)`` of the document in the ``page_images`` MongoDB
+        ``str(ObjectId)`` of the document in the ``page_images`` document-store
         collection. Use this value as ``image_id`` when opening the binary.
     raw_file_id:
         Reference to the parent :attr:`RawFileRecord.id`.

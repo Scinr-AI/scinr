@@ -18,7 +18,7 @@ class DocumentResult:
     """Result of processing a single document through a pipeline stage.
 
     Attributes:
-        document_name: The Neo4j document_name of the processed document (the source file name with its extension, e.g. ``informe.pdf``, or the JSON file stem when the stage started from JSON files).
+        document_name: The graph `document_name` of the processed document (the source file name with its extension, e.g. ``informe.pdf``, or the JSON file stem when the stage started from JSON files).
         nodes_processed: Number of nodes (or files) successfully processed within this document.
             For stages 0-2, this is 1 for success, 0 for failure.
             For stages 3-4, this is the number of StructureNodes processed.

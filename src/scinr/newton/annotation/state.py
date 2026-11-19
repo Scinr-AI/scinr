@@ -7,10 +7,10 @@ from typing import Any, TypedDict
 
 
 class NodeContext(TypedDict):
-    """Context for a single StructureNode fetched from Neo4j."""
+    """Context for a single StructureNode fetched from the graph database."""
 
     node_id: str           # e.g. "5_3_1"
-    full_id: str           # e.g. "Amox 500 mg/0000/m3::2::5_3/5_3_1" (Neo4j :StructureNode.id)
+    full_id: str           # e.g. "Amox 500 mg/0000/m3::2::5_3/5_3_1" (graph :StructureNode.id)
     title: str
     role: str
     info_units: list[dict[str, Any]]    # list of InfoUnit dicts (info_unit_id, title, description, order)

@@ -1,6 +1,9 @@
 # Neo4j Graph Model
 
-`scinr` builds a connected graph representation of input documents and extracted domain concepts inside Neo4j. This guide covers the node types, relationships, and query patterns produced by the `scinr.newton` extraction engine.
+!!! note "Graph engines"
+    This guide describes the graph in Neo4j terms (labels, relationships, Cypher). The same graph can be kept in PostgreSQL or SQLite instead (`graph_backend="postgres"` / `"sqlite"`), as tables; see [SQL Graph Backends](sql-graph.md) for the table layout and the known differences.
+
+`scinr` builds a connected graph representation of input documents and extracted domain concepts, by default inside Neo4j. This guide covers the node types, relationships, and query patterns produced by the `scinr.newton` extraction engine.
 
 The graph serves as the primary output store. After a document passes through the Newton pipeline, all structural elements and extracted entities are persisted as interconnected nodes and relationships, enabling complex cross-document queries that would be difficult or impossible with a flat relational schema.
 

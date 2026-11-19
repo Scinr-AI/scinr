@@ -117,8 +117,9 @@ One warm-up call precedes each series and is not counted.
 * `get_info_units(document_key=...)` -> there is no document-level method: `get_info_units` takes a
   `node_id`. The closest is one node's info units. (`get_document_entities` and friends do
   document-level reads, but not of info units.)
-* `shortest_path` is called with `edge_types=["SUPPLIED_BY", "RELATED_TO"]`. Without it the SQL
-  navigator may take minutes per call on one document (see "Findings while writing the bench").
+* `shortest_path` is called with `edge_types=["SUPPLIED_BY", "RELATED_TO"]`. (Historical: when the
+  bench was written, omitting it made the SQL navigator take minutes per call; the BFS rewrite
+  superseded that, see "Findings while writing the bench".)
 * `neo4j` has no SQL storage, so its freeze snapshots go to a throwaway SQLite file
   (`freeze_backend="sqlite"`); `freeze` / `restore` timings for neo4j therefore include that
   snapshot store, not MongoDB. Postgres and SQLite use their own engine for snapshots.
@@ -165,6 +166,11 @@ SCINR_SQL_ALLOW_WIPE=1 .venv/bin/python scripts/sql_bench/run.py \
 ```
 
 ## Findings while writing the bench
+
+> **Historical, superseded for `shortest_path`.** The first finding below predates the rewrite of
+> SQL `shortest_path` as a bidirectional level-synchronous BFS. After it, at about 20k nodes,
+> SQLite `shortest_path` has a p50 of 7-8 ms with `edge_types` (scoped) and 5-8 ms without
+> `edge_types`; Postgres 9-14 ms. The figures in the bullet are kept as they were measured then.
 
 * `SqlGraphNavigator.shortest_path` without `edge_types`, on SQLite, did not finish in minutes for
   one pair of instances of a ~700-node document (the bounded traversal explodes over all edge

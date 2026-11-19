@@ -2,7 +2,7 @@
 
 > Part of the [scinr](../../README.md) library. `scinr.newton` is the document ingestion module. See root README for installation, quick start, and platform overview.
 
-> **Requires Python 3.11+** and a running Neo4j 5.x instance.
+> **Requires Python 3.11+** and one graph engine: a running Neo4j 5+ instance (`pip install 'scinr[neo4j]'`), **or** PostgreSQL (`scinr[postgres]`), **or** SQLite (`scinr[sqlite]`). See [SQL Graph Backends](../../../docs/user-guides/sql-graph.md).
 
 ## Table of Contents
 
@@ -26,11 +26,17 @@ from scinr.newton import (
     run_annotation, run_entity_extraction, run_tabular_pipeline,
     delete_document, collect_orphans,
     freeze_document, restore_document, export_document_snapshot,
+    get_graph_navigator, graph_navigator, GraphNavigator,
+    setup_sql_schema, grant_tenant_access, revoke_tenant_access, list_tenant_access,
+    SchemaStatus, TenantAccess,
     DocumentResult, StageResult, PipelineResult, DeletionResult,
     OrphanCollectionResult, FreezeResult, RestoreResult,
     ScinrError, ConfigurationError, PreconditionError,
     ExtractionError, IngestionError, ModelError, StorageError, FreezeError,
-    ConversionError,
+    ConversionError, NavigationError, UnsupportedOperationError,
+    GraphError, GraphConfigurationError, GraphConnectionError, GraphAuthenticationError,
+    TransientGraphError, GraphResourceError, GraphConstraintError,
+    DocumentVersionConflict, GraphQueryError, TenantAccessError,
 )
 ```
 
@@ -59,23 +65,29 @@ configure(
 
 | Parameter | Type | Env Var | Default | Description |
 |---|---|---|---|---|
-| `llm` | `BaseChatModel \| None` | — | `None` | LangChain chat model for all LLM calls. Build it yourself and pass it in — there is no `MODEL_ID` / env-var fallback. Optional at `configure()` time; required for the extraction / annotation / entity-extraction stages and tabular normalization. |
+| `llm` | `BaseChatModel \| None` | — | `None` | LangChain chat model for all LLM calls. Build it yourself and pass it in — this is the usual way. If `llm` is omitted and the environment variable `MODEL_ID` is set, a Bedrock `ChatBedrockConverse` is built from it (reads `AWS_DEFAULT_REGION`, default `us-east-1`, and `MAX_TOKENS`, default `65536`). Optional at `configure()` time; required for the extraction / annotation / entity-extraction stages and tabular normalization. |
 | `repair_llm` | `BaseChatModel` | — | falls back to `llm` | Separate model for JSON repair loop. Recommended: a smaller/cheaper model. |
+| `graph_backend` | `Literal["neo4j", "postgres", "sqlite"]` | `GRAPH_BACKEND` | `"neo4j"` | Engine of the graph (write path and navigation API). The `neo4j_*` credentials are required only for `"neo4j"`. |
 | `neo4j_uri` | `str` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt connection URI. |
-| `neo4j_user` | `str` | `NEO4J_USER` or `NEO4J_AUTH` | — | Neo4j username. Required. Also parsed from `NEO4J_AUTH=user/password`. |
-| `neo4j_password` | `str` | `NEO4J_PASSWORD` or `NEO4J_AUTH` | — | Neo4j password. Required. Also parsed from `NEO4J_AUTH=user/password`. |
-| `neo4j_database` | `str` | `NEO4J_DATABASE` | — | Neo4j target database name. Required. |
+| `neo4j_user` | `str` | `NEO4J_USER` or `NEO4J_AUTH` | — | Neo4j username. Required when `graph_backend="neo4j"`. Also parsed from `NEO4J_AUTH=user/password`. |
+| `neo4j_password` | `str` | `NEO4J_PASSWORD` or `NEO4J_AUTH` | — | Neo4j password. Required when `graph_backend="neo4j"`. Also parsed from `NEO4J_AUTH=user/password`. |
+| `neo4j_database` | `str` | `NEO4J_DATABASE` | — | Neo4j target database name. Required when `graph_backend="neo4j"`. |
+| `sql_url` | `str` | `SQL_URL` | `""` | SQLAlchemy URL of the SQL backends (`postgresql://…` or `sqlite:///…`). Required when any of `graph_backend`, `storage_backend` or `freeze_backend` is `"postgres"` / `"sqlite"`; they share it and must match its scheme. |
+| `sql_schema` | `str` | `SQL_SCHEMA` | `"newton"` | Postgres schema that holds the tables. Ignored by SQLite. |
+| `sql_pool_size` | `int` | `SQL_POOL_SIZE` | `10` | Connection pool size of each SQL engine (minimum 1). |
+| `sql_fulltext_config` | `str` | `SQL_FULLTEXT_CONFIG` | `"simple"` | Postgres text-search configuration. Applied only when the schema is created. |
+| `sqlite_files_dir` | `str` | `SQLITE_FILES_DIR` | `""` | Folder for the binaries kept by the SQLite backend. Empty: `<db path without extension>.files/` next to the `.db`. |
 | `enabled_base_themes` | `list[ThemePath \| str] \| None` | — | `None` (all) | Whitelist of built-in theme paths to activate. `None` activates all. |
 | `enabled_user_themes` | `list[str] \| None` | — | `None` (all) | Whitelist of user-defined theme paths to activate. `None` activates all. |
 | `extra_models_paths` | `list[str \| Path] \| None` | `SCINR_EXTRA_MODELS_PATHS` | `[]` | Filesystem directories scanned for additional user themes. Colon-separated in env var. |
-| `storage_backend` | `Literal["none", "mongodb", "custom"]` | `STORAGE_BACKEND` | `"none"` | Storage backend. `"none"` silently skips all storage calls. |
+| `storage_backend` | `Literal["none", "mongodb", "postgres", "sqlite", "custom"]` | `STORAGE_BACKEND` | `"none"` | Storage backend. `"none"` silently skips all storage calls. |
 | `mongodb_uri` | `str` | `MONGODB_URI` | `mongodb://localhost:27017` | MongoDB connection URI. |
 | `mongodb_database` | `str` | `MONGODB_DATABASE` | `"scinr"` | MongoDB database name. |
 | `mongodb_raw_files_collection` | `str` | `MONGODB_RAW_FILES_COLLECTION` | `"raw_files"` | Collection for raw file metadata. |
 | `mongodb_pages_collection` | `str` | `MONGODB_PAGES_COLLECTION` | `"converted_pages"` | Collection for converted page content. |
 | `mongodb_gridfs_bucket` | `str` | `MONGODB_GRIDFS_BUCKET` | `"raw_binaries"` | GridFS bucket for raw binary files. |
 | `custom_storage` | `tuple \| None` | — | `None` | `(RawFileRepository, PageRepository)` when `storage_backend="custom"`. |
-| `freeze_backend` | `Literal["none", "mongodb", "custom"] \| None` | `FREEZE_BACKEND` | the resolved `storage_backend` | Backend for document snapshots (`freeze_document()`, `restore_document()`). Passing `"none"` disables freezing even with `storage_backend="mongodb"`. |
+| `freeze_backend` | `Literal["none", "mongodb", "postgres", "sqlite", "custom"] \| None` | `FREEZE_BACKEND` | the resolved `storage_backend` | Backend for document snapshots (`freeze_document()`, `restore_document()`). Passing `"none"` disables freezing even with `storage_backend="mongodb"`. |
 | `mongodb_frozen_collection` | `str` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` | Collection for snapshot metadata. |
 | `mongodb_frozen_gridfs_bucket` | `str` | `MONGODB_FROZEN_GRIDFS_BUCKET` | `"frozen_snapshots"` | GridFS bucket for snapshot files. |
 | `custom_freeze_storage` | `FreezeRepository \| None` | — | `None` | Snapshot repository when `freeze_backend="custom"`. |
@@ -89,7 +101,7 @@ configure(
 | `full_docstring` | `bool \| None` | `FULL_DOCSTRING` | `True` | Use the full class docstring (vs. only its first line) when building the model catalog description for LLM prompts (annotation stage) and Neo4j `CatalogModel.description`. |
 | `extraction_batch_size` | `int \| None` | `EXTRACTION_BATCH_SIZE` | `1` | Pages processed per extraction chunk (sliding window step). |
 | `llm_concurrency` | `int \| None` | `LLM_CONCURRENCY` | `4` | Max concurrent LLM calls (asyncio semaphore size). |
-| `neo4j_concurrency` | `int \| None` | `NEO4J_CONCURRENCY` | `10` | Max concurrent Neo4j session writes during annotation and entity extraction. |
+| `neo4j_concurrency` | `int \| None` | `NEO4J_CONCURRENCY` | `10` | Max concurrent graph write sessions during annotation and entity extraction (the name is historical; it applies to every graph backend). |
 | `consolidation_token_safety_margin` | `float \| None` | `CONSOLIDATION_TOKEN_SAFETY_MARGIN` | `0.75` | Fraction of `max_tokens` used as the output-token ceiling for the Stage 1 `fast_extraction` consolidation LLM call, when `consolidation_max_output_tokens` is unset. |
 | `consolidation_max_output_tokens` | `int \| None` | `CONSOLIDATION_MAX_OUTPUT_TOKENS` | `None` | Explicit output-token ceiling for the consolidation call's decisions array. Derived from `max_tokens * consolidation_token_safety_margin` when unset. |
 | `consolidation_max_input_tokens` | `int \| None` | `CONSOLIDATION_MAX_INPUT_TOKENS` | `65536` | Input-token ceiling governing the batch size of the consolidation call's sliding-window algorithm: `all_chunks` is processed in contiguous batches (each batch's backward buffer is only the immediately preceding batch) kept under this ceiling, instead of sending the full document pool in one call. Passing `None` explicitly (bypassing `configure()`) skips the ceiling check as a defensive fallback only. |
@@ -97,7 +109,7 @@ configure(
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
 
-**Raises:** `ConfigurationError` — if Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, or if `storage_backend` or `freeze_backend` is invalid. (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
+**Raises:** `ConfigurationError` — if `graph_backend` is `"neo4j"` and the Neo4j credentials (`neo4j_user` / `neo4j_password` / `neo4j_database`) are missing, if `graph_backend`, `storage_backend` or `freeze_backend` is invalid, or if the SQL settings are inconsistent (`sql_url` missing, its scheme not matching the backends, Postgres and SQLite mixed). (An LLM stage run without a configured `llm` fails at that stage, not in `configure()`.)
 
 ---
 
@@ -406,16 +418,16 @@ All exceptions inherit from `ScinrError`, so the entire family can be caught wit
 
 ```
 ScinrError (base)
-├── ConfigurationError   — library misconfigured (LLM missing, invalid storage backend)
-│   └── GraphConfigurationError — graph backend not configured (Neo4j credentials missing)
+├── ConfigurationError   — library misconfigured (LLM missing, invalid backend, missing Neo4j credentials or `sql_url`)
+│   └── GraphConfigurationError — graph backend not configured (raised by the graph drivers, e.g. empty `sql_url`)
 ├── PreconditionError    — pipeline called out of order (e.g. entity extraction before annotation)
 ├── ExtractionError      — LLM extraction failed after all retries exhausted
 ├── IngestionError       — ingesting a document failed (e.g. unverifiable raw_file_id); graph-engine failures are GraphError
 ├── ModelError           — Pydantic model cannot be resolved or is invalid (bad catalog.py)
-├── StorageError         — MongoDB unavailable or misconfigured
+├── StorageError         — storage backend (MongoDB, PostgreSQL or SQLite) unavailable or misconfigured
 ├── FreezeError          — a document cannot be frozen, restored or snapshotted (already frozen, nothing to restore, snapshot missing or of another tenant)
 ├── ConversionError      — file converter failed to process a source file
-├── NavigationError      — invalid graph-navigation input (UnsupportedOperationError, ScopeError)
+├── NavigationError      — invalid graph-navigation input (UnsupportedOperationError, ScopeError; ScopeError is also a StorageError)
 └── GraphError           — anything that comes from the graph engine
     ├── GraphConnectionError     — engine unreachable
     │   └── GraphAuthenticationError — credentials rejected
@@ -423,7 +435,8 @@ ScinrError (base)
     ├── GraphResourceError       — engine out of resources (reduce batch size)
     ├── GraphConstraintError     — a write violated a constraint
     │   └── DocumentVersionConflict — document version already ingested
-    └── GraphQueryError          — query rejected by the engine
+    ├── GraphQueryError          — query rejected by the engine
+    └── TenantAccessError        — the database refused the operation for the tenant (Postgres Row-Level Security); also a StorageError
 ```
 
 ---
@@ -686,9 +699,11 @@ Every ingest run auto-increments the `version` counter and marks only the newest
 
 ## Storage Layer
 
-The storage layer is **fully optional**. When `STORAGE_BACKEND` is not set (or set to `"none"`), the pipeline runs without MongoDB and all storage calls are silently skipped.
+The storage layer is **fully optional**. When `STORAGE_BACKEND` is not set (or set to `"none"`), the pipeline runs without a storage backend and all storage calls are silently skipped.
 
-When enabled (`STORAGE_BACKEND=mongodb`), the storage layer persists:
+The valid values are `none`, `mongodb`, `postgres`, `sqlite` and `custom`. The collections below describe the MongoDB backend; for PostgreSQL and SQLite (tables instead of collections, `sql_url`, and where the binaries live) see [Storage Backends](../../../docs/user-guides/storage-backends.md#postgresql-and-sqlite-backends) and [SQL Graph Backends](../../../docs/user-guides/sql-graph.md).
+
+When enabled with MongoDB (`STORAGE_BACKEND=mongodb`), the storage layer persists:
 
 | Collection / Bucket | Contents |
 |---|---|
@@ -750,7 +765,7 @@ configure(
 
 > **Breaking change (multi-tenancy):** `RawFileRepository.get` / `open` / `open_with_record` / `list_raw_files` and `PageRepository.get_pages_by_ids` are new required abstract methods, writes take keyword-only `tenant_id` / `created_by_user_id` / `job_id`, and reads / deletes take the navigation scope (`tenant_id`, `include_public`, `created_by_user_id`, `job_id`; `None` = all tenants). See `docs/user-guides/storage-backends.md#multi-tenancy`.
 
-The storage backend abstraction lives in `src/scinr/newton/storage/base.py` and `src/scinr/newton/storage/factory.py`. Additional backends (e.g. PostgreSQL, S3) can be added by implementing the base interface.
+The storage backend abstraction lives in `src/scinr/newton/storage/base.py` and `src/scinr/newton/storage/factory.py`. Besides MongoDB, the PostgreSQL and SQLite backends live in `src/scinr/newton/storage/sql/`. Additional backends (e.g. S3) can be added by implementing the base interface and passing them with `storage_backend="custom"`.
 
 ---
 

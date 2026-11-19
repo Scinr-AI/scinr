@@ -1,7 +1,7 @@
 """
 config.py — Global scinr-ingest configuration.
 
-Call configure() once at startup to set LLM, Neo4j, storage and other
+Call configure() once at startup to set LLM, graph backend, storage and other
 pipeline parameters. All pipeline modules read settings via get_config().
 
 Parameter resolution order for all parameters:
@@ -364,9 +364,10 @@ def configure(
         repair_llm: LangChain BaseChatModel for the JSON repair loop. Falls back to `llm` if None;
             stays None when no LLM is configured (navigation-only mode).
         neo4j_uri: Neo4j connection URI. Env: `NEO4J_URI`. Default: `bolt://localhost:7687`.
-        neo4j_user: Neo4j username. Env: `NEO4J_USER`. Required.
-        neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`. Required.
-        neo4j_database: Neo4j target database name. Env: `NEO4J_DATABASE`. Required.
+        neo4j_user: Neo4j username. Env: `NEO4J_USER`. Required when `graph_backend='neo4j'` (default).
+        neo4j_password: Neo4j password. Env: `NEO4J_PASSWORD`. Required when `graph_backend='neo4j'` (default).
+        neo4j_database: Neo4j target database name. Env: `NEO4J_DATABASE`. Required when
+            `graph_backend='neo4j'` (default).
         graph_backend: Backend for the graph (write path and the read-only navigation API
             `scinr.newton.navigation`): `'neo4j'` (default), `'postgres'` or `'sqlite'`.
             Env: `GRAPH_BACKEND`. The Neo4j credentials are required only for `'neo4j'`.
@@ -418,115 +419,118 @@ def configure(
             `<db path without extension>.files/` next to the `.db`. Env: `SQLITE_FILES_DIR`.
         extra_converters: Dict mapping file extensions to custom `BaseConverter` subclasses.
         mistral_api_key: Mistral API key for PDF OCR conversion.
-        mistral_ocr_safe_max_pages: Máximo de páginas por chunk de PDF enviado a la
-            API de Mistral OCR antes de dividirlo. Env: `MISTRAL_OCR_SAFE_MAX_PAGES`.
+        mistral_ocr_safe_max_pages: Maximum number of pages per PDF chunk sent to the
+            Mistral OCR API before splitting it. Env: `MISTRAL_OCR_SAFE_MAX_PAGES`.
             Default: `900`.
-        mistral_ocr_safe_max_bytes: Máximo de bytes por chunk de PDF (tamaño ya
-            serializado) enviado a la API de Mistral OCR antes de dividirlo.
+        mistral_ocr_safe_max_bytes: Maximum number of bytes per PDF chunk (already
+            serialized size) sent to the Mistral OCR API before splitting it.
             Env: `MISTRAL_OCR_SAFE_MAX_BYTES`. Default: `45 * 1024 * 1024` (45 MiB).
-    mistral_ocr_max_retries: Número máximo de intentos por chunk ante errores
-        de red o HTTP reintentables. Env: `MISTRAL_OCR_MAX_RETRIES`. Default: `15`.
-        mistral_ocr_retry_backoff_seconds: Base (en segundos) del backoff exponencial
-            entre reintentos. Env: `MISTRAL_OCR_RETRY_BACKOFF_SECONDS`. Default: `2.0`.
-        mistral_ocr_chunk_concurrency: Reservado para paralelismo futuro entre chunks
-            de PDF; actualmente no se usa (procesamiento siempre secuencial).
+        mistral_ocr_max_retries: Maximum number of attempts per chunk on network or
+            retryable HTTP errors. Env: `MISTRAL_OCR_MAX_RETRIES`. Default: `15`.
+        mistral_ocr_retry_backoff_seconds: Base (in seconds) of the exponential backoff
+            between retries. Env: `MISTRAL_OCR_RETRY_BACKOFF_SECONDS`. Default: `2.0`.
+        mistral_ocr_chunk_concurrency: Reserved for future parallelism across PDF
+            chunks; currently unused (processing is always sequential).
             Env: `MISTRAL_OCR_CHUNK_CONCURRENCY`. Default: `1`.
-        mistral_ocr_error_strategy: Estrategia de manejo de errores al convertir
-            PDFs divididos en chunks: `'fail_fast'` (default, aborta el documento
-            completo si algún chunk falla) o `'best_effort'` (omite los chunks que
-            fallen y continúa con el resto). Env: `MISTRAL_OCR_ERROR_STRATEGY`.
+        mistral_ocr_error_strategy: Error-handling strategy when converting PDFs split
+            into chunks: `'fail_fast'` (default, aborts the whole document if any
+            chunk fails) or `'best_effort'` (skips the chunks that fail and continues
+            with the rest). Env: `MISTRAL_OCR_ERROR_STRATEGY`.
             Default: `'fail_fast'`.
-            Nota: esta estrategia solo aplica a fallos de red/API por chunk
-            (reintentos agotados, errores HTTP no reintentables) una vez que
-            el PDF ya fue dividido en chunks. NO cubre el caso en que la
-            propia partición inicial falla estructuralmente (`PdfSplitError`,
-            una página individual excede `mistral_ocr_safe_max_bytes` incluso
-            aislada) — en ese caso el documento aborta siempre,
-            independientemente del valor de `mistral_ocr_error_strategy`.
-        mistral_ocr_concurrency: Máximo de PDFs en conversión OCR a la vez (desde
-            que se lee el PDF hasta que llega la respuesta de su último chunk), por
-            event loop. Acota la memoria del OCR con independencia de
-            `parallel_docs`: cada conversión mantiene como mucho un chunk y su
-            respuesta. Env: `MISTRAL_OCR_CONCURRENCY`. Default: `2`.
-        mistral_ocr_image_max_pages: Páginas por chunk de PDF cuando se piden las
-            imágenes embebidas a Mistral OCR (solo con `describe_embedded_images` y un
-            `vision_llm`): la respuesta con imágenes pesa mucho más que la de solo
-            texto. Se aplica el menor entre este valor y `mistral_ocr_safe_max_pages`.
+            Note: this strategy only applies to per-chunk network/API failures
+            (retries exhausted, non-retryable HTTP errors) once the PDF has already
+            been split into chunks. It does NOT cover the case where the initial
+            split itself fails structurally (`PdfSplitError`, a single page exceeds
+            `mistral_ocr_safe_max_bytes` even in isolation) — in that case the
+            document always aborts, regardless of the value of
+            `mistral_ocr_error_strategy`.
+        mistral_ocr_concurrency: Maximum number of PDFs undergoing OCR conversion at
+            the same time (from reading the PDF until the response for its last chunk
+            arrives), per event loop. Bounds OCR memory independently of
+            `parallel_docs`: each conversion holds at most one chunk and its
+            response. Env: `MISTRAL_OCR_CONCURRENCY`. Default: `2`.
+        mistral_ocr_image_max_pages: Pages per PDF chunk when embedded images are
+            requested from Mistral OCR (only with `describe_embedded_images` and a
+            `vision_llm`): the response with images is much heavier than a text-only
+            one. The smaller of this value and `mistral_ocr_safe_max_pages` applies.
             Env: `MISTRAL_OCR_IMAGE_MAX_PAGES`. Default: `50`.
-        vision_llm: LangChain `BaseChatModel` multimodal (acepta imágenes) para
-            describir imágenes embebidas, imágenes sueltas y fotogramas de vídeo. No
-            necesita `with_structured_output`. **No recurre a `llm`**: sin él no se
-            describe ninguna imagen embebida, y los ficheros de imagen fallan con un
-            error que explica cómo configurarlo. Default: `None`.
-        transcriber: Instancia de `scinr.newton.media.Transcriber` para audio y vídeo
-            (por ejemplo `OpenAICompatibleTranscriber` o `FasterWhisperTranscriber`).
-            Sin él, los ficheros de audio (y los vídeos con pista de audio) fallan con
-            un error que explica cómo configurarlo. Default: `None`.
-        describe_embedded_images: Describir las imágenes embebidas de PDF, DOCX y PPTX
-            e insertar la descripción en el markdown de su página. **Solo actúa si hay
-            un `vision_llm`**; sin él no se piden imágenes a Mistral ni se extraen
-            blobs. Env: `DESCRIBE_EMBEDDED_IMAGES`. Default: `True`.
-        store_described_images: Guarda el original de cada imagen incrustada que se
-            describe. Solo actúa con un backend de storage persistente cuyo
-            `stores_images` sea `True`. Env: `STORE_DESCRIBED_IMAGES`. Default: `True`.
-        store_video_frames: Guarda cada fotograma descrito, con su instante. En vídeos
-            largos ocupa unos `video_frames_per_minute × minutos` JPEG.
+        vision_llm: Multimodal LangChain `BaseChatModel` (accepts images) used to
+            describe embedded images, standalone images and video frames. It does not
+            need `with_structured_output`. **It does not fall back to `llm`**: without
+            it no embedded image is described, and image files fail with an error
+            explaining how to configure it. Default: `None`.
+        transcriber: Instance of `scinr.newton.media.Transcriber` for audio and video
+            (for example `OpenAICompatibleTranscriber` or `FasterWhisperTranscriber`).
+            Without it, audio files (and videos with an audio track) fail with an
+            error explaining how to configure it. Default: `None`.
+        describe_embedded_images: Describe the embedded images of PDF, DOCX and PPTX
+            files and insert the description into the markdown of their page. **Only
+            takes effect when a `vision_llm` is set**; without it no images are
+            requested from Mistral and no blobs are extracted.
+            Env: `DESCRIBE_EMBEDDED_IMAGES`. Default: `True`.
+        store_described_images: Keep the original of each embedded image that gets
+            described. Only takes effect with a persistent storage backend whose
+            `stores_images` is `True`. Env: `STORE_DESCRIBED_IMAGES`. Default: `True`.
+        store_video_frames: Keep each described frame, with its timestamp. For long
+            videos this amounts to about `video_frames_per_minute × minutes` JPEGs.
             Env: `STORE_VIDEO_FRAMES`. Default: `True`.
-        media_error_strategy: Qué hacer cuando falla una imagen embebida, un tramo de
-            audio o vídeo o un fotograma: `'best_effort'` (default: se omite, se
-            registra en `missing_images` / `missing_segments` del documento y se
-            sigue) o `'fail_fast'` (falla el documento). Env: `MEDIA_ERROR_STRATEGY`.
-        strip_location: Con `True` (default) la ubicación GPS de las imágenes no se lee
-            ni se guarda. Env: `STRIP_LOCATION`.
-        image_max_side_px: Lado mayor, en píxeles, de las imágenes enviadas al
-            `vision_llm` (se reducen antes de enviarlas). Env: `IMAGE_MAX_SIDE_PX`.
+        media_error_strategy: What to do when an embedded image, an audio or video
+            segment or a frame fails: `'best_effort'` (default: it is skipped,
+            recorded in the document's `missing_images` / `missing_segments`, and
+            processing continues) or `'fail_fast'` (the document fails).
+            Env: `MEDIA_ERROR_STRATEGY`.
+        strip_location: With `True` (default) the GPS location of images is neither
+            read nor stored. Env: `STRIP_LOCATION`.
+        image_max_side_px: Longest side, in pixels, of the images sent to the
+            `vision_llm` (they are downscaled before sending). Env: `IMAGE_MAX_SIDE_PX`.
             Default: `1568`.
-        image_min_side_px: Las imágenes embebidas cuyo lado menor es inferior a este
-            valor se consideran triviales (iconos, separadores) y no se describen.
+        image_min_side_px: Embedded images whose shorter side is below this value are
+            considered trivial (icons, separators) and are not described.
             Env: `IMAGE_MIN_SIDE_PX`. Default: `64`.
-        max_images_per_page: Máximo de imágenes embebidas descritas por página; se
-            conservan las de mayor área. Env: `MAX_IMAGES_PER_PAGE`. Default: `10`.
-        image_decode_concurrency: Imágenes (embebidas, sueltas o fotogramas) que se
-            leen, decodifican y reducen a la vez, por event loop. Decodificar es lo
-            que cuesta memoria (una foto de 12 MP son unos 36 MB de píxeles): el pico
-            crece con este valor. Las llamadas al modelo siguen limitadas por
-            `llm_concurrency`, así que subirlo solo acelera cuando el modelo responde
-            más rápido de lo que se decodifica. Mínimo `1`. Env:
-            `IMAGE_DECODE_CONCURRENCY`. Default: `1`.
-        media_segment_seconds: Duración, en segundos, de cada tramo de audio o vídeo
-            (una página por tramo). Mínimo `10`. Env: `MEDIA_SEGMENT_SECONDS`.
+        max_images_per_page: Maximum number of embedded images described per page; the
+            ones with the largest area are kept. Env: `MAX_IMAGES_PER_PAGE`. Default: `10`.
+        image_decode_concurrency: Number of images (embedded, standalone or frames)
+            read, decoded and downscaled at the same time, per event loop. Decoding is
+            what costs memory (a 12 MP photo is about 36 MB of pixels): the peak grows
+            with this value. Model calls remain limited by `llm_concurrency`, so
+            raising it only speeds things up when the model answers faster than images
+            are decoded. Minimum `1`. Env: `IMAGE_DECODE_CONCURRENCY`. Default: `1`.
+        media_segment_seconds: Duration, in seconds, of each audio or video segment
+            (one page per segment). Minimum `10`. Env: `MEDIA_SEGMENT_SECONDS`.
             Default: `300`.
-        media_min_segment_seconds: Duración mínima del último tramo. Si el resto final
-            es más corto, el corte anterior se adelanta (al segundo entero) para que
-            el último tramo dure al menos esto: 300,05 s con tramos de 300 s dan
-            290 s + 10,05 s. Evita tramos de milisegundos, que algunos proveedores
-            rechazan. `0` lo desactiva. No puede superar la mitad de
-            `media_segment_seconds` (si no se indica, se limita a ella). Env:
-            `MEDIA_MIN_SEGMENT_SECONDS`. Default: `10`.
-        media_language: Idioma del audio (código ISO 639-1, p.ej. `'es'`) o `None` para
-            que el transcriptor lo detecte. Env: `MEDIA_LANGUAGE`. Default: `None`.
-        max_media_duration_seconds: Duración máxima aceptada para un audio o vídeo;
-            superarla es un `ConversionError` antes de gastar nada. `None` = sin
-            límite. Env: `MAX_MEDIA_DURATION_SECONDS` (`none` = sin límite).
+        media_min_segment_seconds: Minimum duration of the last segment. If the final
+            remainder is shorter, the previous cut is moved earlier (to the whole
+            second) so that the last segment lasts at least this long: 300.05 s with
+            300 s segments gives 290 s + 10.05 s. Avoids millisecond-long segments,
+            which some providers reject. `0` disables it. It cannot exceed half of
+            `media_segment_seconds` (if not given, it is capped to that).
+            Env: `MEDIA_MIN_SEGMENT_SECONDS`. Default: `10`.
+        media_language: Audio language (ISO 639-1 code, e.g. `'es'`) or `None` to let
+            the transcriber detect it. Env: `MEDIA_LANGUAGE`. Default: `None`.
+        max_media_duration_seconds: Maximum accepted duration for an audio or video
+            file; exceeding it is a `ConversionError` raised before spending anything.
+            `None` = no limit. Env: `MAX_MEDIA_DURATION_SECONDS` (`none` = no limit).
             Default: `14400` (4 h).
-        video_frames_per_minute: Fotogramas por minuto que se describen en los vídeos
-            (muestreo uniforme). `0` = solo transcripción. Env:
-            `VIDEO_FRAMES_PER_MINUTE`. Default: `2.0`.
-        media_concurrency: Máximo de audios y vídeos en conversión a la vez, por event
-            loop, con independencia de `parallel_docs`. Env: `MEDIA_CONCURRENCY`.
-            Default: `1`.
-        ffmpeg_path, ffprobe_path: Rutas a los binarios `ffmpeg` / `ffprobe`
-            (requisitos del sistema para audio y vídeo; no se instalan con el
-            paquete). `None` = buscarlos en el `PATH`. Env: `FFMPEG_PATH`,
-            `FFPROBE_PATH`.
+        video_frames_per_minute: Frames per minute described in videos (uniform
+            sampling). `0` = transcription only. Env: `VIDEO_FRAMES_PER_MINUTE`.
+            Default: `2.0`.
+        media_concurrency: Maximum number of audio and video files being converted at
+            the same time, per event loop, independently of `parallel_docs`.
+            Env: `MEDIA_CONCURRENCY`. Default: `1`.
+        ffmpeg_path: Path to the `ffmpeg` binary (a system requirement for audio and
+            video; it is not installed with the package). `None` = look it up on the
+            `PATH`. Env: `FFMPEG_PATH`.
+        ffprobe_path: Path to the `ffprobe` binary (same requirements as `ffmpeg_path`).
+            `None` = look it up on the `PATH`. Env: `FFPROBE_PATH`.
         prompt_caching_enabled: Enable prompt caching for supported LLM providers.
         full_docstring: Use the full class docstring (True, default) or only its first
             non-empty line (False) when building the model catalog description shown
             to the LLM during annotation and stored as `CatalogModel.description` in
-            Neo4j. Env: `FULL_DOCSTRING`. Default: `True`.
+            the graph database. Env: `FULL_DOCSTRING`. Default: `True`.
         extraction_batch_size: Pages per extraction chunk (default: `1`).
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
-        neo4j_concurrency: Max concurrent Neo4j write sessions (default: `10`).
+        neo4j_concurrency: Max concurrent graph-store sessions during annotation and entity
+            extraction, for any graph backend (Neo4j or SQL; default: `10`).
         neo4j_sync_concurrency: Max concurrent Stage 2 (sync ingestion) dispatches
             to asyncio.to_thread() (default: `8`).
         consolidation_token_safety_margin: Fraction of `max_tokens` used as the
@@ -1478,9 +1482,9 @@ _neo4j_semaphore = None
 
 
 def get_neo4j_semaphore():
-    """Return (creating if needed) the global asyncio.Semaphore for Neo4j session concurrency.
+    """Return (creating if needed) the global asyncio.Semaphore for graph-store session concurrency.
 
-    The semaphore bounds the number of concurrent Neo4j sessions during
+    The semaphore bounds the number of concurrent graph-store sessions during
     annotation (Stage 3) and entity extraction (Stage 4). It is created
     lazily on the first call using the neo4j_concurrency value from ScinrConfig.
 
@@ -1497,7 +1501,7 @@ def get_neo4j_semaphore():
 
 
 def reset_neo4j_semaphore() -> None:
-    """Reset the Neo4j semaphore (used after configure() changes neo4j_concurrency).
+    """Reset the graph-store semaphore (used after configure() changes neo4j_concurrency).
 
     Call this after configure(neo4j_concurrency=N) to ensure the new value
     takes effect on the next call to get_neo4j_semaphore().
@@ -1510,11 +1514,11 @@ _neo4j_sync_semaphore = None
 
 
 def get_neo4j_sync_semaphore():
-    """Semáforo global que acota cuántos despachos concurrentes a
-    asyncio.to_thread() para Stage 2 (ingestión síncrona) están en vuelo.
-    Debe adquirirse/liberarse SIEMPRE en el event loop (por el llamador de
-    asyncio.to_thread), nunca dentro del worker thread — asyncio.Semaphore
-    no es utilizable fuera de una corrutina con loop activo.
+    """Global semaphore bounding how many concurrent dispatches to
+    asyncio.to_thread() for Stage 2 (synchronous ingestion) are in flight.
+    It must ALWAYS be acquired/released on the event loop (by the caller of
+    asyncio.to_thread), never inside the worker thread — asyncio.Semaphore
+    is not usable outside a coroutine with a running loop.
     """
     import asyncio
 
@@ -1526,8 +1530,8 @@ def get_neo4j_sync_semaphore():
 
 
 def reset_neo4j_sync_semaphore() -> None:
-    """Reset manual tras configure(neo4j_sync_concurrency=N) — NO se
-    auto-invoca desde configure(), mismo contrato manual que
+    """Manual reset after configure(neo4j_sync_concurrency=N) — NOT
+    auto-invoked from configure(); same manual contract as
     reset_neo4j_semaphore()/reset_llm_semaphore()."""
     global _neo4j_sync_semaphore
     _neo4j_sync_semaphore = None

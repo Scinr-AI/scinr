@@ -2,7 +2,7 @@
 
 > **Audience:** developers and data engineers adding new extraction capabilities to the `scinr.newton` pipeline.
 >
-> **Stack:** AWS Bedrock (Claude Sonnet) · LangGraph · Pydantic v2 · Neo4j · Python 3.11+
+> **Stack:** AWS Bedrock (Claude Sonnet) · LangGraph · Pydantic v2 · graph backend (Neo4j, Postgres or SQLite) · Python 3.11+
 
 > For AI agent instructions and best practices, see [`model-creation/AGENTS.md`](AGENTS.md).
 
@@ -41,13 +41,13 @@ Document (PDF / Word)
 [Stage 1] Extractor     →  DocumentStructure (tree of StructureNodes)
       │
       ▼
-[Stage 2] Ingestion     →  StructureNode graph in Neo4j
+[Stage 2] Ingestion     →  StructureNode graph in the graph store
       │
       ▼
 [Stage 3] Annotation    →  Assigns the best extraction model to each StructureNode
       │                     ← MODELS ARE SELECTED HERE
       ▼
-[Stage 4] Entity Extraction  →  Named-entity subgraph in Neo4j
+[Stage 4] Entity Extraction  →  Named-entity subgraph in the graph store
                                  ← MODELS ARE EXECUTED HERE
 ```
 

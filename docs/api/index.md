@@ -15,8 +15,10 @@ Welcome to the `scinr.newton` API reference. All API documentation is auto-gener
 - [Freezing](freezing.md): ``freeze_document()``, ``restore_document()``, ``export_document_snapshot()`` — archive a document's subtree to a snapshot, reduce it to a stub and rebuild it later; same tenant-scoped selector as ``delete_document()``.
 - [Converters](converters.md): Document format converters, including images, audio, video and the embedded-image enrichment.
 - [Media](media.md): ``Transcriber`` interface, ready-made transcribers (``OpenAICompatibleTranscriber``, ``FasterWhisperTranscriber``), ``ffmpeg`` helpers and ``FileMetadata``.
-- [Storage](storage.md): Storage backends.
-- [Navigation](navigation.md): Read-only, engine-abstracted graph traversal — documents, structure nodes, model instances, entities.
+- [Storage](storage.md): Storage backends (MongoDB, PostgreSQL, SQLite, none).
+- [Graph Store](graph-store.md): The `GraphStore` interface the pipeline writes through, and its Neo4j and SQL implementations.
+- [SQL Administration](sql-admin.md): `setup_sql_schema()`, `grant_tenant_access()`, `revoke_tenant_access()`, `list_tenant_access()` — schema setup and per-tenant access for PostgreSQL.
+- [Navigation](navigation.md): Read-only, engine-abstracted graph traversal (Neo4j, PostgreSQL, SQLite) — documents, structure nodes, model instances, entities.
 - [Utilities](utilities.md): Theme registry, LLM factory, and utilities.
 
 ## User Guides

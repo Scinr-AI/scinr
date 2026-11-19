@@ -173,7 +173,7 @@ async def _write_entities(
     extraction: Any,
     document_name: str,
 ) -> str | None:
-    """Write the extracted entities subgraph to Neo4j.
+    """Write the extracted entities subgraph to the graph database.
 
     Dispatches to ``graph_mapper.write_triple_subgraph`` when model_class is None (Triple fallback),
     or ``graph_mapper.write_extraction_subgraph`` for all domain-specific extractions.
@@ -186,7 +186,7 @@ async def _write_entities(
     extraction:
         Populated instance of the composite schema.
     document_name:
-        Neo4j Document.name.
+        graph Document.name.
 
     Returns
     -------
@@ -234,7 +234,7 @@ async def _write_entities(
         return None
 
     except Exception as exc:
-        logger.error("_write_entities: Neo4j write failed for %r: %s", node_full_id, exc)
+        logger.error("_write_entities: graph write failed for %r: %s", node_full_id, exc)
         return f"write_entities failed for {node_full_id}: {exc}"
 
 
@@ -246,7 +246,7 @@ async def _mark_extracted(node_full_id: str) -> str | None:
     Parameters
     ----------
     node_full_id:
-        Full StructureNode.id as stored in Neo4j.
+        Full StructureNode.id as stored in the graph database.
 
     Returns
     -------
@@ -278,18 +278,18 @@ async def process_single_extraction_target(
 
     ``bedrock_semaphore`` is held from schema composition through the LLM call
     and repair loop, bounding both concurrent LLM calls and the number of
-    schemas/prompts alive at once. It is released before any Neo4j write.
-    Neo4j writes (write_entities, mark_extracted) are each wrapped in
+    schemas/prompts alive at once. It is released before any graph write.
+    graph writes (write_entities, mark_extracted) are each wrapped in
     ``get_neo4j_semaphore()`` to prevent connection pool saturation under
     parallel load. The semaphore is released between the two writes so other
-    coroutines can interleave their Neo4j work.
+    coroutines can interleave their graph work.
 
     Parameters
     ----------
     target:
         ExtractionTarget dict as returned by ``store.extraction.fetch_targets``.
     document_name:
-        Neo4j Document.name — passed through to write functions.
+        graph Document.name — passed through to write functions.
     bedrock_semaphore:
         Process-wide asyncio.Semaphore controlling Bedrock concurrency.
 
@@ -303,7 +303,7 @@ async def process_single_extraction_target(
 
     # The LLM slot is taken FIRST so that the composed schema, prompt and messages
     # of a target only exist while it holds one of the ``llm_concurrency`` slots.
-    # Lock order is always LLM -> Neo4j; the Neo4j writes below run outside the slot.
+    # Lock order is always LLM -> graph; the graph writes below run outside the slot.
     async with bedrock_semaphore:
         composite_schema, schema_error = _compose_schema(target)
         if composite_schema is None:
@@ -319,10 +319,10 @@ async def process_single_extraction_target(
     if extraction is None:
         return {"node_full_id": node_full_id, "extraction": None, "error": extract_error}
 
-    # ── Write entities (bounded by Neo4j semaphore) ───────────────────────────
+    # ── Write entities (bounded by graph semaphore) ───────────────────────────
     async with neo4j_semaphore:
         write_error = await _write_entities(target, extraction, document_name)
-    # ── Mark extracted (bounded by Neo4j semaphore) ───────────────────────────
+    # ── Mark extracted (bounded by graph semaphore) ───────────────────────────
     async with neo4j_semaphore:
         mark_error = await _mark_extracted(node_full_id)
 

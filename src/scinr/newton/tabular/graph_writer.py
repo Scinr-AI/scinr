@@ -94,7 +94,7 @@ async def write_tabular_subgraph(
     theme : The detected thematic domain path for this sheet (e.g.
         "pharmaceutical_quality"). Written to the Table node and all Row nodes
         as the ``theme`` property. Defaults to "default".
-    sheet_page_id : MongoDB page_id for this sheet, or "" when no storage backend.
+    sheet_page_id : Document-store page_id for this sheet, or "" when no storage backend.
 
     Steps:
     1. Compute composite IDs for Table and Rows.

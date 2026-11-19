@@ -5,7 +5,7 @@ Provides run_pipeline(), a single entry point that chains all five stages:
 
     Stage 0: preprocess    — Convert raw files to IntermediateDocument objects
     Stage 1: extraction    — Extract structure via LLM → Document objects
-    Stage 2: ingestion     — Ingest Document objects into Neo4j
+    Stage 2: ingestion     — Ingest Document objects into the graph
     Stage 3: annotation    — Annotate StructureNodes with model decisions
     Stage 4: entity_extraction — Extract entities from annotated nodes
 
@@ -33,7 +33,7 @@ Annotation-only run::
         document_names=["MyDocument"],
     ))
 
-Control concurrency before calling (node-level and Neo4j)::
+Control concurrency before calling (node-level and graph writes)::
 
     configure(llm=my_llm, ..., llm_concurrency=8, neo4j_concurrency=20)
     result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
@@ -191,7 +191,7 @@ async def run_pipeline(
     intermediate directory parameters are omitted. Tabular files (.csv, .xlsx,
     .xls) found in *input_raw* are automatically routed to the tabular pipeline.
 
-    Concurrency for LLM calls (``llm_concurrency``) and Neo4j writes
+    Concurrency for LLM calls (``llm_concurrency``) and graph writes
     (``neo4j_concurrency``) must be configured via
     :func:`~scinr.newton.config.configure` **before** calling this function.
     Use ``parallel_docs`` to control how many documents are processed
@@ -208,7 +208,7 @@ async def run_pipeline(
             `document_names_dir` for document discovery, regardless of which stages are
             requested — even for a `stages=["annotation"]`-only run, discovery reads the
             documents found under this folder rather than resolving `document_names` via
-            Neo4j. Passing both is not an error; `document_names`/`document_names_dir` are
+            the graph. Passing both is not an error; `document_names`/`document_names_dir` are
             then silently ignored. Do not pass `extraction_input_dir` together with
             `document_names`/`document_names_dir` unless this precedence is intended.
         extraction_output_dir: Folder where Stage 1 writes `extract-*.json` output files.
@@ -218,7 +218,7 @@ async def run_pipeline(
             requested stages) — see that entry for the full explanation.
         stages: Ordered list of stage names to execute (`"preprocess"`, `"extraction"`, `"ingestion"`,
             `"annotation"`, `"entity_extraction"`, `"tabular"`). Default runs full pipeline.
-        document_names: Explicit list of Neo4j `document_name` values for Stage 3/4 runs,
+        document_names: Explicit list of graph `document_name` values for Stage 3/4 runs,
             resolved to leaf documents among `tenant_id`'s documents only (`None` =
             public documents); each leaf is then processed by its path.
             Ignored (silently) if `extraction_input_dir` or `ingestion_input_dir` is also
@@ -230,7 +230,7 @@ async def run_pipeline(
         only_unannotated: Skip nodes that already have an annotation decision.
         only_unextracted: Skip nodes that already have extracted entities.
         context_instructions: Custom instructions injected into converter and annotation prompts.
-        update_mode: If `True`, Stage 2 replaces latest document version in Neo4j without incrementing version.
+        update_mode: If `True`, Stage 2 replaces latest document version in the graph without incrementing version.
         replaces: `document_name` of existing document superseded by newly ingested document
             (looked up among `tenant_id`'s documents only).
         parallel_docs: Maximum number of documents processed concurrently (default: `5`).
@@ -291,7 +291,7 @@ async def run_pipeline(
             documents. `None` means a **public** document: readable by every
             tenant, but still its own upload whose content (including merged
             `ModelInstance` / `LabeledEntity` / `Entity` nodes) is never merged
-            with any tenant's. Public is stored in Neo4j as the reserved value
+            with any tenant's. Public is stored in the graph as the reserved value
             `"__public__"` (see `utils/tenancy.py`), which is rejected as an
             input here. Serialized into any `extract-*.json` produced by the
             extraction stage; a value passed here overrides any value already
@@ -335,10 +335,10 @@ async def run_pipeline(
         PipelineResult containing stage metrics, execution flags, and duration.
 
     Raises:
-        ConfigurationError: If Neo4j or LLM configuration is missing.
+        ConfigurationError: If the graph backend or LLM configuration is missing.
         PreconditionError: If invalid parameters or mutually exclusive options are supplied.
         ExtractionError: If entity extraction fails.
-        IngestionError: If Neo4j graph write fails.
+        GraphError: If the graph write fails.
         ValueError: If any parameter combination is invalid (see validation section).
         FileNotFoundError: If a required directory does not exist.
         TypeError: If `callbacks` contains anything other than `ProgressCallback`,
@@ -535,7 +535,7 @@ async def _run_pipeline_impl(
         raise ValueError(
             "'annotation' and/or 'entity_extraction' stages require document names. "
             "Provide one of:\n"
-            "  - document_names (explicit list of Neo4j document_name values)\n"
+            "  - document_names (explicit list of graph document_name values)\n"
             "  - document_names_dir (folder with extract-*.json files)\n"
             "  - include 'ingestion' in stages so Stage 2 provides the names"
         )
@@ -579,7 +579,7 @@ async def _run_pipeline_impl(
     if replaces is not None and "ingestion" in effective_stages:
         replaced_path = preflight_check_replaces(replaces, tenant_id=tenant_id)["path"]
         logger.info(
-            "Pre-flight check passed: document '%s' found in Neo4j.", replaces
+            "Pre-flight check passed: document '%s' found in the graph.", replaces
         )
 
     # ── State accumulators ────────────────────────────────────────────────────
@@ -1068,7 +1068,7 @@ async def _process_document_unit(
     call (``convert_one()``, ``extract_one_intermediate()``/
     ``extract_one_file()``, ``ingest_one()``/``ingest_one_from_path()``,
     ``run_annotation()``, ``run_entity_extraction()``) already bounds its own
-    real LLM/Neo4j work internally (via ``get_llm_semaphore()`` /
+    real LLM/graph work internally (via ``get_llm_semaphore()`` /
     ``get_neo4j_sync_semaphore()``) — this function does not add another
     semaphore around those calls.
 

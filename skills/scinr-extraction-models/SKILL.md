@@ -16,7 +16,7 @@ A **theme** is a folder with `catalog.py` (`THEME_DESCRIPTION` + `SELECTABLE_MOD
 
 - Stage 1 picks a theme per document section from `THEME_DESCRIPTION`.
 - Stage 3 picks a model from that theme's `SELECTABLE_MODELS` using the **class docstrings**.
-- Stage 4 fills the model from field `description=` text and writes it to Neo4j as a
+- Stage 4 fills the model from field `description=` text and writes it to the graph as a
   `:ModelInstance`, plus `:LabeledEntity` nodes and edges from `json_schema_extra`.
 
 So docstrings and descriptions are the extraction prompts. Write them for an LLM reader.
@@ -159,7 +159,7 @@ models using it share. Create one only when several models really share the logi
 
 ```python
 from scinr.newton import configure
-configure(llm=..., neo4j_user=..., neo4j_password=..., neo4j_database=...,
+configure(llm=..., <graph settings: neo4j_user/neo4j_password/neo4j_database, or graph_backend + sql_url>,
           extra_models_paths=["/abs/path/to/models_root"])   # or env SCINR_EXTRA_MODELS_PATHS (":"-separated)
 ```
 
@@ -211,7 +211,7 @@ To ship a theme as a pip package, use an entry point:
 - Tabular use, typed values from strings, OCR fixes, or shared normalizing validators →
   [references/tabular-and-normalization.md](references/tabular-and-normalization.md)
 - What the written graph really looks like (instance_key merges, normalized nodes) →
-  https://scinr-ai.github.io/scinr/user-guides/neo4j-graph.md
+  https://scinr-ai.github.io/scinr/user-guides/neo4j-graph/
 - Anything not covered here → the full guide at
-  https://scinr-ai.github.io/scinr/user-guides/custom-models.md and
-  https://scinr-ai.github.io/scinr/user-guides/model-patterns.md
+  https://scinr-ai.github.io/scinr/user-guides/custom-models/ and
+  https://scinr-ai.github.io/scinr/user-guides/model-patterns/

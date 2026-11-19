@@ -401,7 +401,7 @@ async def convert_one(
 
     sink: ImageSink | None = None
     try:
-        # 1. Store original file in MongoDB (if repo provided); the repo reads
+        # 1. Store original file in the document store (if repo provided); the repo reads
         #    it itself (streaming where supported), never materialised here.
         raw_file_id = None
         if raw_file_repo is not None:
@@ -448,7 +448,7 @@ async def convert_one(
             doc.created_by_user_id = created_by_user_id
             doc.job_id = job_id
 
-            # 3. Store converted pages in MongoDB (if repos provided)
+            # 3. Store converted pages in the document store (if repos provided)
             try:
                 if page_repo is not None and raw_file_id is not None:
                     for page in doc.pages:
@@ -741,7 +741,7 @@ async def convert_single_file(
         logger.info("Written: %s (%d page(s))", resolved_output_path, len(doc.pages))
         return resolved_output_path
 
-    # With storage: full process with MongoDB
+    # With storage: full process with a document store
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Store original file (streamed by the repo where supported)

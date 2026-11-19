@@ -1,5 +1,6 @@
 """
-scinr-ingest — Document ingestion and entity extraction pipeline for Neo4j.
+scinr-ingest — Document ingestion and entity extraction pipeline for a knowledge graph
+(Neo4j, Postgres or SQLite).
 """
 
 from scinr.newton.config import (

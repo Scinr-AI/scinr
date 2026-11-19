@@ -46,7 +46,7 @@ def _with_fallback(
     selector = f"path={doc_path!r}" if doc_path is not None else f"name={document_name!r}"
     if not leaves:
         logger.warning(
-            "Document %s (tenant=%r) not found in Neo4j. Proceeding with it as-is.",
+            "Document %s (tenant=%r) not found in the graph database. Proceeding with it as-is.",
             selector,
             tenant_id,
         )

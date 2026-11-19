@@ -3,7 +3,7 @@ Módulo de normalización post-extracción para el pipeline tabular.
 
 Detecta campos Pydantic marcados con `normalization_model: True` en su
 `json_schema_extra`, y llama a un LLM con structured output para rellenar
-los modelos normalizados antes de escribir a Neo4j.
+los modelos normalizados antes de escribir al grafo.
 """
 
 from scinr.newton.tabular.normalization.detector import (

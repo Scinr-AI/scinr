@@ -7,7 +7,7 @@ streaming pass, rebuild the subtree in batches in a second one, remove the
 temporary ``(:Document)-[:HAS_MODEL_DECISION|HAS_EXTRACTION]->()`` links,
 unmark the stubs and delete the snapshot once no Document references it.
 Every write runs in a bounded transaction (row batches for the rebuild, 50
-documents at a time for the finish), so Neo4j's transaction memory depends on
+documents at a time for the finish), so the graph database's transaction memory depends on
 ``batch_size × concurrency``, not on how much is restored.
 
 Rebuild semantics per node type (see ``docs/user-guides/document-freezing.md``):
@@ -719,13 +719,13 @@ async def restore_document(
         Restore from this snapshot instead of the stubs' / the newest one.
     batch_size:
         Rows per write transaction of the rebuild. Larger batches mean fewer
-        round trips but longer transactions: more Neo4j heap per transaction
+        round trips but longer transactions: more graph heap per transaction
         and locks held longer (other writers — e.g. a running ingestion —
         wait on the shared catalog / entity nodes meanwhile).
     concurrency:
         Rebuild transactions in flight at once (each on its own pooled
         connection). Lower it (e.g. ``1``) while an ingestion is writing to
-        the same Neo4j; Neo4j heap in use by the rebuild grows roughly with
+        the same graph database; graph heap in use by the rebuild grows roughly with
         ``batch_size × concurrency``.
 
     Returns

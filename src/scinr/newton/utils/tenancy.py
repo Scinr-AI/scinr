@@ -7,7 +7,7 @@ versions, structure, annotations and extractions). A document ingested with
 no tenant is **public** — readable by every tenant, but still its own upload
 whose content is never merged with any tenant's.
 
-"Public" is stored in Neo4j as the reserved value :data:`PUBLIC_TENANT`,
+"Public" is stored in the graph as the reserved value :data:`PUBLIC_TENANT`,
 never as ``null``:
 
 - Neo4j does not index nulls, so a ``tenant_id = $t OR tenant_id IS NULL``
@@ -30,7 +30,7 @@ PUBLIC_TENANT = "__public__"
 
 
 def tenant_key(tenant_id: str | None) -> str:
-    """Return the value stored in Neo4j for *tenant_id*: the tenant, or
+    """Return the value stored in the graph for *tenant_id*: the tenant, or
     :data:`PUBLIC_TENANT` when it is ``None``.
 
     Idempotent: ``"__public__"`` (the stored value) is accepted and means public,

@@ -1,8 +1,8 @@
 # Storage Backends
 
-`scinr.newton` provides an optional persistent storage layer that runs alongside the Neo4j graph pipeline. Storage backends archive raw source files and their converted pages, giving you a durable record of every document that passes through the pipeline.
+`scinr.newton` provides an optional persistent storage layer that runs alongside the graph pipeline. Storage backends archive raw source files and their converted pages, giving you a durable record of every document that passes through the pipeline.
 
-Neo4j remains the primary output store. Storage is supplementary — it exists for raw file archival, audit trails, and compliance requirements. You can run the full pipeline with Neo4j alone and never touch storage.
+The graph (Neo4j by default, or PostgreSQL / SQLite) remains the primary output store. Storage is supplementary — it exists for raw file archival, audit trails, and compliance requirements. You can run the full pipeline with the graph alone and never touch storage.
 
 Five backends are available:
 
@@ -22,7 +22,7 @@ Five backends are available:
 | Page content | No | Yes (document collection) | Yes (`pages` table) | Yes (`pages` table) | User-defined |
 | Document metadata | No | Yes (raw_files collection) | Yes (`raw_files` table) | Yes (`raw_files` table) | User-defined |
 | Dependencies | None | `motor`, `pymongo` | `scinr[postgres]` | `scinr[sqlite]` | User-defined |
-| Use case | Dev/testing, Neo4j-only workflows | Production with audit trail | Production on an existing Postgres; one database for graph and storage | Local tools, single-machine setups, tests | Custom infrastructure needs |
+| Use case | Dev/testing, graph-only workflows | Production with audit trail | Production on an existing Postgres; one database for graph and storage | Local tools, single-machine setups, tests | Custom infrastructure needs |
 
 ---
 
@@ -56,7 +56,7 @@ The pipeline calls `get_storage()` to obtain the configured pair of repositories
 
 ## The "none" Backend (Default)
 
-When `storage_backend="none"` (the default), scinr uses no-op repository implementations that silently discard all writes. This is the recommended setting for development, testing, or when Neo4j alone is sufficient.
+When `storage_backend="none"` (the default), scinr uses no-op repository implementations that silently discard all writes. This is the recommended setting for development, testing, or when the graph alone is sufficient.
 
 ### Configuration
 
@@ -85,8 +85,8 @@ configure(
 ### When to Use
 
 - **Development and testing** — fastest setup, no infrastructure needed.
-- **Neo4j-only workflows** — when the graph is the sole source of truth.
-- **CI/CD pipelines** — avoids requiring a MongoDB instance in test environments.
+- **Graph-only workflows** — when the graph is the sole source of truth.
+- **CI/CD pipelines** — avoids requiring a storage database in test environments.
 - **Quick prototyping** — focus on extraction models without storage concerns.
 
 ### Complete Example
@@ -615,7 +615,7 @@ From the graph side, the navigator methods resolve the node or document through 
 
 ### Ingestion checks the owner of `raw_file_id`
 
-A `:Document` links to its upload through `raw_file_id`, which comes from an editable JSON. Before a document with a non-empty `raw_file_id` is written to Neo4j (`run_pipeline`, `run_ingestion`, `ingest_one`, `ingest_one_from_path`), the stored raw file must exist **and** belong to the document's effective tenant; otherwise the document fails with `IngestionError` and nothing is written. Only the tenant must match — the upload's `created_by_user_id` / `job_id` may differ from the ingestion run's. A tenant never "claims" a public file. With `storage_backend="none"` a non-empty `raw_file_id` cannot be verified and is rejected: configure the storage backend the file was converted with, or clear `raw_file_id` in the JSON.
+A `:Document` links to its upload through `raw_file_id`, which comes from an editable JSON. Before a document with a non-empty `raw_file_id` is written to the graph (`run_pipeline`, `run_ingestion`, `ingest_one`, `ingest_one_from_path`), the stored raw file must exist **and** belong to the document's effective tenant; otherwise the document fails with `IngestionError` and nothing is written. Only the tenant must match — the upload's `created_by_user_id` / `job_id` may differ from the ingestion run's. A tenant never "claims" a public file. With `storage_backend="none"` a non-empty `raw_file_id` cannot be verified and is rejected: configure the storage backend the file was converted with, or clear `raw_file_id` in the JSON.
 
 `delete_document()` deletes each `raw_file_id` scoped to the tenant of the graph node that carries it, so a forged id never deletes another tenant's original.
 
@@ -1082,7 +1082,7 @@ Reads, lookups and deletes receive the **stored** tenant key, the `tenant_id` pr
 | Production on an existing PostgreSQL | `postgres` | No extra database to operate; graph, storage and snapshots can share one `sql_url`. |
 | Local or single-machine tool | `sqlite` | No server at all; one `.db` file plus a files folder. |
 | Production with existing cloud infrastructure | `custom` | Reuse S3, Azure Blob, or other storage you already manage. |
-| Neo4j-only workflow | `none` | Storage is optional; Neo4j is the primary output. |
+| Graph-only workflow | `none` | Storage is optional; the graph is the primary output. |
 | Compliance (raw file retention) | `mongodb` or `custom` | Persistent archive of every ingested file. |
 | CI/CD pipeline | `none` | Avoids external dependencies in test environments. |
 | Multi-region deployment | `custom` | Route storage to region-appropriate infrastructure. |
@@ -1113,12 +1113,12 @@ Pipeline Flow (with storage enabled):
   └──────────────┘     └──────────────────┘     └──────────────┘
 ```
 
-### Independence from Neo4j
+### Independence from the graph engine
 
-Storage operates independently of Neo4j:
+Storage operates independently of the graph engine (Neo4j, PostgreSQL or SQLite):
 
-- You can configure storage independently of the Neo4j pipeline stages — storage is called during Stage 0 (preprocess) and the tabular pipeline, while Neo4j is used in Stages 2-4. Both are optional components that can be tuned independently.
-- You can have Neo4j without storage (the default `none` backend).
+- You can configure storage independently of the graph pipeline stages — storage is called during Stage 0 (preprocess) and the tabular pipeline, while the graph is written in Stages 2-4. Both are optional components that can be tuned independently.
+- You can have the graph without storage (the default `none` backend).
 - Storage does not affect Stages 1-4 (extraction, ingestion, annotation, entity extraction).
 - If storage fails, the pipeline continues — storage errors are caught and reported without aborting the pipeline.
 
@@ -1161,6 +1161,7 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | SQL connection URL (`postgres` / `sqlite`) | `sql_url` | `SQL_URL` | `""` (required for SQL axes) |
 | Postgres schema | `sql_schema` | `SQL_SCHEMA` | `"newton"` |
 | SQL connection pool size | `sql_pool_size` | `SQL_POOL_SIZE` | `10` |
+| Postgres full-text search configuration | `sql_fulltext_config` | `SQL_FULLTEXT_CONFIG` | `"simple"` (applied only when the schema is created) |
 | SQLite folder for binaries | `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` (`<db path without extension>.files/`) |
 | Snapshot backend ([Document Freezing](document-freezing.md)) | `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` |
 | Snapshot metadata collection | `mongodb_frozen_collection` | `MONGODB_FROZEN_COLLECTION` | `"frozen_documents"` |
@@ -1184,11 +1185,11 @@ configure(llm=ChatOllama(model="llama3"), storage_backend="none")  # final value
 | `ConfigurationError: ... requires sql_url` or `... does not match sql_url` | A SQL axis without `sql_url`, or a URL of the other engine | Set `sql_url` (or `SQL_URL`) with the scheme of the engine. All the SQL axes share it. |
 | `ConfigurationError: An in-memory SQLite database has nowhere to keep binary files` | `sqlite:///:memory:` without `sqlite_files_dir` | Set `sqlite_files_dir`, or use a file database. |
 | `StorageError: The binary of raw_file ... is missing` | A SQLite row whose file is gone (crash, or the files folder was not backed up with the `.db`) | Run [`find_inconsistencies()`](#consistency-of-the-sqlite-files-find_inconsistencies) and clean up. |
-| Pages not found after ingestion | Storage backend was `none` during pipeline run | Re-run with `storage_backend="mongodb"` or `custom`. |
+| Pages not found after ingestion | Storage backend was `none` during pipeline run | Re-run with a persistent `storage_backend` (`"mongodb"`, `"postgres"`, `"sqlite"` or `"custom"`). |
 | GridFS errors on large files | Very old MongoDB, or a driver/server mismatch | Use a currently supported MongoDB (4.4+ / 5.0+) or a managed MongoDB service. GridFS itself is available in every modern MongoDB release. |
 | `ImportError: No module named 'motor'` | MongoDB extras not installed | Run `pip install "scinr[mongodb]"`. |
 | Custom backend methods not called | Passed class instead of instance | `custom_storage` expects instantiated objects: `(MyRawRepo(), MyPageRepo())`. |
-| Duplicate files ingested | No deduplication check | The `(tenant_id, checksum_sha256)` index on `raw_files` enables per-tenant dedup queries. Implement pre-ingest checks using this field. |
+| Duplicate files ingested | No deduplication check | On MongoDB, the `(tenant_id, checksum_sha256)` index on `raw_files` enables per-tenant dedup queries. Implement pre-ingest checks using the `checksum_sha256` field. |
 | `IngestionError: raw_file_id=... does not exist or does not belong to the document's tenant` | The JSON's `raw_file_id` was converted under another tenant (or public), or deleted | Ingest with the tenant used at conversion, re-run the preprocess for this tenant, or clear `raw_file_id`. |
 | `IngestionError: ... storage_backend='none' cannot verify it` | A JSON converted with storage is ingested without storage | Configure the same storage backend, or clear `raw_file_id` in the JSON. |
 | Pages / original not found for a document | The read is scoped to the document's tenant; legacy records have no tenant | Check `raw_files.tenant_id` matches the `:Document`'s `tenant_id`. |
@@ -1227,7 +1228,7 @@ DEBUG:scinr.newton.storage.mongodb.client:MongoDB indexes ensured.
 
 - **[Configuration](../configuration.md)** — Complete reference for `configure()`, environment variables, and all settings.
 - **[Running the Pipeline](running-pipeline.md)** — Pipeline entry points, stage selection, and workflow patterns.
-- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results.
+- **[Neo4j Graph Storage](neo4j-graph.md)** — Understanding the graph model and querying results (on Neo4j).
 - **[SQL Graph Backends](sql-graph.md)** — The graph, navigation and storage on PostgreSQL or SQLite; Row-Level Security.
 - **[Document Freezing](document-freezing.md)** — Freezing, restoring and exporting documents, and the snapshot format.
 - **[Architecture](../architecture.md)** — Detailed walkthrough of each pipeline stage and data flow.

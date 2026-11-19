@@ -1,6 +1,6 @@
 # scinr.newton Architecture
 
-`scinr.newton` is an **async-first Python library** for transforming life sciences documents and tabular data into structured, queryable knowledge stored in Neo4j, with optional binary and auxiliary storage in MongoDB.
+`scinr.newton` is an **async-first Python library** for transforming life sciences documents and tabular data into structured, queryable knowledge stored in a graph (Neo4j, PostgreSQL or SQLite), with optional binary and auxiliary storage (MongoDB, PostgreSQL or SQLite).
 
 The architecture provides **two independent ingestion pipelines** that write to the same knowledge graph:
 
@@ -8,7 +8,7 @@ The architecture provides **two independent ingestion pipelines** that write to 
 
 * **Tabular data pipeline** — A dedicated pipeline for CSV, XLSX, and XLS data. It bypasses the document pipeline and uses structural normalization, LLM-driven mapping, and entity extraction to write structured knowledge directly to the graph.
 
-Both pipelines produce compatible entities and relationships in the **same Neo4j knowledge graph**, sharing graph conventions, node labels, relationship types, and schema constraints.
+Both pipelines produce compatible entities and relationships in the **same knowledge graph**, sharing graph conventions, node labels, relationship types, and schema constraints.
 
 Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codebase but are not yet officially supported or tested. Supported today: `.pdf`, `.docx`, `.xlsx`, `.xls`, `.csv`, and (since 0.5.0) images, audio and video.
 
@@ -30,7 +30,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 4. [Configuration System](#4-configuration-system)
 5. [Module Structure](#5-module-structure)
 6. [Data Flow](#6-data-flow)
-7. [Neo4j Schema](#7-neo4j-schema)
+7. [Graph Schema](#7-graph-schema)
 8. [Storage Backends](#8-storage-backends)
    - [Graph Layer (GraphStore)](#8d-graph-layer-graphstore)
    - [Graph Backends (Neo4j and SQL)](#8e-graph-backends-neo4j-and-sql)
@@ -67,7 +67,7 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 ┌──────────────────┐                │              ┌───────┴──────────┐
 │ Stage 2:         │                │              │ Document +       │
 │ Ingestion        │                │              │ Table + Row      │
-│ Neo4j write      │                │              │ nodes (direct)   │
+│ Graph write      │                │              │ nodes (direct)   │
 └───────┬──────────┘                │              └──────────────────┘
         ▼                           │
 ┌──────────────────┐                │
@@ -79,13 +79,13 @@ Converters for `.pptx`, `.html`, `.json`, `.xml`, and `.txt` exist in the codeba
 ┌──────────────────┐                │
 │ Stage 4:         │                │
 │ Entity Extract   │                │
-│ Pydantic + Neo4j │                │
+│ Pydantic + graph │                │
 └────────┬─────────┘                │
          │                          │
          └──────────┬───────────────┘
                     ▼
          ┌────────────────────────┐
-         │   Neo4j Knowledge      │
+         │   Knowledge            │
          │   Graph                │
          └────────────────────────┘
 ```
@@ -153,7 +153,7 @@ Error strategy for Mistral OCR is configurable: `fail_fast` (default, aborts the
 Every converter produces an `IntermediateDocument` (Pydantic model) with:
 - `pages`: list of `IntermediatePage` objects, each containing `index`, `markdown` (text content), `images` (base64-encoded with MIME type), `dimensions`, `tables`, `hyperlinks`, `header`, `footer`, and `page_id`.
 - `folder_path`: relative path of the source file's parent directory from the input root.
-- `raw_file_id`: MongoDB ObjectId of the stored raw file (when storage backend is configured).
+- `raw_file_id`: identifier of the stored raw file (an ObjectId on MongoDB; when a storage backend is configured).
 - `context_instructions`: free-text user context passed via `run_pipeline(context_instructions=...)`.
 - `document_name`: stem of the original source file.
 
@@ -164,11 +164,11 @@ The actual per-file conversion is dispatched via `_run_convert()`: synchronous c
 **Storage Integration:**
 
 When `storage_backend` is configured (not `"none"`), Stage 0 stores:
-- Raw file binary via `RawFileRepository.store()` (GridFS for MongoDB)
+- Raw file binary via `RawFileRepository.store()` (GridFS on MongoDB)
 - Each described embedded image and video frame, right after its description, via `RawFileRepository.store_image()` / `store_image_file()` (`converters/image_store.py`; `store_described_images` / `store_video_frames`, only with a backend whose `stores_images` is `True`). A failed image write fails the document and deletes the images already stored
-- Converted pages via `PageRepository.store()` (MongoDB collection)
+- Converted pages via `PageRepository.store()` (a collection on MongoDB)
 
-The storage layer is abstracted behind `storage/factory.py` and supports three backends: `"none"`, `"mongodb"`, and `"custom"`.
+The storage layer is abstracted behind `storage/factory.py` and supports the backends `"none"`, `"mongodb"`, `"postgres"`, `"sqlite"` and `"custom"`.
 
 ---
 
@@ -205,7 +205,7 @@ Each `StructureNode` has:
 - `appearance_order`: 1-based position among siblings
 - `parent_id`: reference to parent node's `node_id` (null for top-level)
 - `theme`: theme path (default: `"default"`)
-- `source_page_ids`: list of MongoDB page IDs (set by pipeline, not LLM)
+- `source_page_ids`: list of stored page IDs (set by pipeline, not LLM)
 - `info_units`: list of `InfoUnit` objects — the semantic content extracted from this node
 - `children`: nested `StructureNode` objects
 
@@ -230,27 +230,27 @@ When `output_folder` is provided, the extracted `Document` is written as `extrac
 
 ### Stage 2: Ingestion (`run_ingestion`)
 
-**Purpose:** Write `Document` objects and their `StructureNode` hierarchies into Neo4j.
+**Purpose:** Write `Document` objects and their `StructureNode` hierarchies into the graph.
 
 **Input:** Either `Document` objects (from Stage 1 in-memory), `extract-*.json` files on disk (`output_folder` or explicit `files` list), or `extract-*.json` files from `ingestion_input_dir`.
 
-**Output:** `StageResult` with per-document success/failure counts. Neo4j graph state updated.
+**Output:** `StageResult` with per-document success/failure counts. Graph state updated.
 
 **Architecture:**
 
 The ingestion module (`ingest/`) provides:
 
-- **`store.schema.setup()`** (`graph/neo4j/schema.py`) — Creates all Neo4j constraints and indexes idempotently (using `IF NOT EXISTS`). Includes:
+- **`store.schema.setup()`** — Creates the graph's constraints and indexes idempotently. On Neo4j (`graph/neo4j/schema.py`, using `IF NOT EXISTS`) this includes:
   - 10 unique constraints (Document path+version, StructureNode id, InfoUnit uid, etc.)
   - 9 regular indexes (Document name/latest/path, StructureNode role, etc.)
   - 2 fulltext indexes (InfoUnit description and title for semantic search)
-  - Best-effort Neo4j version check (requires >= 4.4)
+  - Best-effort version check (requires >= 4.4)
 
 - **`load_documents(documents, update_mode)`** — In-memory ingestion of `Document` objects.
 - **`load_files(files, driver, update_mode)`** — Ingestion from explicit file paths.
 - **`load_folder(folder, driver, update_mode)`** — Ingestion from a directory of `extract-*.json` files.
 
-**Neo4j Graph Structure (unstructured pipeline):**
+**Graph Structure (unstructured pipeline):**
 
 ```
 (:Document) -[:HAS_STRUCTURE]-> (:StructureNode)
@@ -280,17 +280,17 @@ When `update_mode=True`, the ingestion process:
 
 **Concurrency:**
 
-Stage 2 uses `get_neo4j_sync_semaphore()` (size: `neo4j_sync_concurrency`, default: 8) to bound concurrent dispatches to `asyncio.to_thread()` for the synchronous Neo4j driver operations. The sync driver is used for Stage 2 because the Neo4j Python driver's synchronous API is used for document ingestion (the async driver is reserved for Stages 3 and 4).
+Stage 2 uses `get_neo4j_sync_semaphore()` (size: `neo4j_sync_concurrency`, default: 8) to bound concurrent dispatches to `asyncio.to_thread()` for the synchronous graph-store operations, whatever the backend. On Neo4j these use the Neo4j Python driver's synchronous API (the async driver is reserved for Stages 3 and 4); on PostgreSQL and SQLite the synchronous engine is a thread-safe pool and `store.sync_scope()` is a no-op.
 
 ---
 
 ### Stage 3: Annotation (`run_annotation`)
 
-**Purpose:** Classify each `StructureNode` against registered extraction models using an LLM, writing annotation decisions to Neo4j.
+**Purpose:** Classify each `StructureNode` against registered extraction models using an LLM, writing annotation decisions to the graph.
 
-**Input:** Document name (must already exist in Neo4j from Stage 2).
+**Input:** Document name (must already exist in the graph from Stage 2).
 
-**Output:** `StageResult` with per-node annotation counts and errors. Neo4j graph updated with annotation subgraph.
+**Output:** `StageResult` with per-node annotation counts and errors. Graph updated with annotation subgraph.
 
 **Architecture:**
 
@@ -314,7 +314,7 @@ The LLM returns a `ModelDecision` with:
 
 A second LLM call validates and formats the decision, ensuring the model class name exactly matches a registered class in the model catalog.
 
-**Neo4j Annotation Subgraph:**
+**Annotation Subgraph:**
 
 ```
 (:StructureNode) -[:HAS_MODEL_DECISION]-> (:ModelDecision)
@@ -335,14 +335,14 @@ Themes organize extraction models into domain-specific groups. Each theme has:
 
 Built-in themes are registered in `utils/theme_registry.py`. User themes are loaded from `extra_models_paths` at configure time. The `enabled_base_themes` and `enabled_user_themes` configuration parameters act as whitelists.
 
-**Catalog and Theme Neo4j Setup:**
+**Catalog and Theme Graph Setup:**
 
 Before annotation begins, `ensure_catalog_models_once()` and `ensure_theme_structure_once()` (`annotation/catalog.py`) are called. They memoize per process and run the traversal of the models and themes (`ensure_catalog_models()` / `ensure_theme_structure()`, in the same module) against the sink opened by `store.annotation.catalog_sink()` (idempotent) to:
 1. Create `:CatalogModel` and `:ModelField` nodes for all registered models
 2. Create `:Theme` nodes and link them to their models
 3. Create `:EntityLabel` nodes for all entity labels defined in model fields
 
-These operations run once per pipeline run and are memoized to avoid redundant Neo4j queries.
+These operations run once per pipeline run and are memoized to avoid redundant graph queries.
 
 **Modes:**
 
@@ -361,11 +361,11 @@ When `document_name` refers to a folder (a document with `IS_COMPOSED_OF` childr
 
 ### Stage 4: Entity Extraction (`run_entity_extraction`)
 
-**Purpose:** Extract typed domain entities from annotated `StructureNode` objects using Pydantic structured output, writing entity subgraphs to Neo4j.
+**Purpose:** Extract typed domain entities from annotated `StructureNode` objects using Pydantic structured output, writing entity subgraphs to the graph.
 
 **Input:** Document name (must have annotated nodes from Stage 3).
 
-**Output:** `StageResult` with per-node extraction counts and errors. Neo4j graph updated with entity subgraph.
+**Output:** `StageResult` with per-node extraction counts and errors. Graph updated with entity subgraph.
 
 **Architecture:**
 
@@ -374,7 +374,7 @@ The entity extraction module (`entity_extraction/`) operates per annotated `Stru
 **Step 1 — Schema Composition (`schema_composer.py`):**
 
 For each target node, the system:
-1. Reads the `ModelDecision.matched_model_class` from Neo4j
+1. Reads the `ModelDecision.matched_model_class` from the graph
 2. Resolves the Pydantic model class via `model_resolver.py` (consults the theme registry)
 3. Builds a **composite schema** — a single Pydantic model that combines the primary model and any complementary models (optional nested models declared in the primary model's fields)
 4. The composite schema is used for structured output via `llm.with_structured_output()`
@@ -391,7 +391,7 @@ The LLM returns a populated instance of the composite schema.
 
 **Step 3 — Graph Write (`write_extraction_subgraph()` in `entity_extraction/graph_mapper.py`, which walks the instance and writes through the sink opened by `store.extraction.sink()`, `graph/neo4j/extraction.py`):**
 
-The populated Pydantic instance is converted into a Neo4j subgraph with three levels of entity representation:
+The populated Pydantic instance is converted into a subgraph with three levels of entity representation:
 
 **Level 1 — Entity Labeling:**
 - Fields with `json_schema_extra={"entity_label": "X"}` become `MERGE`d `:LabeledEntity {label, value, normalized_value}` nodes
@@ -406,7 +406,7 @@ The populated Pydantic instance is converted into a Neo4j subgraph with three le
 - Fields with `json_schema_extra={"instance_relationships": [...]}` trigger `MERGE` of target `:ModelInstance` shells and typed relationships between instances
 - Enables forward references across `StructureNode` boundaries
 
-**Neo4j Entity Subgraph:**
+**Entity Subgraph:**
 
 ```
 (:StructureNode) -[:HAS_EXTRACTION]-> (:ExtractionResult)
@@ -441,11 +441,11 @@ When the LLM returns malformed JSON, the `utils/llm_repair.py` module attempts r
 
 ### Tabular Pipeline (`run_tabular_pipeline`)
 
-**Purpose:** Ingest CSV, XLSX, and XLS files directly into Neo4j, bypassing Stages 0–4 entirely.
+**Purpose:** Ingest CSV, XLSX, and XLS files directly into the graph, bypassing Stages 0–4 entirely.
 
 **Input:** Directory of raw tabular files (`.csv`, `.xlsx`, `.xls`).
 
-**Output:** `StageResult` with per-file success/failure counts. Neo4j graph updated with Document, Table, and Row nodes.
+**Output:** `StageResult` with per-file success/failure counts. Graph updated with Document, Table, and Row nodes.
 
 **Architecture:**
 
@@ -466,15 +466,15 @@ The tabular pipeline (`tabular/`) uses a **LangGraph**-based state machine (`tab
 **Per-File Process:**
 
 For each tabular file:
-1. Create `:Document` node and folder hierarchy in Neo4j (single transaction)
+1. Create `:Document` node and folder hierarchy in the graph (single transaction)
 2. Run the LangGraph state machine for each sheet
-3. Store raw file binary in MongoDB (if storage backend is configured)
+3. Store raw file binary in the storage backend (if one is configured)
 
 **NormalizationEngine:**
 
 When `normalization_enabled` is `True` (the default — set it to `False` to disable), the `NormalizationEngine` (in `tabular/`) performs post-extraction normalization for nested model fields marked `normalization_model: True`. It batches entries (configurable via `normalization_batch_size`, default: 5) and uses a dedicated LLM (`normalization_llm`, falls back to main `llm`) to normalize values into consistent formats.
 
-**Tabular Neo4j Structure:**
+**Tabular Graph Structure:**
 
 ```
 (:Document) -[:HAS_STRUCTURE]-> (:StructureNode {role: "table"})
@@ -489,7 +489,7 @@ Each row node has a `row_index` property (0-based position within the table).
 When `run_pipeline()` detects tabular files in `input_raw` alongside non-tabular files, it:
 1. Runs the tabular pipeline first for all tabular files
 2. Proceeds with the unstructured pipeline (Stages 0–4) for non-tabular files
-3. Both tracks share the same Neo4j graph and versioning system
+3. Both tracks share the same graph and versioning system
 
 **Tabular-Only Mode:**
 
@@ -520,12 +520,14 @@ unit_results = await asyncio.gather(
 
 The global `get_llm_semaphore()` (size: `llm_concurrency`, default: 4) bounds all LLM calls across all stages. Every `extract_chunk()`, annotation decision, entity extraction, and tabular mapping call acquires this semaphore before invoking the LLM. This prevents exceeding provider rate limits.
 
-### Neo4j-Level Concurrency
+### Graph-Level Concurrency (Neo4j and SQL)
 
-Two separate semaphores control Neo4j access:
+Two separate semaphores control graph access:
 
-- **`get_neo4j_semaphore()`** (size: `neo4j_concurrency`, default: 10): Bounds concurrent Neo4j async sessions during annotation (Stage 3) and entity extraction (Stage 4).
+- **`get_neo4j_semaphore()`** (size: `neo4j_concurrency`, default: 10): Bounds concurrent graph async sessions (Neo4j sessions on Neo4j) during annotation (Stage 3) and entity extraction (Stage 4).
 - **`get_neo4j_sync_semaphore()`** (size: `neo4j_sync_concurrency`, default: 8): Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). Must be acquired/released on the event loop, never inside the worker thread.
+
+The same semaphores are acquired by the stage code whatever the `graph_backend`, so `neo4j_concurrency` and `neo4j_sync_concurrency` also bound the runs on PostgreSQL and SQLite. On the SQL backends the connections are governed by `sql_pool_size` (the pool of each SQL engine), and SQLite additionally serializes writers (`Dialect.max_concurrent_writes`).
 
 ### Per-Document Unit Processing
 
@@ -540,9 +542,9 @@ Two separate semaphores control Neo4j access:
 ### Pre-Warming
 
 Before dispatching document units, `run_pipeline()` pre-warms shared resources:
-1. Opens sync Neo4j driver and sets up schema
+1. Opens the graph store's synchronous scope (the sync driver on Neo4j) and sets up the schema
 2. Resolves batch version for all documents
-3. Ensures catalog models and theme structure exist in Neo4j
+3. Ensures catalog models and theme structure exist in the graph
 4. Initializes storage backends
 
 This reduces per-document startup latency.
@@ -590,11 +592,17 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 | `llm` | — | None | LangChain `BaseChatModel` instance. **Optional** — only required for LLM-dependent stages, not navigation. |
 | `repair_llm` | — | Falls back to `llm` | Secondary LLM for JSON repair |
 | `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
-| `neo4j_user` | `NEO4J_USER` | — | Neo4j username (required) |
-| `neo4j_password` | `NEO4J_PASSWORD` | — | Neo4j password (required) |
-| `neo4j_database` | `NEO4J_DATABASE` | — | Neo4j database name (required) |
-| `storage_backend` | `STORAGE_BACKEND` | `"none"` | `"none"`, `"mongodb"`, or `"custom"` |
-| `graph_backend` | `GRAPH_BACKEND` | `"neo4j"` | Backend for the read-only navigation API |
+| `neo4j_user` | `NEO4J_USER` | — | Neo4j username (required when `graph_backend="neo4j"`) |
+| `neo4j_password` | `NEO4J_PASSWORD` | — | Neo4j password (required when `graph_backend="neo4j"`) |
+| `neo4j_database` | `NEO4J_DATABASE` | — | Neo4j database name (required when `graph_backend="neo4j"`) |
+| `storage_backend` | `STORAGE_BACKEND` | `"none"` | `"none"`, `"mongodb"`, `"postgres"`, `"sqlite"` or `"custom"` |
+| `freeze_backend` | `FREEZE_BACKEND` | resolved `storage_backend` | Same values as `storage_backend` |
+| `graph_backend` | `GRAPH_BACKEND` | `"neo4j"` | Backend for the graph: the pipeline's write path and the read-only navigation API (`"neo4j"`, `"postgres"`, `"sqlite"`) |
+| `sql_url` | `SQL_URL` | `""` | Connection URL shared by every SQL axis (required when any axis is `"postgres"` or `"sqlite"`) |
+| `sql_schema` | `SQL_SCHEMA` | `"newton"` | Postgres schema that holds the tables |
+| `sql_pool_size` | `SQL_POOL_SIZE` | 10 | Connection pool size of each SQL engine |
+| `sql_fulltext_config` | `SQL_FULLTEXT_CONFIG` | `"simple"` | Postgres text-search configuration |
+| `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` | Folder for the binaries kept by the SQLite backend (default: next to the `.db`) |
 | `llm_concurrency` | `LLM_CONCURRENCY` | 4 | Max concurrent LLM calls |
 | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | 10 | Max concurrent Neo4j async sessions |
 | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches |
@@ -612,7 +620,7 @@ The caller always builds the model and passes it as `configure(llm=...)`. Any La
 - `ChatOllama` (Ollama)
 - Any other LangChain chat model with structured output support
 
-The model is selected via `configure(llm=...)` — there is no `MODEL_ID` / environment-variable path. `configure()` does not require it; the stages that call the LLM (1, 3, 4, and tabular normalization) do.
+The usual way is `configure(llm=...)`. As a shortcut for AWS Bedrock, when `llm` is not passed and the `MODEL_ID` environment variable is set, `configure()` builds a `ChatBedrockConverse` from `MODEL_ID`, `AWS_DEFAULT_REGION` and `MAX_TOKENS` (it requires `langchain-aws`). `configure()` does not require a model; the stages that call the LLM (1, 3, 4, and tabular normalization) do.
 
 The LLM is optional: when no `llm` is passed and `MODEL_ID` is unset, scinr runs without an LLM (for example, graph navigation alone). LLM-dependent stages raise a `ConfigurationError` at use time if none is configured.
 
@@ -633,7 +641,8 @@ Each family has dedicated prompt files in `annotation/` and `entity_extraction/`
 `configure()` resets dependent lazy singletons after setting the config:
 - Theme registry
 - Async Neo4j driver singleton
-- MongoDB client
+- MongoDB client (when used)
+- SQL engines and the schema-verification cache (`reset_engines()`)
 - Catalog memoization
 - LLM/Neo4j semaphores (manual reset required via `reset_*_semaphore()`)
 
@@ -838,7 +847,7 @@ Data flows between stages through three mechanisms:
 |---|---|---|
 | **In-memory objects** | Stage N → Stage N+1 | `IntermediateDocument` (0→1), `Document` (1→2), document names (2→3→4). Each object is released as soon as the next stage has consumed it. |
 | **Intermediate JSON files** | Stage N → disk → Stage N+1 | `*.json` (0→1), `extract-*.json` (1→2) |
-| **Neo4j graph** | Stage N → graph → Stage N+1 | `:Document`/`:StructureNode` (2→3→4), annotation subgraph (3→4) |
+| **Graph** | Stage N → graph → Stage N+1 | `:Document`/`:StructureNode` (2→3→4), annotation subgraph (3→4) |
 
 
 ### Intermediate Directory Structure
@@ -888,10 +897,10 @@ result = await run_pipeline(extraction_input_dir="data/json/", extraction_output
 # Stage 2 only (from disk)
 result = await run_pipeline(ingestion_input_dir="data/extract/", stages=["ingestion"])
 
-# Stage 3 only (from Neo4j)
+# Stage 3 only (from the graph)
 result = await run_pipeline(document_names=["MyDocument.pdf"], stages=["annotation"])
 
-# Stage 4 only (from Neo4j)
+# Stage 4 only (from the graph)
 result = await run_pipeline(document_names=["MyDocument.pdf"], stages=["entity_extraction"])
 
 # Tabular only
@@ -900,7 +909,9 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 
 ---
 
-## 7. Neo4j Schema
+## 7. Graph Schema
+
+This section describes the graph's labels and relationships, as the Neo4j graph holds them. The PostgreSQL and SQLite tables that hold the same graph are summarised in the [SQL Graph Backends guide](user-guides/sql-graph.md#table-summary).
 
 ### Node Labels
 
@@ -942,7 +953,7 @@ result = await run_pipeline(input_raw="files/", stages=["tabular"])
 | `HAS_ENTITY` | ExtractionResult → Entity | Triple extraction entity (`role` on the edge distinguishes subject/object) |
 | *(normalized predicate)* | Entity → Entity | Custom Triple relationship — any predicate the LLM produces during entity extraction. Open-ended type set. |
 
-### Constraints and Indexes
+### Constraints and Indexes (Neo4j)
 
 See `graph/neo4j/schema.py` for the complete DDL, and [Neo4j Graph Storage — Indexes and Constraints](user-guides/neo4j-graph.md#indexes-and-constraints) for the list:
 - **Unique constraints** ensuring node identity and preventing duplicates
@@ -1106,7 +1117,7 @@ See the [Graph Store API reference](api/graph-store.md).
 | `RawFileRepository`, `PageRepository` (`storage/base.py`) | Raw files, pages, images ([8](#8-storage-backends)) | MongoDB (`storage/mongodb/`) | `SqlRawFileRepository`, `SqlPageRepository` (`storage/sql/`) |
 | `FreezeRepository` (`freeze/base.py`) | Snapshots ([8c](#8c-document-lifecycle-delete-freeze-restore)) | MongoDB (`freeze/mongodb/`) | `SqlFreezeRepository` (`freeze/sql/`) |
 
-The three configuration axes are independent — `graph_backend` (`neo4j`, `postgres`, `sqlite`), `storage_backend` and `freeze_backend` (`none`, `mongodb`, `postgres`, `sqlite`, `custom`) — except that every SQL axis shares **one** `sql_url`, so they must name the same engine. The factories (`graph/factory.py`, `navigation/factory.py`, `storage/factory.py`, `freeze/factory.py`) import the implementation inside the branch of their backend, so `import scinr.newton` works without Neo4j or the SQL drivers installed; a missing extra surfaces as an error naming the `pip install` to run.
+The three configuration axes are independent — `graph_backend` (`neo4j`, `postgres`, `sqlite`), `storage_backend` and `freeze_backend` (`none`, `mongodb`, `postgres`, `sqlite`, `custom`) — except that every SQL axis shares **one** `sql_url`, so they must name the same engine. The factories (`graph/factory.py`, `navigation/factory.py`, `storage/factory.py`, `freeze/factory.py`) import the implementation inside the branch of their backend, so `import scinr.newton` works without Neo4j or the SQL drivers installed. A missing extra is reported differently per factory: `get_graph_store()` raises an error that names the `pip install` to run (`GraphConnectionError` for Neo4j, `ConfigurationError` for the SQL backends); the navigation, storage and freeze factories import the SQL implementation without that guard, so a missing SQL driver there surfaces as the raw `ImportError`.
 
 ```
 GraphStore / GraphNavigator / RawFileRepository / PageRepository / FreezeRepository
@@ -1134,14 +1145,12 @@ GraphStore / GraphNavigator / RawFileRepository / PageRepository / FreezeReposit
 
 **Equivalence with Neo4j.** The Neo4j implementation is the specification. `tests/contract/` runs the `GraphStore` contract on every backend; `tests/equivalence/` runs the same scenarios on Neo4j + MongoDB and on each SQL engine and compares the written graph and the results of every navigation call, with the accepted differences in `KNOWN_DIFFERENCES`; `tests/storage_contract/` does the same for the repositories; `tests/sql_rls/` checks that a restricted Postgres role cannot read or write other tenants.
 
-<a id="añadir-un-motor-sql"></a>
-
 ### Adding a SQL engine
 
 A new SQL engine (for example DuckDB) is a new dialect, not a new implementation: the stores, the navigator and the repositories are shared. This is what it takes:
 
-1. **Implement the `Dialect` ABC** (`sql/dialect.py`) in a new subclass: set `name`, `json_type` and `list_type`, and implement every abstract method — URLs for the sync and async drivers, `engine_kwargs`, `on_connect` / `on_begin`, `schema_translate_map`, `insert` (with `on_conflict_do_update`), the list and JSON helpers (`append_unique`, `json_set_keys`, `json_remove_keys`, `json_get`, `json_text`, `json_kind`, `json_number`, `json_bool`, `list_contains`, `list_overlaps`), `instance_key_index_sql`, the text helpers (`contains_ci`, `regex_match`, `text_cmp`, `order_text`), the full-text trio (`fulltext_match`, `fulltext_score`, `fulltext_units`), `read_only` (the guarantee behind `execute_raw`), `use_schema`, `classify_error` (transient, unique violation, access denied, connection, authentication, resource), `migration_lock` and `verbatim`. Override `max_concurrent_writes` if the engine has a single writer.
-2. **Register it in `get_dialect()`** by URL scheme, and add the scheme to `_SQL_BACKENDS` and `_SQL_URL_SCHEMES` in `config.py` (and, for the new `graph_backend` / `storage_backend` / `freeze_backend` value, to `_GRAPH_BACKENDS` and `_STORAGE_BACKENDS` and the factories' lists), plus its extra in `pyproject.toml`.
+1. **Implement the `Dialect` ABC** (`sql/dialect.py`) in a new subclass: set `name`, `json_type` and `list_type`, and implement every abstract method — URLs for the sync and async drivers, `engine_kwargs`, `on_connect` / `on_begin`, `schema_translate_map`, `insert` (with `on_conflict_do_update`), the list and JSON helpers (`append_unique`, `json_set_keys`, `json_remove_keys`, `json_get`, `json_text`, `json_kind`, `json_number`, `json_bool`, `list_contains`, `list_overlaps`), `instance_key_index_sql`, the text helpers (`contains_ci`, `regex_match`, `text_cmp`, `order_text`), the full-text trio (`fulltext_match`, `fulltext_score`, `fulltext_units`), `read_only` (the guarantee behind `execute_raw`), `use_schema`, `classify_error` (transient, unique violation, access denied, connection, authentication, resource), `migration_lock` and `verbatim`. Override `max_concurrent_writes` if the engine has a single writer. Set the class attribute `recursive_branches` (`ClassVar[bool]`) for how the recursive walks of the navigator are built: `True` (SQLite) emits one recursive `SELECT` per edge table and direction, combined with `UNION`, so each branch can search an index; `False` (Postgres) emits a single recursive branch over `UNION ALL`, because Postgres forbids referencing the CTE more than once in the recursive term.
+2. **Register it in `get_dialect()`** by URL scheme. In `config.py`, the URL scheme goes in `_SQL_URL_SCHEMES` (scheme to backend name) and the backend name in `_SQL_BACKENDS`, `_GRAPH_BACKENDS` and `_STORAGE_BACKENDS` (and in the factories' lists), plus its extra in `pyproject.toml`.
 3. **Write its migrations** in `sql/migrations/<name>/`: `NNNN_description.sql` files numbered from `0001`, with statements separated by a line containing only `-- statement`, reproducing the tables of the other dialects (`{schema}` and `{fulltext_config}` are substituted by the runner). Decide how binaries are stored: the storage tables (`storage_tables()` in `sql/tables.py`) either have `*_chunks` tables (Postgres) or keep a file path (SQLite).
 4. **Add it to the test registries:** the `BACKENDS` dict of `tests/contract/conftest.py` (the `GraphStore` contract) and of `tests/storage_contract/conftest.py`, and the `sql_engine` fixture of `tests/equivalence/conftest.py` (with a neutral dump in `tests/sql/_dump.py`). Every contract test then runs on the new engine.
 5. **Run the suites and record the differences.** Anything the engine cannot reproduce goes to `KNOWN_DIFFERENCES` in `tests/equivalence/test_read_equivalence.py` and to the [Known differences](user-guides/sql-graph.md#known-differences-from-neo4j) section of the user guide — only with the owner's agreement.
@@ -1219,19 +1228,24 @@ All exceptions inherit from `ScinrError`:
 ```
 ScinrError (base)
 ├── ConfigurationError      # Misconfiguration (missing LLM, invalid storage backend, etc.)
-│   └── GraphConfigurationError  # Graph backend not configured (Neo4j credentials missing)
+│   ├── GraphConfigurationError  # Graph backend not configured (raised by the Neo4j driver and the SQL engine)
+│   └── SchemaVersionError       # RLS schema at the wrong version (also a GraphConnectionError)
 ├── PreconditionError       # Pipeline called out of order
 ├── ExtractionError         # LLM extraction failed after retries
 ├── IngestionError          # Ingesting a document failed (not a graph-engine error)
 ├── ModelError              # Pydantic model resolution failure
-├── StorageError            # MongoDB unavailable/misconfigured
+├── StorageError            # Storage backend (MongoDB, PostgreSQL, SQLite) unavailable/misconfigured
+│                           #   (ImageStorageError; ScopeError and TenantAccessError also derive from it)
 ├── FreezeError             # A document cannot be frozen, restored or snapshotted
 ├── ConversionError         # File converter failure
 ├── NavigationError         # Graph navigation input/misuse (UnsupportedOperationError, ScopeError)
 └── GraphError              # Anything from the graph engine (GraphConnectionError, GraphAuthenticationError,
-                            #   TransientGraphError, GraphResourceError, GraphConstraintError,
-                            #   DocumentVersionConflict, GraphQueryError)
+                            #   SchemaVersionError, TransientGraphError, GraphResourceError,
+                            #   GraphConstraintError, DocumentVersionConflict, GraphQueryError,
+                            #   TenantAccessError)
 ```
+
+`ScopeError` (`NavigationError` and `StorageError`), `TenantAccessError` (`GraphError` and `StorageError`) and `SchemaVersionError` (`GraphConnectionError` and `ConfigurationError`) have two parents. See [Exceptions](api/exceptions.md).
 
 ### Retry Mechanisms
 
