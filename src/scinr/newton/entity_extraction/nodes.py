@@ -8,9 +8,9 @@ import logging
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
-from scinr.newton.config import get_llm
+from scinr.newton.config import get_llm, make_system_message
 from scinr.newton.entity_extraction.graph_mapper import (
     write_extraction_subgraph,
     write_triple_subgraph,
@@ -126,11 +126,11 @@ async def _extract_entities(
         info_units, node_id=node_id, node_title=node_title
     )
 
-    llm_structured = get_llm(temperature=0.0).with_structured_output(
+    llm_structured = get_llm(temperature=0.0, stage="entity_extraction").with_structured_output(
         composite_schema, include_raw=True
     )
     _msgs = [
-        SystemMessage(content=system_prompt),
+        make_system_message(system_prompt, stage="entity_extraction"),
         HumanMessage(content=human_content),
     ]
 

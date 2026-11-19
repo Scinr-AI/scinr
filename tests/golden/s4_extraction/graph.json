@@ -1268,9 +1268,14 @@
       "props": {
         "appearance_order": 2,
         "id": "golden-a::extract.txt::1::misc",
+        "info_units_mode": "summary",
         "node_id": "misc",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "2:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "2 Miscellaneous"
@@ -1285,9 +1290,14 @@
       "props": {
         "appearance_order": 1,
         "id": "golden-a::extract.txt::1::sec_1",
+        "info_units_mode": "summary",
         "node_id": "sec_1",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "1:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1 Products"
@@ -1302,9 +1312,14 @@
       "props": {
         "appearance_order": 2,
         "id": "golden-a::extract.txt::1::sec_1/combo",
+        "info_units_mode": "summary",
         "node_id": "combo",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "2:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1.2 Widget B"
@@ -1319,9 +1334,14 @@
       "props": {
         "appearance_order": 1,
         "id": "golden-a::extract.txt::1::sec_1/prod_a",
+        "info_units_mode": "summary",
         "node_id": "prod_a",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "1:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1.1 Widget A"
@@ -1336,9 +1356,14 @@
       "props": {
         "appearance_order": 2,
         "id": "golden-a::extract2.txt::1::misc",
+        "info_units_mode": "summary",
         "node_id": "misc",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "2:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "2 Miscellaneous"
@@ -1353,9 +1378,14 @@
       "props": {
         "appearance_order": 1,
         "id": "golden-a::extract2.txt::1::sec_1",
+        "info_units_mode": "summary",
         "node_id": "sec_1",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "1:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1 Products"
@@ -1370,9 +1400,14 @@
       "props": {
         "appearance_order": 2,
         "id": "golden-a::extract2.txt::1::sec_1/combo",
+        "info_units_mode": "summary",
         "node_id": "combo",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "2:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1.2 Widget B"
@@ -1387,9 +1422,14 @@
       "props": {
         "appearance_order": 1,
         "id": "golden-a::extract2.txt::1::sec_1/prod_a",
+        "info_units_mode": "summary",
         "node_id": "prod_a",
+        "paragraph_segmenter_version": 1,
         "role": "section",
         "source_page_ids": [],
+        "source_paragraphs": [
+          "1:1-1"
+        ],
         "tenant_id": "golden-a",
         "theme": "default",
         "title": "1.1 Widget A"

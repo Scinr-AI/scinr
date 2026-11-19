@@ -196,6 +196,10 @@ The extraction engine (`extraction/` module) processes documents in **sliding-wi
    - Preservation of parent-child relationships via `parent_id` references
    - Deduplication of nodes that appear across chunk boundaries
 
+**Paragraph anchors and step F:**
+
+Before the first chunk, `ParagraphIndex` (`extraction/paragraphs.py`) splits every page into paragraphs with a deterministic rule (`segment_page()`) and numbers them continuously over the whole document (also in the `fast_extraction` branch). The current pages of the prompt carry a `[[n]]` marker before each paragraph (the previous page does not). The LLM cites each node's paragraphs in `paragraph_ranges`; `extract_chunk()` validates them (invalid ranges are discarded with a warning), strips any copied markers, and the merge steps union the ranges of merged nodes. When the document is complete, step F (`finalize_paragraph_references()`) walks the tree: it overwrites `source_page_ids` from the valid ranges, writes `source_paragraphs` (`"<page>:<from>-<to>"`), `paragraph_segmenter_version` and `info_units_mode`, and, in `info_units_mode="verbatim"`, replaces the node's InfoUnits by one per cited paragraph (`build_verbatim_info_units()`). The index is released when the document finishes and is not passed to ingestion.
+
 **StructureNode Model:**
 
 Each `StructureNode` has:
@@ -206,6 +210,9 @@ Each `StructureNode` has:
 - `parent_id`: reference to parent node's `node_id` (null for top-level)
 - `theme`: theme path (default: `"default"`)
 - `source_page_ids`: list of stored page IDs (set by pipeline, not LLM)
+- `source_paragraphs`: informative `"<page>:<from>-<to>"` spans of the paragraphs the node cites (set by pipeline)
+- `paragraph_segmenter_version`: version of the paragraph segmentation rule (set by pipeline)
+- `info_units_mode`: `"summary"` or `"verbatim"`, how the node's InfoUnits were produced (set by pipeline)
 - `info_units`: list of `InfoUnit` objects — the semantic content extracted from this node
 - `children`: nested `StructureNode` objects
 
@@ -263,7 +270,7 @@ The ingestion module (`ingest/`) provides:
 **Node Properties:**
 
 - `:Document`: `tenant_id`, `name`, `path`, `version`, `latest`, `is_folder`, `raw_file_id`, `load_date`, `context_instructions`, `created_by_user_id`, `job_id` — keyed by `(tenant_id, path, version)`; `tenant_id` is `"__public__"` for public documents
-- `:StructureNode`: `id` (composite key), `title`, `role`, `appearance_order`, `theme`, `source_page_ids`, `row_index` (tabular only)
+- `:StructureNode`: `id` (composite key), `title`, `role`, `appearance_order`, `theme`, `source_page_ids`, `source_paragraphs`, `paragraph_segmenter_version`, `info_units_mode`, `row_index` (tabular only)
 - `:InfoUnit`: `uid`, `title`, `order`, `description`
 
 **Versioning:**

@@ -175,10 +175,10 @@ async def classify_theme(state: TabularState) -> dict:
     )
 
     _msgs = [
-        make_system_message(system_prompt),
+        make_system_message(system_prompt, stage="tabular"),
         HumanMessage(content=human_content),
     ]
-    llm_structured = get_llm(temperature=0.0).with_structured_output(
+    llm_structured = get_llm(temperature=0.0, stage="tabular").with_structured_output(
         ThemeClassification, include_raw=True
     )
     result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
@@ -267,10 +267,10 @@ async def decide_model(state: TabularState) -> dict:
     )
 
     _msgs = [
-        make_system_message(decision_prompt),
+        make_system_message(decision_prompt, stage="tabular"),
         HumanMessage(content=human_content),
     ]
-    llm_structured = get_llm(temperature=0.0).with_structured_output(
+    llm_structured = get_llm(temperature=0.0, stage="tabular").with_structured_output(
         AnnotationDecision, include_raw=True
     )
     result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))
@@ -363,10 +363,10 @@ async def map_columns(state: TabularState) -> dict:
     )
 
     _msgs = [
-        make_system_message(mapping_prompt),
+        make_system_message(mapping_prompt, stage="tabular"),
         HumanMessage(content=human_content),
     ]
-    llm_structured = get_llm(temperature=0.0).with_structured_output(
+    llm_structured = get_llm(temperature=0.0, stage="tabular").with_structured_output(
         ColumnMapping, include_raw=True
     )
     result = await with_llm_retry(lambda: llm_structured.ainvoke(_msgs))

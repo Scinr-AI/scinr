@@ -256,7 +256,7 @@ async def test_file_metadata_travels_from_intermediate_json_to_document(tmp_path
         return document
 
     monkeypatch.setattr(extraction, "_run_chunk_extraction", _no_llm)
-    monkeypatch.setattr(extraction, "get_llm", lambda: None)
+    monkeypatch.setattr(extraction, "get_llm", lambda *, stage=None: None)
     monkeypatch.setattr(extraction, "get_config", lambda: SimpleNamespace(extraction_batch_size=1))
     intermediate = IntermediateDocument(
         pages=[IntermediatePage(index=0, markdown="x", start_ms=0, end_ms=1000)],

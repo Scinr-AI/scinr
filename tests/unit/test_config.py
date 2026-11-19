@@ -577,3 +577,37 @@ class TestOptionalLlm:
         assert cfg.llm is None
         nav = Neo4jGraphNavigator()
         assert isinstance(nav, Neo4jGraphNavigator)
+
+
+class TestVerbatimInfoUnitMaxChars:
+    def _configure(self, **kwargs):
+        return configure(
+            llm=_make_mock_llm(),
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+            **kwargs,
+        )
+
+    def test_default(self, monkeypatch):
+        monkeypatch.delenv("VERBATIM_INFO_UNIT_MAX_CHARS", raising=False)
+        assert self._configure().verbatim_info_unit_max_chars == 4000
+
+    def test_env_var(self, monkeypatch):
+        monkeypatch.setenv("VERBATIM_INFO_UNIT_MAX_CHARS", "1500")
+        assert self._configure().verbatim_info_unit_max_chars == 1500
+
+    def test_argument_beats_env_var(self, monkeypatch):
+        monkeypatch.setenv("VERBATIM_INFO_UNIT_MAX_CHARS", "1500")
+        assert self._configure(verbatim_info_unit_max_chars=2500).verbatim_info_unit_max_chars == 2500
+
+    @pytest.mark.parametrize("value", [99, 0, -5])
+    def test_below_minimum_raises(self, value):
+        with pytest.raises(
+            ConfigurationError,
+            match=f"verbatim_info_unit_max_chars must be >= 100, got {value}",
+        ):
+            self._configure(verbatim_info_unit_max_chars=value)
+
+    def test_minimum_is_accepted(self):
+        assert self._configure(verbatim_info_unit_max_chars=100).verbatim_info_unit_max_chars == 100

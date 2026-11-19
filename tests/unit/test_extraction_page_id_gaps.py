@@ -58,7 +58,7 @@ def _capturing_extract_chunk(calls: list):
     """Return an AsyncMock-compatible side_effect that records curr_page_ids
     and returns an empty node list (compact_extraction() tolerates that)."""
 
-    async def _fn(*, prev_page, curr_pages, active_hierarchy, llm, curr_page_ids, user_context):
+    async def _fn(*, prev_page, curr_pages, active_hierarchy, llm, curr_page_ids, user_context, **_anchor_kwargs):
         calls.append(curr_page_ids)
         return []
 

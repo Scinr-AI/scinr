@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -91,11 +92,25 @@ class InfoUnit(StrictModel):
 # ============================================================
 
 
-class StructureNode(StrictModel):
-    """
-    One structural division of the document (section, subsection, table, etc.).
-    Nodes are hierarchical; children nest within their parent node.
-    """
+InfoUnitsMode = Literal["summary", "verbatim"]
+
+
+class ParagraphRange(StrictModel):
+    """A run of consecutive paragraphs, by their global anchor numbers."""
+
+    start: int = Field(
+        description="Anchor number of the first paragraph of the run (the n of [[n]])."
+    )
+    end: int = Field(
+        description=(
+            "Anchor number of the last paragraph of the run, inclusive. "
+            "Equal to start for a single paragraph."
+        )
+    )
+
+
+class StructureNodeBase(StrictModel):
+    """Fields the extraction LLM sees in every mode."""
 
     node_id: str = Field(
         description=(
@@ -139,12 +154,77 @@ class StructureNode(StrictModel):
         ),
     )
     theme: str = "default"
-    source_page_ids: list[str] = Field(
+    paragraph_ranges: list[ParagraphRange] = Field(
         default_factory=list,
         description=(
-            "Internal infrastructure field. Always output as an empty list []. "
-            "Set by the pipeline after extraction — must not be populated by the LLM."
+            "Anchors of the paragraphs that form THIS node's own content: its heading and its "
+            "body, never the content of its children (each child cites its own). One range "
+            "per continuous run of paragraphs; start == end for a single paragraph. Use only "
+            "anchors [[n]] shown inside <page_1> ... <page_N>."
         ),
+    )
+
+
+class StructureNodeSummaryOutput(StructureNodeBase):
+    """Extraction LLM schema in summary mode."""
+
+    info_units: list[InfoUnit] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of semantic information units extracted from this structural node. "
+            "When the node's title carries semantic content — entity names, numeric values, "
+            "conditions, or qualifiers — represent it as the first InfoUnit (order=0). "
+            "When this node is a sub-entry whose meaning depends on its parent section "
+            "or grouping, the order=0 description incorporates the parent identifier and "
+            "scope (e.g. 'Section 4.2 item (b): ...') — downstream agents have no "
+            "access to parent node titles or any surrounding context. "
+            "Body-text InfoUnits follow at order=1 and above. "
+            "Omit the heading InfoUnit only for pure structural labels with no independently "
+            "useful content (e.g. 'Introduction', 'Scope', 'Overview'). "
+            "InfoUnits are the sole content representation available to downstream agents."
+        ),
+    )
+    children: list[StructureNodeSummaryOutput] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of nested structural nodes that are direct children of this node. "
+            "A child that begins near the bottom of the current page and clearly continues beyond "
+            "it must be OMITTED from this list."
+        ),
+    )
+
+
+class StructureNodeVerbatimOutput(StructureNodeBase):
+    """Extraction LLM schema in verbatim mode: no InfoUnits."""
+
+    children: list[StructureNodeVerbatimOutput] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of nested structural nodes that are direct children of this node. "
+            "A child that begins near the bottom of the current page and clearly continues beyond "
+            "it must be OMITTED from this list."
+        ),
+    )
+
+
+class StructureNode(StructureNodeBase):
+    """Internal model: extract-*.json, merge and ingestion."""
+
+    source_page_ids: list[str] = Field(
+        default_factory=list,
+        description="Ids of the stored pages this node comes from. Set by the pipeline.",
+    )
+    source_paragraphs: list[str] = Field(
+        default_factory=list,
+        description="Informative '<page>:<from>-<to>' (1-based) spans of this node. Set by the pipeline.",
+    )
+    paragraph_segmenter_version: int | None = Field(
+        default=None,
+        description="Version of the paragraph segmentation rule used. Set by the pipeline.",
+    )
+    info_units_mode: InfoUnitsMode = Field(
+        default="summary",
+        description="How this node's InfoUnits were produced. Set by the pipeline.",
     )
     info_units: list[InfoUnit] = Field(
         default_factory=list,
@@ -172,7 +252,9 @@ class StructureNode(StrictModel):
     )
 
 
-# Required for forward reference in `children` field
+# Required for forward references in `children` fields
+StructureNodeSummaryOutput.model_rebuild()
+StructureNodeVerbatimOutput.model_rebuild()
 StructureNode.model_rebuild()
 
 
@@ -181,23 +263,57 @@ StructureNode.model_rebuild()
 # ============================================================
 
 
+def _coerce_nodes_from_string(values):
+    """Coerce nodes from JSON string to list if the LLM serialized it incorrectly."""
+    if isinstance(values, dict) and isinstance(values.get("nodes"), str):
+        values = dict(values)
+        values["nodes"] = json.loads(values["nodes"])
+    return values
+
+
 class DocumentStructure(StrictModel):
     """
-    LLM output per chunk — the list of StructureNodes extracted from one sliding-window chunk.
-    Used as the structured output schema for each LLM call. Results are merged across chunks
-    into a final Document.
+    Document-level node list holding internal StructureNodes. Kept for compatibility; it is no
+    longer the LLM output schema (see DocumentStructureSummaryOutput / VerbatimOutput).
     """
 
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_nodes_from_string(cls, values):
-        """Coerce nodes from JSON string to list if the LLM serialized it incorrectly."""
-        if isinstance(values, dict) and isinstance(values.get("nodes"), str):
-            values = dict(values)
-            values["nodes"] = json.loads(values["nodes"])
-        return values
+    _coerce_nodes_from_string = model_validator(mode="before")(_coerce_nodes_from_string)
 
     nodes: list[StructureNode] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of structural nodes extracted from the current document chunk. "
+            "Includes top-level nodes and any nested children discovered within this chunk."
+        ),
+    )
+
+
+class DocumentStructureSummaryOutput(StrictModel):
+    """
+    LLM output per chunk in summary mode — the list of nodes extracted from one sliding-window
+    chunk. Used as the structured output schema for each LLM call.
+    """
+
+    _coerce_nodes_from_string = model_validator(mode="before")(_coerce_nodes_from_string)
+
+    nodes: list[StructureNodeSummaryOutput] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of structural nodes extracted from the current document chunk. "
+            "Includes top-level nodes and any nested children discovered within this chunk."
+        ),
+    )
+
+
+class DocumentStructureVerbatimOutput(StrictModel):
+    """
+    LLM output per chunk in verbatim mode — the list of nodes (no InfoUnits) extracted from
+    one sliding-window chunk. Used as the structured output schema for each LLM call.
+    """
+
+    _coerce_nodes_from_string = model_validator(mode="before")(_coerce_nodes_from_string)
+
+    nodes: list[StructureNodeVerbatimOutput] = Field(
         default_factory=list,
         description=(
             "Ordered list of structural nodes extracted from the current document chunk. "

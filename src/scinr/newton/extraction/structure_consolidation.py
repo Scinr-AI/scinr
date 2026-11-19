@@ -251,7 +251,7 @@ async def _run_consolidation_call(
             _get_consolidation_output_class(), include_raw=True
         )
         human_text = _build_consolidation_human_message(pool_text, orphan_subset)
-        messages = [make_system_message(system_prompt), HumanMessage(content=human_text)]
+        messages = [make_system_message(system_prompt, stage="extraction"), HumanMessage(content=human_text)]
 
         result = await with_llm_retry(lambda: structured_llm.ainvoke(messages))
 
@@ -429,7 +429,7 @@ async def consolidate_structure(
     """
     if llm is None:
         from scinr.newton.config import get_llm
-        llm = get_llm()
+        llm = get_llm(stage="extraction")
 
     orphans_by_chunk_index: list[list[StructureNode]] = []
     orphan_ids: set[str] = set()

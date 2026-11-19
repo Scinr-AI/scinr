@@ -48,6 +48,8 @@ from scinr.newton import (
 
 Configure the library before using any pipeline function. Must be called once at startup. Parameter resolution order: explicit argument → environment variable → hard-coded default.
 
+Each pipeline stage can have its own LLM, prompt family and prompt caching through `llm_stage_configuration` (`StageLLMConfig`); see [LLM por etapa](../../../docs/configuration.md#llm-por-etapa-per-stage-llm) in `docs/configuration.md`.
+
 ```python
 from langchain_openai import ChatOpenAI
 from scinr.newton import configure
@@ -105,6 +107,7 @@ configure(
 | `consolidation_token_safety_margin` | `float \| None` | `CONSOLIDATION_TOKEN_SAFETY_MARGIN` | `0.75` | Fraction of `max_tokens` used as the output-token ceiling for the Stage 1 `fast_extraction` consolidation LLM call, when `consolidation_max_output_tokens` is unset. |
 | `consolidation_max_output_tokens` | `int \| None` | `CONSOLIDATION_MAX_OUTPUT_TOKENS` | `None` | Explicit output-token ceiling for the consolidation call's decisions array. Derived from `max_tokens * consolidation_token_safety_margin` when unset. |
 | `consolidation_max_input_tokens` | `int \| None` | `CONSOLIDATION_MAX_INPUT_TOKENS` | `65536` | Input-token ceiling governing the batch size of the consolidation call's sliding-window algorithm: `all_chunks` is processed in contiguous batches (each batch's backward buffer is only the immediately preceding batch) kept under this ceiling, instead of sending the full document pool in one call. Passing `None` explicitly (bypassing `configure()`) skips the ceiling check as a defensive fallback only. |
+| `verbatim_info_unit_max_chars` | `int \| None` | `VERBATIM_INFO_UNIT_MAX_CHARS` | `4000` | Maximum characters of each InfoUnit in `info_units_mode="verbatim"`; longer paragraphs are split. Minimum `100`. |
 | `log_level` | `str` | — | `"INFO"` | Logging level string. |
 
 **Returns:** `ScinrConfig` — the populated configuration object (also stored as module-level singleton).
@@ -150,6 +153,7 @@ print(result.success, result.total_duration_seconds)
 | `parallel_docs` | `int` | `1` | Maximum documents processed concurrently across all stages, including tabular. Must be ≥ 1. |
 | `on_partial_failure` | `Literal["abort", "continue", "warn"]` | `"abort"` | Behaviour when a stage returns `success=False`. `"abort"`: stop immediately. `"continue"`: proceed. `"warn"`: log warning and proceed. |
 | `fast_extraction` | `bool` | `False` | Opt-in: runs Stage 1 extraction chunks in parallel with a deferred, single-call consolidation step instead of the default sequential per-chunk loop. Raises `ValueError` if `True` while `"extraction"` is not in `stages`. See [Performance Tuning](../../../docs/user-guides/performance-tuning.md#fast-extraction-fast_extraction) for the full trade-off. |
+| `info_units_mode` | `Literal["summary", "verbatim"]` | `"summary"` | How Stage 1 builds InfoUnits: `"summary"` keeps the LLM-written summaries; `"verbatim"` makes the LLM return only structure and paragraph ranges, and the pipeline copies the cited paragraphs as InfoUnits (split by `verbatim_info_unit_max_chars`). Raises `ValueError` if invalid or if `"verbatim"` is used while `"extraction"` is not in `stages`. See [Running the Pipeline](../../../docs/user-guides/running-pipeline.md#info_units_mode--infounits-of-stage-1). |
 | `tabular_extensions` | `set[str] \| None` | `None` | File extensions treated as tabular. Defaults to `{'.csv', '.xlsx', '.xls'}`. |
 | `tabular_delimiter` | `str \| None` | `None` | CSV field delimiter forwarded to the tabular agent. Uses agent default when `None`. |
 

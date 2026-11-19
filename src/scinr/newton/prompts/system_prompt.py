@@ -13,6 +13,10 @@ To add a new prompt family:
   3. Add an elif branch in build_extraction_prompt() below
 """
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scinr.newton.config import PromptFamily
 
 _EXTRACTION_PROMPT_PREFIX = """
 You are a precision document-structure extraction engine. You operate inside an automated ingestion pipeline whose output is consumed by a graph database without human review. Your sole function is to convert raw markdown text into a validated DocumentStructure object. An incorrect extraction — invented content, wrong hierarchy, malformed IDs — will corrupt the downstream graph and cannot be corrected automatically.
@@ -55,26 +59,64 @@ You may also receive an optional fourth input:
    case. Absent entirely in the normal sequential path — do not assume
    any particular extraction mode when this tag is not present."""
 
+PARAGRAPH_ANCHORS_SECTION = """## Paragraph Anchors
 
-def build_extraction_prompt(theme_section: str) -> str:
+Every paragraph inside <page_1> ... <page_N> is preceded by an anchor on its own line, of the form [[n]], where n is an integer. Anchors are numbered continuously across the whole document. <previous_page> has no anchors.
+
+For every StructureNode you output, fill `paragraph_ranges` with the anchors of the paragraphs that form THAT node's own content:
+- Include the node's heading paragraph and its body paragraphs.
+- Do NOT include paragraphs that belong to its children — each child cites its own.
+- Use one range {"start": a, "end": b} per continuous run of paragraphs (start == end for a single paragraph). Use several ranges when the node's content is interrupted, for example by a page footer.
+- Cite only anchors that appear inside <page_1> ... <page_N>. Never invent an anchor number.
+- Do not cite running headers, footers, page numbers or other layout noise.
+- A node that continues beyond the current pages cites only the paragraphs visible in the current pages.
+
+Anchors are references only. NEVER copy an anchor ([[n]]) into `title` or into any other text field."""
+
+_HEADING_INFO_UNIT_SENTENCE = (
+    "When a section heading contains semantic content (entity names, numeric values, or "
+    "conditions), capture that content as the first InfoUnit of that node — downstream "
+    "agents access only InfoUnits, not the original heading text."
+)
+_VERBATIM_CONTENT_SENTENCE = (
+    "Do not rewrite or summarise the content. The pipeline copies the original text of "
+    "every paragraph you cite in `paragraph_ranges`: your output is the structure and the "
+    "paragraph references only."
+)
+assert _HEADING_INFO_UNIT_SENTENCE in _EXTRACTION_PROMPT_PREFIX
+_EXTRACTION_PROMPT_PREFIX_VERBATIM = _EXTRACTION_PROMPT_PREFIX.replace(
+    _HEADING_INFO_UNIT_SENTENCE, _VERBATIM_CONTENT_SENTENCE
+)
+
+
+def build_extraction_prompt(
+    theme_section: str,
+    *,
+    family: "PromptFamily | None" = None,
+    info_units_mode: str = "summary",
+) -> str:
     """Dispatch to the correct extraction prompt variant based on configured PromptFamily.
 
     Args:
         theme_section: XML block from theme_registry.build_theme_section_for_extraction_prompt()
+        family: Prompt family to use. Defaults to the family configured for the
+            extraction stage.
+        info_units_mode: "summary" (LLM writes InfoUnits) or "verbatim" (LLM only
+            cites paragraph ranges).
 
     Returns:
         Complete system prompt string ready for use as SystemMessage content.
     """
     from scinr.newton.config import PromptFamily, get_prompt_family
 
-    family = get_prompt_family()
+    family = family if family is not None else get_prompt_family(stage="extraction")
     if family == PromptFamily.CLAUDE:
         from scinr.newton.prompts import system_prompt_claude as m
     elif family == PromptFamily.GPT_REASONING:
         from scinr.newton.prompts import system_prompt_gpt_reasoning as m
     else:
         from scinr.newton.prompts import system_prompt_generic as m
-    return m.build_extraction_prompt(theme_section)
+    return m.build_extraction_prompt(theme_section, info_units_mode=info_units_mode)
 
 
 # Legacy constant — uses generic variant by default.

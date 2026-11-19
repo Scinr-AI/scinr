@@ -72,6 +72,53 @@ def _base_kwargs(**overrides: object) -> dict:
     return kwargs
 
 
+class TestInfoUnitsModeForwarding:
+    """info_units_mode reaches both Stage 1 entry points explicitly."""
+
+    async def test_verbatim_reaches_extract_one_intermediate(self, monkeypatch):
+        unit = DocumentUnit(
+            kind="raw_file",
+            source_path=Path("/tmp/does-not-matter.pdf"),
+            doc_path="doc1",
+            relative_dir=Path("."),
+            document_name_hint="doc1",
+        )
+        intermediate_doc = MagicMock(name="IntermediateDocument")
+        monkeypatch.setattr(
+            "scinr.newton.converters.main.convert_one",
+            AsyncMock(return_value=([(unit.source_path, Path("/tmp/out.json"), intermediate_doc)], [])),
+        )
+        mock_extract = AsyncMock(return_value=None)
+        monkeypatch.setattr("scinr.newton.stages.extraction.extract_one_intermediate", mock_extract)
+
+        await _process_document_unit(
+            unit,
+            **_base_kwargs(
+                effective_stages=["preprocess", "extraction"], info_units_mode="verbatim"
+            ),
+        )
+
+        assert mock_extract.await_args.kwargs["info_units_mode"] == "verbatim"
+
+    async def test_verbatim_reaches_extract_one_file(self, monkeypatch):
+        unit = DocumentUnit(
+            kind="extraction_json",
+            source_path=Path("/tmp/some-file.json"),
+            doc_path="doc2",
+            relative_dir=Path("."),
+            document_name_hint="doc2",
+        )
+        mock_extract = AsyncMock(return_value=None)
+        monkeypatch.setattr("scinr.newton.stages.extraction.extract_one_file", mock_extract)
+
+        await _process_document_unit(
+            unit,
+            **_base_kwargs(effective_stages=["extraction"], info_units_mode="verbatim"),
+        )
+
+        assert mock_extract.await_args.kwargs["info_units_mode"] == "verbatim"
+
+
 class TestFullSuccessRawFile:
     """Scenario (a): a raw_file unit traverses all five stages successfully."""
 
@@ -156,6 +203,7 @@ class TestFullSuccessRawFile:
             intermediate_doc,
             None,
             fast_extraction=False,
+            info_units_mode="summary",
             tenant_id=None,
             created_by_user_id=None,
             job_id=None,

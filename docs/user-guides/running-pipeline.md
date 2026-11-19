@@ -105,6 +105,7 @@ async def run_pipeline(
 
     # ── Stage 1 extraction mode (opt-in) ─────────────────────────────────────
     fast_extraction: bool = False,
+    info_units_mode: Literal["summary", "verbatim"] = "summary",
 
     # ── Behaviour on partial failure ─────────────────────────────────────────
     on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
@@ -499,6 +500,50 @@ included in `stages` — the flag has no effect without Stage 1 running.
 
 See [Performance Tuning: Fast Extraction](performance-tuning.md#fast-extraction-fast_extraction)
 for the full trade-off and risk explanation before enabling this in production.
+
+### `info_units_mode` — InfoUnits of Stage 1
+
+**Type:** `Literal["summary", "verbatim"]`  **Default:** `"summary"`
+
+Chooses how Stage 1 builds the InfoUnits of each node. Like `fast_extraction`, it is resolved
+once per `run_pipeline()` call and passed explicitly down to the extraction chunk, never read
+from global config. The two parameters are independent: all four combinations are valid.
+
+In both modes the current pages of the extraction prompt carry a `[[n]]` marker before each
+paragraph, and the LLM cites the paragraphs of every node in `paragraph_ranges`. The pipeline
+validates the ranges (invalid ones are discarded with a warning), derives `source_page_ids`
+from them and stores `source_paragraphs`, `paragraph_segmenter_version` and `info_units_mode`
+on every `StructureNode`.
+
+| | `"summary"` (default) | `"verbatim"` |
+| :--- | :--- | :--- |
+| Who writes the InfoUnits | The LLM, as summaries | The pipeline, copying the cited paragraphs |
+| LLM output | Structure, ranges and InfoUnits | Structure and ranges only |
+| InfoUnits per node | As many as the LLM writes | One per cited paragraph; longer than `verbatim_info_unit_max_chars` (default 4000) is split |
+| InfoUnit title | Written by the LLM | First words of the text |
+| `info_units_mode` stored on the node | `"summary"` | `"verbatim"` |
+
+Expected cost: the extraction input is about the same as today (the markers add little, and
+`verbatim` drops the InfoUnit instructions); the output of `verbatim` is **much smaller**,
+since the LLM writes no descriptions, and broken-JSON repair calls should be rarer. Annotation
+and entity extraction receive the literal text instead of a summary, so their input is
+somewhat larger. After each document an `INFO` log line reports the paragraphs numbered, the
+share cited by at least one node (the coverage, the main signal for content the LLM forgot to
+cite in `verbatim` mode), the ranges discarded and the nodes without valid ranges.
+
+```python
+result = await run_pipeline(
+    input_raw="./raw_docs",
+    stages=["preprocess", "extraction", "ingestion"],
+    info_units_mode="verbatim",
+)
+```
+
+Raises `ValueError` if the value is not `"summary"` or `"verbatim"`, or if `"verbatim"` is
+passed while `"extraction"` is not included in `stages`. Re-ingesting a document in another
+mode creates a new version, like any re-ingestion. `run_extraction()` (the older entry point)
+always uses `"summary"`. `extract-*.json` files written with this feature cannot be read by
+earlier versions of the library.
 
 ### `on_partial_failure` — Error Handling Strategy
 

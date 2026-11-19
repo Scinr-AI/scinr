@@ -4,6 +4,7 @@ scinr-ingest — Document ingestion and entity extraction pipeline for a knowled
 """
 
 from scinr.newton.config import (
+    StageLLMConfig,
     ThemePath,
     configure,
     get_available_themes,
@@ -90,6 +91,7 @@ __all__ = [
     "get_config",
     "get_available_themes",
     "ThemePath",
+    "StageLLMConfig",
     # Media (audio / video transcription)
     "Transcriber",
     "TranscriptCue",

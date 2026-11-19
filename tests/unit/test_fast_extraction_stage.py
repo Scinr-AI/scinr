@@ -107,6 +107,7 @@ async def _fake_extract_chunk(
     curr_page_ids=None,
     user_context="",
     defer_hierarchy=False,
+    **_anchor_kwargs,
 ):
     return [n.model_copy(deep=True) for n in _make_chunk_nodes(curr_pages[0])]
 
@@ -217,6 +218,7 @@ class TestFastExtractionChunkFailureIsolation:
             curr_page_ids=None,
             user_context="",
             defer_hierarchy=False,
+            **_anchor_kwargs,
         ):
             if curr_pages[0] == "PAGE1":
                 raise ExtractionMaxRetriesError("simulated failure for PAGE1's chunk")

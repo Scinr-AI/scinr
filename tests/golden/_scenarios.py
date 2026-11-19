@@ -102,6 +102,9 @@ def node(
         info_units=[
             InfoUnit(title=t, order=i, description=d) for i, (t, d) in enumerate(infos or [])
         ],
+        source_paragraphs=[f"{order}:1-{max(1, len(infos or []))}"],
+        paragraph_segmenter_version=1,
+        info_units_mode="summary",
         children=children or [],
     )
 

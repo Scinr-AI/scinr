@@ -8,7 +8,11 @@ The sliding-window content (<previous_page>, <page_1>...<page_N>, <active_hierar
 is injected as the human turn at call time.
 """
 
-from scinr.newton.prompts.system_prompt import _EXTRACTION_PROMPT_PREFIX  # shared prefix
+from scinr.newton.prompts.system_prompt import (
+    _EXTRACTION_PROMPT_PREFIX,
+    _EXTRACTION_PROMPT_PREFIX_VERBATIM,
+    PARAGRAPH_ANCHORS_SECTION,
+)
 
 _EXTRACTION_PROMPT_SUFFIX_GENERIC = """
 ## Extraction Protocol
@@ -295,12 +299,15 @@ constraints, capture as many well-evidenced nodes and InfoUnits as possible.
 ### Example 1 — Standard section with multiple InfoUnits
 
 Source fragment (CURRENT_PAGE):
+  [[1]]
   2.1 Scope
 
+  [[2]]
   This standard applies to all digital records submitted to the central repository.
   Records must be submitted in PDF/A format. Submissions in other formats will be
   rejected without review.
 
+  [[3]]
   Each record must include a unique record identifier assigned by the submitting
   institution. The identifier format is: {institution_code}-{YYYY}-{sequence}.
 
@@ -315,6 +322,7 @@ Correct extraction:
       "appearance_order": 1,
       "parent_id": null,
       "children": [],
+      "paragraph_ranges": [{"start": 1, "end": 3}],
       "info_units": [
         {
           "title": "Submission Format Requirement",
@@ -350,13 +358,17 @@ Context:
     - node_id="4" role="section" title="4 Data Management"
 
 CURRENT_PAGE:
+  [[12]]
   4.1 Data Retention
 
+  [[13]]
   All records must be retained for a minimum of seven years from the date of creation.
   Records subject to ongoing litigation must be retained until the matter is resolved.
 
+  [[14]]
   4.2 Data Deletion
 
+  [[15]]
   Records may be deleted after the retention period has elapsed, provided a deletion
   log entry is created.
 
@@ -371,6 +383,7 @@ Correct extraction:
       "appearance_order": 1,
       "parent_id": "4",
       "children": [],
+      "paragraph_ranges": [{"start": 12, "end": 13}],
       "info_units": [
         {
           "title": "Minimum Retention Period",
@@ -386,6 +399,7 @@ Correct extraction:
       "appearance_order": 2,
       "parent_id": "4",
       "children": [],
+      "paragraph_ranges": [{"start": 14, "end": 15}],
       "info_units": [
         {
           "title": "Deletion Eligibility Condition",
@@ -416,10 +430,12 @@ Context:
     - node_id="3_1" role="subsection" title="3.1 Data Collection"
 
 CURRENT_PAGE:
+  [[30]]
   Interviews were conducted using a semi-structured protocol. Each session lasted between
   45 and 90 minutes. All sessions were recorded with participant consent and transcribed
   verbatim.
 
+  [[31]]
   Field notes were taken during each session to capture non-verbal observations.
 
 Correct extraction:
@@ -433,6 +449,7 @@ Correct extraction:
       "appearance_order": 4,
       "parent_id": "3_1",
       "children": [],
+      "paragraph_ranges": [{"start": 30, "end": 31}],
       "info_units": [
         {
           "title": "Interview Protocol Details",
@@ -462,7 +479,312 @@ Return ONLY the JSON DocumentStructure object. Do not add explanatory text befor
 """
 
 
-def build_extraction_prompt(theme_section: str) -> str:
+_EXTRACTION_PROMPT_SUFFIX_GENERIC_VERBATIM = """
+## Extraction Protocol
+
+Execute the following steps in strict order for every call. No step may be skipped.
+
+**Step 1 — Classify the page.**
+Determine whether CURRENT_PAGE contains extractable content.
+Return `{"nodes": []}` immediately and stop if the page is:
+- Blank, or contains only whitespace, page numbers, running headers, or footers.
+- A table of contents, cover page, revision history, bibliography, or purely administrative page.
+
+**Step 2 — Read <previous_page> for context only.**
+Identify: (a) the section number or appearance_order of the last top-level section visible,
+so you can continue the sequence correctly on CURRENT_PAGE; (b) whether any section heading
+started in <previous_page> and is still continuing on CURRENT_PAGE (meaning CURRENT_PAGE
+begins with a continuation, not a new node).
+Do NOT extract any node from <previous_page>.
+
+**Step 3 — Detect structural boundaries on CURRENT_PAGE.**
+Locate every heading that marks the start of a new structural unit. Classify each candidate:
+- Headings that introduce a new section, subsection, table, or block → extract as nodes.
+- Running document headers, page titles, metadata lines → ignore entirely.
+- Footnotes, captions, page numbers → ignore entirely.
+- Heading and body text of a node → cited in that node's paragraph_ranges.
+
+**Step 4 — Assign roles and resolve hierarchy.**
+For each candidate node, determine its role using the NodeRole decision tree:
+- `section`: top-level named division, carries an ordered identifier or stands alone at the top level.
+- `subsection`: named division nested inside a section; carries a sub-identifier (e.g. 2.1).
+- `table`: tabular data block introduced by a table heading or caption.
+- `field_group`: structured list of labelled fields (form-like layout).
+- `freeform_block`: narrative prose with no heading identifier; used for continuation pages.
+- `appendix`: appendix or annex; treat identically to section for matching purposes.
+
+Resolve the parent relationship using this priority order:
+1. Parent heading visible on CURRENT_PAGE → nest the node inside that parent's `children` list;
+   set `parent_id` to null (the parent object already contains it).
+2. Parent heading NOT on CURRENT_PAGE but present in <active_hierarchy> → output the node as a
+   top-level item in `nodes`; set `parent_id` to the exact `node_id` from <active_hierarchy>.
+   Never re-extract or recreate the parent node.
+3. Parent not visible and not in <active_hierarchy> → output as a top-level item with
+   `parent_id: null` (ORPHANED). Post-processing re-nests it via node_id prefix matching.
+   Never invent or recreate a parent node to house orphaned children.
+4. No heading visible anywhere on CURRENT_PAGE → entire page is a freeform_block continuation
+   (see Failure Mode 3 below).
+
+**Step 5 — Cite paragraphs:** fill paragraph_ranges for every node following the Paragraph Anchors section.
+
+**Step 6 — Assign node_ids and appearance_order.**
+Follow the node_id FORMAT A/B rules and appearance_order rules defined in the output schema
+field descriptions. Never mix FORMAT A (underscores) and FORMAT B (hyphens) separators within
+a single output — the separator type is load-bearing for post-processing.
+
+**Step 7 — Schema pre-flight.**
+The output has unique node_ids throughout. Orphaned nodes appear as top-level items with the
+full numeric path encoded in their node_id.
+
+
+## Sliding Window Rules
+
+The pipeline processes documents in overlapping 2-page windows.
+
+1. Extract from CURRENT_PAGE only. Every StructureNode must be grounded in text
+   present in CURRENT_PAGE. <previous_page> is read-only context.
+
+2. Do not re-emit active hierarchy nodes. Any node listed in <active_hierarchy> was already
+   extracted in a previous chunk. Do NOT re-emit it as a new StructureNode. Do NOT recreate
+   it as a shell to house its children.
+
+3. Continuing nodes: if a node's heading appeared in <previous_page> and its content continues
+   on CURRENT_PAGE, cite ONLY the new content from CURRENT_PAGE in paragraph_ranges. Set parent_id
+   to the node's node_id from <active_hierarchy> if present.
+
+4. Orphaned nodes: if a node's parent heading is not visible on CURRENT_PAGE and is not in
+   <active_hierarchy>, output the node as a top-level item with parent_id null. Post-processing
+   re-nests it via node_id prefix matching. Never invent or recreate a parent node.
+
+5. Continuation-only pages (no heading visible anywhere on CURRENT_PAGE): extract the content
+   as a single freeform_block node. Set parent_id to the node_id of the LAST entry in
+   <active_hierarchy> (the deepest open node); if <active_hierarchy> is "(none)", set
+   parent_id null. Set title to null. Cite the body paragraphs in paragraph_ranges.
+   Do NOT return `nodes: []` — returning an empty list silently discards content.
+   Exception: if CURRENT_PAGE contains only whitespace, page numbers, or running headers
+   with no body text, apply Step 1 and return `nodes: []`.
+
+
+## Failure Modes
+
+Each failure state has exactly one correct response.
+
+**Failure 1 — Blank or header-only page:**
+CURRENT_PAGE is blank, or contains only page numbers, running headers, or footers.
+→ Return `{"nodes": []}`.
+
+**Failure 2 — Administrative page:**
+CURRENT_PAGE is a table of contents, cover page, revision history, bibliography, or purely
+administrative page.
+→ Return `{"nodes": []}`.
+
+**Failure 3 — Continuation-only page (no heading visible):**
+CURRENT_PAGE contains only continuation text from a section whose heading is not visible on
+either <previous_page> or CURRENT_PAGE.
+→ Extract as a single freeform_block node.
+→ Set parent_id to the node_id of the LAST entry in <active_hierarchy>; if "(none)", set null.
+→ Set title to null.
+→ Cite the body paragraphs in paragraph_ranges.
+→ Do NOT return `nodes: []`.
+
+**Failure 4 — Section continues beyond page end:**
+A heading begins in CURRENT_PAGE but the section's content clearly continues beyond the page
+end (page ends mid-sentence, mid-table, or mid-list within that section).
+→ Omit that node. Extract all other complete nodes from the page normally.
+"Substantially complete" means the heading and its primary content are visible and the page
+does not end mid-sentence or mid-table within that section.
+
+**Failure 5 — Heading with no body text on this page:**
+A heading appears in CURRENT_PAGE but its body content begins on the next page (no body text
+is visible here).
+→ Omit the node. Do not create a shell node without evidenced content.
+
+**Failure 6 — Table spanning two pages:**
+A table begins in <previous_page> and continues in CURRENT_PAGE.
+→ Cite only the rows visible in the current pages.
+→ Set parent_id to the table's node_id from <active_hierarchy> if present.
+→ Do not re-extract rows already processed in the previous chunk.
+
+**Failure 7 — Ambiguous node role:**
+→ Apply the identifier test: does the heading carry an ordered identifier?
+  YES → section (if top-level) or subsection (if nested).
+  NO  → section (if top-level) or freeform_block (if nested).
+→ If level ambiguity persists, use <previous_page> hierarchy to resolve.
+→ If still ambiguous, assign the higher-level role (section over subsection or freeform_block).
+→ EXCEPTION: if <extraction_mode> is present and reads "fast", invert this fallback — prefer
+  the lower-level role (subsection or freeform_block) instead of section, since a chunk
+  processed in isolation cannot reliably confirm a new top-level section and a wrong SECTION
+  classification is permanent.
+
+**Failure 8 — Orphaned subsections (parent extracted in a previous chunk):**
+CURRENT_PAGE contains only subsections whose parent was extracted in a previous chunk.
+→ Do NOT return `nodes: []`. These are valid nodes.
+→ If the parent node_id is in <active_hierarchy>: set parent_id to that node_id exactly.
+→ If the parent is absent from <active_hierarchy>: output as a top-level item with parent_id null.
+→ Never re-extract or recreate the parent node.
+
+
+## Output Integrity
+
+All output must satisfy these three rules. Each prevents a specific type of corruption in the
+downstream graph.
+
+1. Every node_id traces directly to actual heading text in CURRENT_PAGE, or to the full numeric
+   path for orphaned nodes (e.g. subsection 2.1.3 whose parent was extracted previously →
+   node_id "2_1_3").
+
+2. A non-empty CURRENT_PAGE always produces at least one node. Pages with body text but no
+   visible heading become a freeform_block under Failure Mode 3.
+
+3. Every node_id in a single output uses either FORMAT A separators (underscores) or FORMAT B
+   separators (hyphens) — never both. The separator type is load-bearing for post-processing.
+
+When rules conflict, apply this priority: (1) source fidelity — only what is explicitly present
+in CURRENT_PAGE is valid evidence; (2) schema compliance — a structurally invalid output is
+always worse than an incomplete one; (3) conservative completeness — omitting a questionable
+node is safer than including invented content; (4) coverage — within the above constraints,
+capture as many well-evidenced nodes as possible.
+
+
+## Examples
+
+### Example 1 — Standard section
+
+Source fragment (CURRENT_PAGE):
+  [[1]]
+  2.1 Scope
+
+  [[2]]
+  This standard applies to all digital records submitted to the central repository.
+  Records must be submitted in PDF/A format. Submissions in other formats will be
+  rejected without review.
+
+  [[3]]
+  Each record must include a unique record identifier assigned by the submitting
+  institution. The identifier format is: {institution_code}-{YYYY}-{sequence}.
+
+Correct extraction:
+```json
+{
+  "nodes": [
+    {
+      "node_id": "2_1",
+      "title": "2.1 Scope",
+      "role": "subsection",
+      "appearance_order": 1,
+      "parent_id": null,
+      "children": [],
+      "paragraph_ranges": [{"start": 1, "end": 3}]
+    }
+  ]
+}
+```
+
+Notes:
+- appearance_order is 1 because this is the first child of section 2.
+
+---
+
+### Example 2 — Orphaned subsections (parent extracted in a previous chunk)
+
+Context:
+  <previous_page> ended mid-way through "4 Data Management" (still in progress).
+  <active_hierarchy>:
+    - node_id="4" role="section" title="4 Data Management"
+
+CURRENT_PAGE:
+  [[12]]
+  4.1 Data Retention
+
+  [[13]]
+  All records must be retained for a minimum of seven years from the date of creation.
+  Records subject to ongoing litigation must be retained until the matter is resolved.
+
+  [[14]]
+  4.2 Data Deletion
+
+  [[15]]
+  Records may be deleted after the retention period has elapsed, provided a deletion
+  log entry is created.
+
+Correct extraction:
+```json
+{
+  "nodes": [
+    {
+      "node_id": "4_1",
+      "title": "4.1 Data Retention",
+      "role": "subsection",
+      "appearance_order": 1,
+      "parent_id": "4",
+      "children": [],
+      "paragraph_ranges": [{"start": 12, "end": 13}]
+    },
+    {
+      "node_id": "4_2",
+      "title": "4.2 Data Deletion",
+      "role": "subsection",
+      "appearance_order": 2,
+      "parent_id": "4",
+      "children": [],
+      "paragraph_ranges": [{"start": 14, "end": 15}]
+    }
+  ]
+}
+```
+
+Notes:
+- "4 Data Management" is NOT re-extracted — it was captured in a previous chunk.
+- parent_id is set to "4" (from <active_hierarchy>) for both nodes.
+- Both nodes are output as top-level items in `nodes` (not nested inside a recreated parent).
+- appearance_order restarts at 1 among siblings (4.1 = 1, 4.2 = 2).
+
+---
+
+### Example 3 — Continuation-only page (no heading visible)
+
+Context:
+  <active_hierarchy>:
+    - node_id="3" role="section" title="3 Methodology"
+    - node_id="3_1" role="subsection" title="3.1 Data Collection"
+
+CURRENT_PAGE:
+  [[30]]
+  Interviews were conducted using a semi-structured protocol. Each session lasted between
+  45 and 90 minutes. All sessions were recorded with participant consent and transcribed
+  verbatim.
+
+  [[31]]
+  Field notes were taken during each session to capture non-verbal observations.
+
+Correct extraction:
+```json
+{
+  "nodes": [
+    {
+      "node_id": "4-continuation",
+      "title": null,
+      "role": "freeform_block",
+      "appearance_order": 4,
+      "parent_id": "3_1",
+      "children": [],
+      "paragraph_ranges": [{"start": 30, "end": 31}]
+    }
+  ]
+}
+```
+
+Notes:
+- No heading on CURRENT_PAGE → freeform_block continuation (Failure Mode 3).
+- parent_id is set to "3_1" (the deepest entry in <active_hierarchy>).
+- title is null.
+- `nodes: []` is NOT returned — the content is preserved.
+
+Return ONLY the JSON DocumentStructure object. Do not add explanatory text before or after it.
+"""
+
+
+def build_extraction_prompt(theme_section: str, *, info_units_mode: str = "summary") -> str:
     """Assembles the generic extraction system prompt with the dynamic theme section.
 
     Uses the shared PREFIX from system_prompt.py and the generic SUFFIX.
@@ -474,7 +796,25 @@ def build_extraction_prompt(theme_section: str) -> str:
     Returns:
         Complete system prompt string ready for use as SystemMessage content.
     """
-    return _EXTRACTION_PROMPT_PREFIX + "\n\n" + theme_section + "\n\n" + _EXTRACTION_PROMPT_SUFFIX_GENERIC
+    if info_units_mode == "verbatim":
+        return (
+            _EXTRACTION_PROMPT_PREFIX_VERBATIM
+            + "\n\n"
+            + theme_section
+            + "\n\n"
+            + _EXTRACTION_PROMPT_SUFFIX_GENERIC_VERBATIM
+            + "\n\n"
+            + PARAGRAPH_ANCHORS_SECTION
+        )
+    return (
+        _EXTRACTION_PROMPT_PREFIX
+        + "\n\n"
+        + theme_section
+        + "\n\n"
+        + _EXTRACTION_PROMPT_SUFFIX_GENERIC
+        + "\n\n"
+        + PARAGRAPH_ANCHORS_SECTION
+    )
 
 
 # Legacy constant for tests and code that hasn't been updated yet.
