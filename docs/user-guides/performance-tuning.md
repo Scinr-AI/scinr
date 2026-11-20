@@ -202,9 +202,23 @@ configure(extraction_batch_size=1)  # Default: 1 page per chunk
 | Very long documents (100+ pages) | 2-3 | Reduces call count significantly |
 | Documents with complex tables | 1 | Tables need focused context; grouping may lose detail |
 
-### Verbatim InfoUnits (`info_units_mode`)
+### InfoUnits mode (`info_units_mode`)
 
-**Default:** `"summary"`  **Passed to:** `run_pipeline(info_units_mode=...)`
+**Default:** `"auto"`  **Passed to:** `run_pipeline(info_units_mode=...)`
+
+| Mode | Stage 1 output tokens | Extra calls | When to use |
+| :--- | :--- | :--- | :--- |
+| `"verbatim"` | Smallest | None | Fastest and cheapest; fine when the documents are mostly clear prose |
+| `"auto"` (default) | Small: structure, ranges and one decision per node | One per node rewritten (input bounded by `auto_info_units_max_input_chars`) | Best quality per cost: copies clear text, rewrites tables and context-dependent fragments |
+| `"summary"` | Largest | None | The previous behaviour: the LLM rewrites everything |
+
+In `auto`, the number of extra calls is the number of `summary` nodes (more when a node's text
+exceeds `auto_info_units_max_input_chars`); check the per-document `Auto info units` log line.
+A lower `auto_info_units_max_input_chars` makes more, smaller calls; a higher one makes fewer,
+larger ones. The calls respect `llm_concurrency` and use the `extraction` stage LLM, so a
+cheaper model can be assigned to them through `llm_stage_configuration`.
+
+#### `verbatim` in detail
 
 Stage 1 output tokens are usually its largest cost, because the LLM writes a summary of every
 node. With `info_units_mode="verbatim"` the LLM returns only the structure and the paragraph

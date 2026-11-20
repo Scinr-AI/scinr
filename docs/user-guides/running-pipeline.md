@@ -105,7 +105,7 @@ async def run_pipeline(
 
     # ── Stage 1 extraction mode (opt-in) ─────────────────────────────────────
     fast_extraction: bool = False,
-    info_units_mode: Literal["summary", "verbatim"] = "summary",
+    info_units_mode: Literal["auto", "summary", "verbatim"] = "auto",
 
     # ── Behaviour on partial failure ─────────────────────────────────────────
     on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
@@ -503,29 +503,50 @@ for the full trade-off and risk explanation before enabling this in production.
 
 ### `info_units_mode` — InfoUnits of Stage 1
 
-**Type:** `Literal["summary", "verbatim"]`  **Default:** `"summary"`
+**Type:** `Literal["auto", "summary", "verbatim"]`  **Default:** `"auto"`
 
 Chooses how Stage 1 builds the InfoUnits of each node. Like `fast_extraction`, it is resolved
 once per `run_pipeline()` call and passed explicitly down to the extraction chunk, never read
 from global config. The two parameters are independent: all four combinations are valid.
 
-In both modes the current pages of the extraction prompt carry a `[[n]]` marker before each
+In all modes the current pages of the extraction prompt carry a `[[n]]` marker before each
 paragraph, and the LLM cites the paragraphs of every node in `paragraph_ranges`. The pipeline
 validates the ranges (invalid ones are discarded with a warning), derives `source_page_ids`
 from them and stores `source_paragraphs`, `paragraph_segmenter_version` and `info_units_mode`
 on every `StructureNode`.
 
-| | `"summary"` (default) | `"verbatim"` |
-| :--- | :--- | :--- |
-| Who writes the InfoUnits | The LLM, as summaries | The pipeline, copying the cited paragraphs |
-| LLM output | Structure, ranges and InfoUnits | Structure and ranges only |
-| InfoUnits per node | As many as the LLM writes | One per cited paragraph; longer than `verbatim_info_unit_max_chars` (default 4000) is split |
-| InfoUnit title | Written by the LLM | First words of the text |
-| `info_units_mode` stored on the node | `"summary"` | `"verbatim"` |
+| | `"auto"` (default) | `"summary"` | `"verbatim"` |
+| :--- | :--- | :--- | :--- |
+| Who decides how a node's InfoUnits are built | The LLM, node by node | Always rewritten | Always copied |
+| Who writes the InfoUnits | `verbatim` nodes: the pipeline, copying the cited paragraphs. `summary` nodes: a **second LLM call** per node, from the original paragraphs | The LLM, in the extraction call | The pipeline, copying the cited paragraphs |
+| Extraction call output | Structure, ranges and one decision per node | Structure, ranges and InfoUnits | Structure and ranges only |
+| InfoUnits per node | `verbatim`: one per cited paragraph (split above `verbatim_info_unit_max_chars`, default 4000). `summary`: as many as the LLM writes | As many as the LLM writes | One per cited paragraph; longer than `verbatim_info_unit_max_chars` is split |
+| `info_units_mode` stored on the node | The applied mode: `"summary"` or `"verbatim"` (never `"auto"`) | `"summary"` | `"verbatim"` |
+
+**How `auto` decides.** The extraction prompt asks the LLM to choose `verbatim` when the text
+is already clear on its own (prose, definitions, requirements, procedure steps, lists of
+complete sentences) and `summary` when it would only be understood with context the text does
+not carry (tables or forms whose values depend on their headers, fragments that depend on the
+parent section, content interrupted by layout elements, heavy layout or OCR noise). A node
+without valid paragraph ranges is stored as `verbatim` with no InfoUnits. If two chunks produce
+the same node with different decisions, `summary` wins.
+
+**Second call of `auto`.** Once the document tree is final, each `summary` node gets one LLM
+call (more when its text is long: the paragraphs are split into consecutive groups of at most
+`auto_info_units_max_input_chars` characters, default 10000, and a paragraph longer than the
+limit goes alone). The call sees the node title, its role, the titles of its ancestors and the
+original paragraphs, and uses the LLM, prompt family and caching configured for the
+`extraction` stage (`llm_stage_configuration`). Its requests share the global
+`llm_concurrency` limit. If a call cannot be parsed even after the repair loop, or raises, the
+node falls back to `verbatim` and a warning is logged; the document never fails because of it.
+An `INFO` line reports the summary and verbatim nodes, the calls and the fallbacks.
 
 Expected cost: the extraction input is about the same as today (the markers add little, and
 `verbatim` drops the InfoUnit instructions); the output of `verbatim` is **much smaller**,
-since the LLM writes no descriptions, and broken-JSON repair calls should be rarer. Annotation
+since the LLM writes no descriptions, and broken-JSON repair calls should be rarer. `auto`
+sits in between: the extraction call writes no descriptions, and **one extra call is made per
+node rewritten** (its input is that node's text only, so the total is similar to the
+`summary` output for those nodes, in smaller calls). Annotation
 and entity extraction receive the literal text instead of a summary, so their input is
 somewhat larger. After each document an `INFO` log line reports the paragraphs numbered, the
 share cited by at least one node (the coverage, the main signal for content the LLM forgot to
@@ -539,10 +560,14 @@ result = await run_pipeline(
 )
 ```
 
-Raises `ValueError` if the value is not `"summary"` or `"verbatim"`, or if `"verbatim"` is
-passed while `"extraction"` is not included in `stages`. Re-ingesting a document in another
+Raises `ValueError` if the value is not `"auto"`, `"summary"` or `"verbatim"`, or if
+`"summary"` or `"verbatim"` is passed while `"extraction"` is not included in `stages`
+(`"auto"` does not raise, because it is the default). Re-ingesting a document in another
 mode creates a new version, like any re-ingestion. `run_extraction()` (the older entry point)
-always uses `"summary"`. `extract-*.json` files written with this feature cannot be read by
+keeps `"summary"` as its default.
+
+> **Behaviour change:** before this option had `"auto"`, `run_pipeline()` always behaved as
+> `"summary"`. Pass `info_units_mode="summary"` to keep the previous behaviour. `extract-*.json` files written with this feature cannot be read by
 earlier versions of the library.
 
 ### `on_partial_failure` — Error Handling Strategy

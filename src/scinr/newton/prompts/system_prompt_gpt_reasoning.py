@@ -328,4 +328,11 @@ def build_extraction_prompt(theme_section: str, *, info_units_mode: str = "summa
 
 
 # Legacy constant for tests
+#: InfoUnit rules of the summary suffix; reused by the auto-mode second call.
+_INFO_UNIT_RULES_GPT_REASONING = _EXTRACTION_PROMPT_SUFFIX_GPT_REASONING[
+    _EXTRACTION_PROMPT_SUFFIX_GPT_REASONING.index("## InfoUnit Scope") : _EXTRACTION_PROMPT_SUFFIX_GPT_REASONING.index(
+        "## node_id Consistency"
+    )
+].rstrip()
+
 DOCUMENT_STRUCTURE_EXTRACTION_PROMPT = build_extraction_prompt("")

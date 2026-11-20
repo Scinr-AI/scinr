@@ -170,6 +170,10 @@ def _dedup_siblings(nodes: list[StructureNode]) -> None:
             )
             # Merge paragraph_ranges: overlapping or contiguous ranges are united
             first.paragraph_ranges = merge_ranges(first.paragraph_ranges + node.paragraph_ranges)
+            # Auto mode: differing decisions resolve to "summary" (the safer one). In the
+            # other modes every node is "summary" here and step F writes the final value.
+            if node.info_units_mode == "summary":
+                first.info_units_mode = "summary"
             to_remove.append(idx)
 
     for i in reversed(to_remove):

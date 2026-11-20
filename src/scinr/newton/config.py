@@ -203,6 +203,7 @@ class ScinrConfig:
     full_docstring: bool = True
     extraction_batch_size: int = 1
     verbatim_info_unit_max_chars: int = 4000
+    auto_info_units_max_input_chars: int = 10000
     llm_concurrency: int = 4
     neo4j_concurrency: int = 10
     neo4j_sync_concurrency: int = 8
@@ -382,6 +383,7 @@ def configure(
     normalization_llm: Any | None = None,
     llm_stage_configuration: dict[str, StageLLMConfig] | None = None,
     verbatim_info_unit_max_chars: int | None = None,
+    auto_info_units_max_input_chars: int | None = None,
 ) -> ScinrConfig:
     """
     Configure the scinr-ingest library.
@@ -562,6 +564,12 @@ def configure(
             in `info_units_mode="verbatim"`; longer paragraphs are split into several
             InfoUnits. Must be >= 100, otherwise `ConfigurationError` is raised.
             Env: `VERBATIM_INFO_UNIT_MAX_CHARS`. Default: `4000`.
+        auto_info_units_max_input_chars: Maximum characters of paragraph text sent in one
+            second-call request of `info_units_mode="auto"` (the call that writes the InfoUnits
+            of a node decided as `summary`). A node with more text is split into consecutive
+            groups of paragraphs, one call each; a single longer paragraph goes alone. Must be
+            >= 1000, otherwise `ConfigurationError` is raised.
+            Env: `AUTO_INFO_UNITS_MAX_INPUT_CHARS`. Default: `10000`.
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
         neo4j_concurrency: Max concurrent graph-store sessions during annotation and entity
             extraction, for any graph backend (Neo4j or SQL; default: `10`).
@@ -976,6 +984,15 @@ def configure(
         raise ConfigurationError(
             f"verbatim_info_unit_max_chars must be >= 100, got {resolved_verbatim_max_chars}."
         )
+    resolved_auto_max_chars = (
+        auto_info_units_max_input_chars
+        if auto_info_units_max_input_chars is not None
+        else int(os.getenv("AUTO_INFO_UNITS_MAX_INPUT_CHARS", "10000"))
+    )
+    if resolved_auto_max_chars < 1000:
+        raise ConfigurationError(
+            f"auto_info_units_max_input_chars must be >= 1000, got {resolved_auto_max_chars}."
+        )
     # resolved_concurrency is computed earlier (see "── LLM" section above),
     # before the Bedrock client is constructed, so it's available for the
     # botocore connection pool sizing there too.
@@ -1149,6 +1166,7 @@ def configure(
         full_docstring=resolved_full_docstring,
         extraction_batch_size=resolved_batch_size,
         verbatim_info_unit_max_chars=resolved_verbatim_max_chars,
+        auto_info_units_max_input_chars=resolved_auto_max_chars,
         llm_concurrency=resolved_concurrency,
         neo4j_concurrency=resolved_neo4j_concurrency,
         neo4j_sync_concurrency=resolved_neo4j_sync_concurrency,

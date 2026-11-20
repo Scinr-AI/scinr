@@ -818,4 +818,11 @@ def build_extraction_prompt(theme_section: str, *, info_units_mode: str = "summa
 
 
 # Legacy constant for tests and code that hasn't been updated yet.
+#: InfoUnit rules of the summary suffix; reused by the auto-mode second call.
+_INFO_UNIT_RULES_GENERIC = _EXTRACTION_PROMPT_SUFFIX_GENERIC[
+    _EXTRACTION_PROMPT_SUFFIX_GENERIC.index("## InfoUnit Rules") : _EXTRACTION_PROMPT_SUFFIX_GENERIC.index(
+        "## Sliding Window Rules"
+    )
+].rstrip()
+
 DOCUMENT_STRUCTURE_EXTRACTION_PROMPT = build_extraction_prompt("")

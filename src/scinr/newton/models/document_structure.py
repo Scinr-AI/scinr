@@ -93,6 +93,9 @@ class InfoUnit(StrictModel):
 
 
 InfoUnitsMode = Literal["summary", "verbatim"]
+#: Mode requested for Stage 1. ``"auto"`` lets the LLM decide per node; the stored
+#: ``StructureNode.info_units_mode`` is always the applied mode (``InfoUnitsMode``).
+ExtractionInfoUnitsMode = Literal["auto", "summary", "verbatim"]
 
 
 class ParagraphRange(StrictModel):
@@ -207,6 +210,26 @@ class StructureNodeVerbatimOutput(StructureNodeBase):
     )
 
 
+class StructureNodeAutoOutput(StructureNodeBase):
+    """Extraction LLM schema in auto mode: no InfoUnits, one mode decision per node."""
+
+    info_units_mode: InfoUnitsMode = Field(
+        description=(
+            "How the pipeline builds this node's InfoUnits from the paragraphs you cite: "
+            "'verbatim' keeps them as written, 'summary' rewrites them into self-contained "
+            "notes. Follow the InfoUnits Mode Decision section."
+        ),
+    )
+    children: list[StructureNodeAutoOutput] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of nested structural nodes that are direct children of this node. "
+            "A child that begins near the bottom of the current page and clearly continues beyond "
+            "it must be OMITTED from this list."
+        ),
+    )
+
+
 class StructureNode(StructureNodeBase):
     """Internal model: extract-*.json, merge and ingestion."""
 
@@ -255,6 +278,7 @@ class StructureNode(StructureNodeBase):
 # Required for forward references in `children` fields
 StructureNodeSummaryOutput.model_rebuild()
 StructureNodeVerbatimOutput.model_rebuild()
+StructureNodeAutoOutput.model_rebuild()
 StructureNode.model_rebuild()
 
 
@@ -319,6 +343,32 @@ class DocumentStructureVerbatimOutput(StrictModel):
             "Ordered list of structural nodes extracted from the current document chunk. "
             "Includes top-level nodes and any nested children discovered within this chunk."
         ),
+    )
+
+
+class DocumentStructureAutoOutput(StrictModel):
+    """
+    LLM output per chunk in auto mode — the list of nodes (no InfoUnits, one mode decision
+    each) extracted from one sliding-window chunk.
+    """
+
+    _coerce_nodes_from_string = model_validator(mode="before")(_coerce_nodes_from_string)
+
+    nodes: list[StructureNodeAutoOutput] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of structural nodes extracted from the current document chunk. "
+            "Includes top-level nodes and any nested children discovered within this chunk."
+        ),
+    )
+
+
+class InfoUnitsOutput(StrictModel):
+    """LLM output of the auto-mode second call: the InfoUnits of one node."""
+
+    info_units: list[InfoUnit] = Field(
+        default_factory=list,
+        description="InfoUnits of the node, in order of appearance in <paragraphs>.",
     )
 
 
