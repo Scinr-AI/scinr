@@ -95,18 +95,31 @@ section of the architecture.
   (added to `0001_init.sql`; no migration, there is no SQL database created yet). Graphs
   already ingested lack them: read their absence as `info_units_mode = "summary"` and no
   `source_paragraphs`.
-- **`run_pipeline(info_units_mode="summary" | "verbatim")`.** `"summary"` (default) keeps the
+- **`run_pipeline(info_units_mode="auto" | "summary" | "verbatim")`.** `"auto"` (default): the
+  LLM cites the paragraphs of each node and decides, node by node, between `"verbatim"` (the
+  InfoUnits copy the source text) and `"summary"` (a second LLM call per node writes the
+  InfoUnits from the original paragraphs; its text per call is bounded by
+  `auto_info_units_max_input_chars`, and it uses the `extraction` stage LLM). A failed second
+  call falls back to `verbatim` for that node. `"auto"` without `"extraction"` in `stages` does
+  not raise. `"summary"` keeps the
   LLM-written InfoUnits. `"verbatim"` makes the LLM return only the structure plus the
   paragraph ranges of each node, and the pipeline builds one InfoUnit per cited paragraph with
   the original text, which cuts the Stage 1 output tokens. Independent of `fast_extraction`
-  (all four combinations are valid). `"verbatim"` without `"extraction"` in `stages` raises
+  (all four combinations are valid). `"summary"` or `"verbatim"` without `"extraction"` in `stages` raises
   `ValueError`. See [Running the Pipeline](docs/user-guides/running-pipeline.md#info_units_mode--infounits-of-stage-1).
+- **`auto_info_units_max_input_chars`** (`configure()` / `AUTO_INFO_UNITS_MAX_INPUT_CHARS`,
+  default `10000`, minimum `1000`): maximum characters of paragraph text per second-call
+  request of `info_units_mode="auto"`.
 - **`verbatim_info_unit_max_chars`** (`configure()` / `VERBATIM_INFO_UNIT_MAX_CHARS`, default
   `4000`, minimum `100`): paragraphs longer than this are split into several InfoUnits in
   `verbatim` mode.
 
 ### Changed
 
+- **Behaviour change: `run_pipeline()` now defaults to `info_units_mode="auto"`** (before, it
+  always behaved as `"summary"`). Pass `info_units_mode="summary"` to keep the previous
+  behaviour. `run_extraction()`, `extract_one_intermediate()`, `extract_one_file()` and
+  `extract_chunk()` keep `"summary"` as their default.
 - **`extract-*.json` files written by this version cannot be read by earlier versions.** The
   models use `extra="forbid"` and the files now contain `paragraph_ranges`, `source_paragraphs`,
   `paragraph_segmenter_version` and `info_units_mode`. Older files are read by this version

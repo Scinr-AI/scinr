@@ -89,6 +89,18 @@ _EXTRACTION_PROMPT_PREFIX_VERBATIM = _EXTRACTION_PROMPT_PREFIX.replace(
 )
 
 
+AUTO_DECISION_SECTION = """## InfoUnits Mode Decision
+
+For every StructureNode, set `info_units_mode` to decide how the pipeline will build that node's InfoUnits from the paragraphs you cite in `paragraph_ranges`.
+
+InfoUnits are what later stages use to classify each node against a catalog of domain data models, to extract into those models the values and any other information they require, and to search and answer questions over the document.
+
+- "verbatim" keeps the original wording exactly. It is the right choice when the text is already clear enough on its own: prose, definitions, requirements, procedure steps, or lists whose items are complete sentences.
+- "summary" rewrites the content into explicit, self-contained notes. It is the right choice when the information would only be understood with context the text itself does not carry: tables or forms whose values depend on their headers, fragments that depend on the parent section, content interrupted by layout elements, or text with heavy layout or OCR noise.
+
+To decide, ask: if this text were the only thing a reader had, could they use all the information in it correctly? If yes, "verbatim"; if not, "summary". A node whose only cited paragraph is its heading uses "verbatim"."""
+
+
 def build_extraction_prompt(
     theme_section: str,
     *,
@@ -101,8 +113,9 @@ def build_extraction_prompt(
         theme_section: XML block from theme_registry.build_theme_section_for_extraction_prompt()
         family: Prompt family to use. Defaults to the family configured for the
             extraction stage.
-        info_units_mode: "summary" (LLM writes InfoUnits) or "verbatim" (LLM only
-            cites paragraph ranges).
+        info_units_mode: "summary" (LLM writes InfoUnits), "verbatim" (LLM only
+            cites paragraph ranges) or "auto" (verbatim prompt plus the per-node mode
+            decision, ``AUTO_DECISION_SECTION``).
 
     Returns:
         Complete system prompt string ready for use as SystemMessage content.
@@ -116,6 +129,12 @@ def build_extraction_prompt(
         from scinr.newton.prompts import system_prompt_gpt_reasoning as m
     else:
         from scinr.newton.prompts import system_prompt_generic as m
+    if info_units_mode == "auto":
+        return (
+            m.build_extraction_prompt(theme_section, info_units_mode="verbatim")
+            + "\n\n"
+            + AUTO_DECISION_SECTION
+        )
     return m.build_extraction_prompt(theme_section, info_units_mode=info_units_mode)
 
 

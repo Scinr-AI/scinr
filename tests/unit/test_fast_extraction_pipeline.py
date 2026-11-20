@@ -109,7 +109,7 @@ class TestFastExtractionValidation:
 
 class TestInfoUnitsModeValidation:
     async def test_invalid_value_raises_value_error(self):
-        with pytest.raises(ValueError, match="info_units_mode must be 'summary' or 'verbatim'"):
+        with pytest.raises(ValueError, match="info_units_mode must be 'auto', 'summary' or 'verbatim'"):
             await run_pipeline(
                 stages=["extraction"],
                 extraction_input_dir="/tmp/does-not-matter-for-this-check",
@@ -124,8 +124,30 @@ class TestInfoUnitsModeValidation:
                 info_units_mode="verbatim",
             )
 
+    async def test_summary_without_extraction_stage_raises_value_error(self):
+        with pytest.raises(ValueError, match="info_units_mode='summary'"):
+            await run_pipeline(
+                stages=["ingestion"],
+                ingestion_input_dir="/tmp/does-not-matter-for-this-check",
+                info_units_mode="summary",
+            )
+
+    async def test_auto_without_extraction_stage_does_not_raise_for_the_mode(self, monkeypatch):
+        # "auto" is the default, so it must not trigger the "no effect" error. The call
+        # may fail later for unrelated reasons (no graph configured): only the mode
+        # validation message is excluded.
+        try:
+            await run_pipeline(
+                stages=["ingestion"],
+                ingestion_input_dir="/tmp/does-not-matter-for-this-check",
+            )
+        except ValueError as exc:
+            assert "info_units_mode" not in str(exc)
+        except Exception:
+            pass
+
     @pytest.mark.parametrize("fast_extraction", [False, True])
-    @pytest.mark.parametrize("info_units_mode", ["summary", "verbatim"])
+    @pytest.mark.parametrize("info_units_mode", ["auto", "summary", "verbatim"])
     async def test_four_combinations_pass_validation(
         self, tmp_path: Path, monkeypatch, fast_extraction, info_units_mode
     ):
@@ -150,6 +172,23 @@ class TestInfoUnitsModeValidation:
         call_kwargs = mock_extract_one_file.call_args.kwargs
         assert call_kwargs["fast_extraction"] is fast_extraction
         assert call_kwargs["info_units_mode"] == info_units_mode
+
+
+class TestInfoUnitsModeDefault:
+    async def test_run_pipeline_defaults_to_auto(self, tmp_path: Path, monkeypatch):
+        _write_extraction_json(tmp_path, "doc1")
+
+        import scinr.newton.stages.extraction as extraction_mod
+
+        async def _fake_extract_one_file(json_file, output_path, input_folder, **kwargs):
+            return SimpleNamespace(document_name=json_file.stem, doc_path=json_file.stem)
+
+        mock_extract_one_file = AsyncMock(side_effect=_fake_extract_one_file)
+        monkeypatch.setattr(extraction_mod, "extract_one_file", mock_extract_one_file)
+
+        await run_pipeline(stages=["extraction"], extraction_input_dir=str(tmp_path))
+
+        assert mock_extract_one_file.call_args.kwargs["info_units_mode"] == "auto"
 
 
 # ---------------------------------------------------------------------------

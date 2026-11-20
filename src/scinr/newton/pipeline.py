@@ -175,7 +175,7 @@ async def run_pipeline(
     on_partial_failure: Literal["abort", "continue", "warn"] = "warn",
     # ── Stage 1 extraction performance (opt-in) ───────────────────────────────
     fast_extraction: bool = False,
-    info_units_mode: Literal["summary", "verbatim"] = "summary",
+    info_units_mode: Literal["auto", "summary", "verbatim"] = "auto",
     # ── Tabular options (auto-detected from input_raw) ────────────────────────
     tabular_extensions: set[str] | None = None,
     tabular_delimiter: str | None = None,
@@ -320,16 +320,22 @@ async def run_pipeline(
             quality against representative documents. Default: `False` (safe,
             unchanged legacy behavior). Raises `ValueError` if `True` while
             `"extraction"` is not in `stages`.
-        info_units_mode: How Stage 1 builds the InfoUnits of each node. `"summary"`
-            (default): the LLM writes them, as always. `"verbatim"`: the LLM only
-            cites the paragraphs that support each node and the InfoUnits are built
-            from those paragraphs, copying the source text verbatim (long paragraphs
-            are split by `verbatim_info_unit_max_chars`). Resolved once per call and
-            passed explicitly down to Stage 1 — never read from global config, so
-            concurrent `run_pipeline()` calls with different values never interfere.
-            Independent of `fast_extraction`: all four combinations are valid.
-            Raises `ValueError` if it is not `"summary"` or `"verbatim"`, or if it is
-            `"verbatim"` while `"extraction"` is not in `stages`.
+        info_units_mode: How Stage 1 builds the InfoUnits of each node. `"auto"` (default):
+            the LLM cites the paragraphs of each node and decides, node by node, between
+            `"verbatim"` (InfoUnits copy the source text) and `"summary"` (a second LLM
+            call rewrites the node's paragraphs into self-contained InfoUnits). Costs one
+            extra call per node rewritten; the text sent per call is bounded by
+            `auto_info_units_max_input_chars`, and the call uses the LLM configured for the
+            `extraction` stage (`llm_stage_configuration`). If a second call fails, that node
+            falls back to `"verbatim"`. `"summary"`: the LLM writes every node's InfoUnits in
+            the extraction call, as before. `"verbatim"`: every node's InfoUnits are built
+            from the cited paragraphs (long paragraphs are split by
+            `verbatim_info_unit_max_chars`). Resolved once per call and passed explicitly
+            down to Stage 1 — never read from global config, so concurrent `run_pipeline()`
+            calls with different values never interfere. Independent of `fast_extraction`.
+            Raises `ValueError` if it is not `"auto"`, `"summary"` or `"verbatim"`, or if it
+            is `"summary"`/`"verbatim"` while `"extraction"` is not in `stages` (`"auto"`
+            does not raise, because it is the default).
         callbacks: Optional progress callbacks — `ProgressTracker`,
             `ProgressCallback` (sync, run in a dedicated worker thread) and/or
             `AsyncProgressCallback` (awaited on this event loop) instances. The
@@ -438,7 +444,7 @@ async def _run_pipeline_impl(
     parallel_docs: int,
     on_partial_failure: Literal["abort", "continue", "warn"],
     fast_extraction: bool,
-    info_units_mode: Literal["summary", "verbatim"],
+    info_units_mode: Literal["auto", "summary", "verbatim"],
     tabular_extensions: set[str] | None,
     tabular_delimiter: str | None,
     tenant_id: str | None,
@@ -579,9 +585,9 @@ async def _run_pipeline_impl(
             "Skipping 'preprocess': extraction_input_dir='%s'", extraction_input_dir
         )
 
-    if info_units_mode not in ("summary", "verbatim"):
+    if info_units_mode not in ("auto", "summary", "verbatim"):
         raise ValueError(
-            f"info_units_mode must be 'summary' or 'verbatim', got {info_units_mode!r}."
+            f"info_units_mode must be 'auto', 'summary' or 'verbatim', got {info_units_mode!r}."
         )
 
     # ── 9b. fast_extraction requires 'extraction' in stages — checked after
@@ -591,9 +597,10 @@ async def _run_pipeline_impl(
         raise ValueError(
             "fast_extraction=True has no effect unless 'extraction' is included in stages."
         )
-    if info_units_mode == "verbatim" and "extraction" not in effective_stages:
+    if info_units_mode in ("summary", "verbatim") and "extraction" not in effective_stages:
         raise ValueError(
-            "info_units_mode='verbatim' has no effect unless 'extraction' is included in stages."
+            f"info_units_mode={info_units_mode!r} has no effect unless 'extraction' is "
+            "included in stages."
         )
 
     # ── 10. Replaces pre-flight check ─────────────────────────────────────────
@@ -1079,7 +1086,7 @@ async def _process_document_unit(
     only_unannotated: bool,
     only_unextracted: bool,
     fast_extraction: bool,
-    info_units_mode: Literal["summary", "verbatim"] = "summary",
+    info_units_mode: Literal["auto", "summary", "verbatim"] = "summary",
     on_partial_failure: Literal["abort", "continue", "warn"] = "abort",
     emitter: _ProgressEmitter = _NULL_EMITTER,
     document_index: int = 0,

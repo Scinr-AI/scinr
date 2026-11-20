@@ -999,4 +999,12 @@ def build_extraction_prompt(theme_section: str, *, info_units_mode: str = "summa
 
 
 # Legacy constant for tests
+def _slice(text: str, start: str, end: str) -> str:
+    """Text from *start* up to and including *end* (markers must exist)."""
+    return text[text.index(start) : text.index(end) + len(end)]
+
+
+#: InfoUnit rules of the summary suffix; reused by the auto-mode second call.
+_INFO_UNIT_RULES = _slice(_EXTRACTION_PROMPT_SUFFIX, "<info_unit_rules>", "</info_unit_rules>")
+
 DOCUMENT_STRUCTURE_EXTRACTION_PROMPT = build_extraction_prompt("")

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from scinr.newton.config import get_config, get_llm, get_llm_semaphore
 from scinr.newton.extraction.compact_extraction import compact_extraction, get_active_hierarchy
 from scinr.newton.extraction.extraction import ExtractionMaxRetriesError, extract_chunk
+from scinr.newton.extraction.info_unit_extraction import AutoStats, resolve_auto_info_units
 from scinr.newton.extraction.paragraphs import (
     ParagraphIndex,
     ParagraphStats,
@@ -27,7 +28,7 @@ from scinr.newton.extraction.structure_consolidation import (
     namespace_node_ids,
     write_map_checkpoint,
 )
-from scinr.newton.models.document_structure import Document, InfoUnitsMode
+from scinr.newton.models.document_structure import Document, ExtractionInfoUnitsMode
 from scinr.newton.results import DocumentResult, StageResult
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ async def _run_chunk_extraction(
     fast_extraction: bool,
     *,
     paragraph_index: ParagraphIndex,
-    info_units_mode: InfoUnitsMode,
+    info_units_mode: ExtractionInfoUnitsMode,
 ) -> Document:
     """Runs the legacy sequential or fast-extraction parallel chunk-processing
     loop against *document*, writing intermediate/final output when
@@ -162,6 +163,17 @@ async def _run_chunk_extraction(
         stats=stats,
     )
 
+    if info_units_mode == "auto":
+        # Second call: InfoUnits of the nodes the LLM decided to rewrite ("summary").
+        await resolve_auto_info_units(
+            document,
+            paragraph_index,
+            llm=llm,
+            max_input_chars=get_config().auto_info_units_max_input_chars,
+            verbatim_max_chars=get_config().verbatim_info_unit_max_chars,
+            stats=AutoStats(),
+        )
+
     # Final write if output requested
     if output_file:
         output_file.write_text(document.model_dump_json(indent=2), encoding="utf-8")
@@ -174,7 +186,7 @@ async def extract_one_intermediate(
     doc: IntermediateDocument,
     output_path: Path | None,
     fast_extraction: bool = False,
-    info_units_mode: InfoUnitsMode = "summary",
+    info_units_mode: ExtractionInfoUnitsMode = "summary",
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
@@ -204,10 +216,11 @@ async def extract_one_intermediate(
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
     info_units_mode:
-        ``"summary"`` (default) keeps the InfoUnits written by the LLM;
+        ``"summary"`` (default here) keeps the InfoUnits written by the LLM;
         ``"verbatim"`` builds them from the paragraphs the LLM cites, copying
-        the source text. Independent of *fast_extraction*. See
-        ``run_pipeline()``'s docstring.
+        the source text; ``"auto"`` lets the LLM decide per node and runs a
+        second call for the ``summary`` nodes. Independent of *fast_extraction*.
+        See ``run_pipeline()``'s docstring.
     tenant_id, created_by_user_id, job_id:
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``
@@ -293,7 +306,7 @@ async def extract_one_file(
     output_path: Path | None,
     input_folder: Path | None,
     fast_extraction: bool = False,
-    info_units_mode: InfoUnitsMode = "summary",
+    info_units_mode: ExtractionInfoUnitsMode = "summary",
     tenant_id: str | None = None,
     created_by_user_id: str | None = None,
     job_id: str | None = None,
@@ -326,10 +339,11 @@ async def extract_one_file(
         post-extraction consolidation LLM call. See ``run_pipeline()``'s
         docstring for the full tradeoff explanation.
     info_units_mode:
-        ``"summary"`` (default) keeps the InfoUnits written by the LLM;
+        ``"summary"`` (default here) keeps the InfoUnits written by the LLM;
         ``"verbatim"`` builds them from the paragraphs the LLM cites, copying
-        the source text. Independent of *fast_extraction*. See
-        ``run_pipeline()``'s docstring.
+        the source text; ``"auto"`` lets the LLM decide per node and runs a
+        second call for the ``summary`` nodes. Independent of *fast_extraction*.
+        See ``run_pipeline()``'s docstring.
     tenant_id, created_by_user_id, job_id:
         Optional caller-supplied provenance metadata. Stamped onto the
         produced Document so it is serialized into the ``extract-*.json``

@@ -126,6 +126,7 @@ See [Multimodal Ingestion](user-guides/multimodal-ingestion.md). `vision_llm` an
 | :--- | :--- | :--- |
 | `PROMPT_CACHING_ENABLED` | `true` | Enable prompt caching. Currently effective for AWS Bedrock; ignored for other providers. |
 | `EXTRACTION_BATCH_SIZE` | `1` | Number of pages per extraction chunk. |
+| `AUTO_INFO_UNITS_MAX_INPUT_CHARS` | `10000` | Maximum characters of paragraph text per second-call request of `run_pipeline(info_units_mode="auto")`; longer nodes are split into consecutive groups. Minimum `1000`. The call uses the `extraction` stage of `llm_stage_configuration`. |
 | `VERBATIM_INFO_UNIT_MAX_CHARS` | `4000` | Maximum characters of each InfoUnit in `run_pipeline(info_units_mode="verbatim")`; longer paragraphs are split into several InfoUnits. Minimum `100`. |
 | `PROMPT_FAMILY` | `generic` | Prompt template family: `generic`, `claude`, or `gpt_reasoning`. |
 | `SCINR_EXTRA_MODELS_PATHS` | `""` (empty) | Colon-separated list of extra model package paths. |
@@ -275,6 +276,7 @@ The same settings as the [Pipeline environment variables](#pipeline), passed as 
 | :--- | :--- | :--- |
 | `llm_concurrency` | `int \| None` | Max concurrent LLM calls across all stages. Default `4`. |
 | `extraction_batch_size` | `int \| None` | Pages per extraction chunk. Default `1`. |
+| `auto_info_units_max_input_chars` | `int \| None` | Maximum characters of paragraph text per second-call request in `info_units_mode="auto"`. Default `10000`, minimum `1000`. The second call uses the LLM, prompt family and caching of the `extraction` stage in `llm_stage_configuration`. |
 | `verbatim_info_unit_max_chars` | `int \| None` | Maximum characters of each InfoUnit in `info_units_mode="verbatim"` (longer paragraphs are split). Default `4000`, minimum `100`. |
 | `prompt_caching_enabled` | `bool \| None` | Bedrock system-prompt caching. Default `True`. |
 | `full_docstring` | `bool \| None` | Store the full model docstring (`True`) or only its first line (`False`). Default `True`. |
@@ -673,6 +675,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Prompt Caching** | `prompt_caching_enabled` | `PROMPT_CACHING_ENABLED` | `true` |
 | **Full Docstring** | `full_docstring` | `FULL_DOCSTRING` | `true` |
 | **Extraction Batch** | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | `1` |
+| **Auto-mode second-call input size** | `auto_info_units_max_input_chars` | `AUTO_INFO_UNITS_MAX_INPUT_CHARS` | `10000` |
 | **Verbatim InfoUnit size** | `verbatim_info_unit_max_chars` | `VERBATIM_INFO_UNIT_MAX_CHARS` | `4000` |
 | **Prompt Family** | `prompt_family` | `PROMPT_FAMILY` | `generic` |
 | **Extra Models Paths** | `extra_models_paths` | `SCINR_EXTRA_MODELS_PATHS` | `""` |

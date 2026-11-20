@@ -41,10 +41,12 @@ from scinr.newton.extraction.paragraphs import (
     strip_markers,
 )
 from scinr.newton.models.document_structure import (
+    DocumentStructureAutoOutput,
     DocumentStructureSummaryOutput,
     DocumentStructureVerbatimOutput,
-    InfoUnitsMode,
+    ExtractionInfoUnitsMode,
     StructureNode,
+    StructureNodeAutoOutput,
     StructureNodeSummaryOutput,
     StructureNodeVerbatimOutput,
 )
@@ -58,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 _PHASE1_TEMPERATURE = 0.0
-_INFO_UNITS_MODES = ("summary", "verbatim")
+_INFO_UNITS_MODES = ("auto", "summary", "verbatim")
 
 
 # ── Error class ───────────────────────────────────────────────────────────────
@@ -76,7 +78,8 @@ def _build_extraction_output_class(info_units_mode: str = "summary") -> type:
 
     The node and document base classes depend on *info_units_mode*: summary mode uses
     ``StructureNodeSummaryOutput`` / ``DocumentStructureSummaryOutput``; verbatim mode uses
-    the ``Verbatim`` variants, which have no ``info_units``.
+    the ``Verbatim`` variants, which have no ``info_units``; auto mode uses the ``Auto``
+    variants (no ``info_units``, one ``info_units_mode`` decision per node).
 
     Called lazily, once per mode. The returned class is used as the schema
     for with_structured_output(), which translates the Literal type into an
@@ -92,6 +95,9 @@ def _build_extraction_output_class(info_units_mode: str = "summary") -> type:
     if info_units_mode == "verbatim":
         node_base: type = StructureNodeVerbatimOutput
         document_base: type = DocumentStructureVerbatimOutput
+    elif info_units_mode == "auto":
+        node_base = StructureNodeAutoOutput
+        document_base = DocumentStructureAutoOutput
     else:
         node_base = StructureNodeSummaryOutput
         document_base = DocumentStructureSummaryOutput
@@ -165,6 +171,9 @@ def reset_extraction_cache() -> None:
     """Invalidate lazy caches. Called from reset_theme_registry() after configure()."""
     _EXTRACTION_OUTPUT_CLASSES.clear()
     _EXTRACTION_PROMPTS.clear()
+    from scinr.newton.prompts.info_units_prompt import reset_info_units_prompt_cache
+
+    reset_info_units_prompt_cache()
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -345,7 +354,7 @@ async def extract_chunk(
     defer_hierarchy: bool = False,
     paragraph_index: ParagraphIndex | None = None,
     curr_positions: list[int] | None = None,
-    info_units_mode: InfoUnitsMode = "summary",
+    info_units_mode: ExtractionInfoUnitsMode = "summary",
     paragraph_stats: ParagraphStats | None = None,
     log_context: str = "",
 ) -> list[StructureNode]:
@@ -383,8 +392,10 @@ async def extract_chunk(
             ``prev_page``) and the returned nodes carry validated ``paragraph_ranges``.
         curr_positions: Positions of ``curr_pages`` inside ``paragraph_index``. Required
             with ``paragraph_index``; must have the same length as ``curr_pages``.
-        info_units_mode: ``"summary"`` (the LLM writes InfoUnits) or ``"verbatim"`` (the
-            LLM only cites paragraph ranges; requires ``paragraph_index``).
+        info_units_mode: ``"summary"`` (the LLM writes InfoUnits), ``"verbatim"`` (the
+            LLM only cites paragraph ranges) or ``"auto"`` (the LLM cites ranges and decides
+            ``summary`` or ``verbatim`` per node). ``"verbatim"`` and ``"auto"`` require
+            ``paragraph_index``.
         paragraph_stats: Counter updated with every discarded paragraph range.
         log_context: Label (e.g. the chunk) included in range-discard warnings.
 
@@ -403,8 +414,10 @@ async def extract_chunk(
         raise ValueError(
             "paragraph_index requires curr_positions with one position per page in curr_pages"
         )
-    if info_units_mode == "verbatim" and paragraph_index is None:
-        raise ValueError("info_units_mode='verbatim' requires paragraph_index (the anchors)")
+    if info_units_mode in ("verbatim", "auto") and paragraph_index is None:
+        raise ValueError(
+            f"info_units_mode={info_units_mode!r} requires paragraph_index (the anchors)"
+        )
 
     allowed = (
         paragraph_index.number_range(curr_positions) if paragraph_index is not None else None

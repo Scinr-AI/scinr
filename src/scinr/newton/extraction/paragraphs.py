@@ -15,8 +15,8 @@ from dataclasses import dataclass
 
 from scinr.newton.models.document_structure import (
     Document,
+    ExtractionInfoUnitsMode,
     InfoUnit,
-    InfoUnitsMode,
     ParagraphRange,
     StructureNode,
 )
@@ -384,7 +384,7 @@ def finalize_paragraph_references(
     document: Document,
     index: ParagraphIndex,
     *,
-    info_units_mode: InfoUnitsMode,
+    info_units_mode: ExtractionInfoUnitsMode,
     max_chars: int,
     stats: ParagraphStats,
 ) -> None:
@@ -397,7 +397,9 @@ def finalize_paragraph_references(
 
     for node in _walk_nodes(document.document_structure):
         node.paragraph_segmenter_version = PARAGRAPH_SEGMENTER_VERSION
-        node.info_units_mode = info_units_mode
+        if info_units_mode != "auto":
+            # auto: keep the LLM's per-node decision; resolve_auto_info_units writes the units
+            node.info_units_mode = info_units_mode
         if node.paragraph_ranges:
             node.source_page_ids = index.page_ids_for_ranges(node.paragraph_ranges)
             node.source_paragraphs = index.format_source_paragraphs(node.paragraph_ranges)

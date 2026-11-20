@@ -1,3 +1,5 @@
+import pytest
+
 from scinr.newton.extraction.compact_extraction import _dedup_siblings
 from scinr.newton.models.document_structure import NodeRole, ParagraphRange, StructureNode
 
@@ -53,3 +55,31 @@ def test_dedup_siblings_without_ranges_stays_empty():
     _dedup_siblings(nodes)
 
     assert nodes[0].paragraph_ranges == []
+
+
+@pytest.mark.parametrize("order", [("verbatim", "summary"), ("summary", "verbatim")])
+def test_dedup_siblings_differing_auto_decisions_give_summary(order):
+    from scinr.newton.extraction.compact_extraction import _dedup_siblings
+    from scinr.newton.models.document_structure import StructureNode
+
+    nodes = [
+        StructureNode(node_id="1", title="T", role="section", appearance_order=1, info_units_mode=m)
+        for m in order
+    ]
+    _dedup_siblings(nodes)
+    assert len(nodes) == 1
+    assert nodes[0].info_units_mode == "summary"
+
+
+def test_dedup_siblings_both_verbatim_stays_verbatim():
+    from scinr.newton.extraction.compact_extraction import _dedup_siblings
+    from scinr.newton.models.document_structure import StructureNode
+
+    nodes = [
+        StructureNode(
+            node_id="1", title="T", role="section", appearance_order=1, info_units_mode="verbatim"
+        )
+        for _ in range(2)
+    ]
+    _dedup_siblings(nodes)
+    assert nodes[0].info_units_mode == "verbatim"

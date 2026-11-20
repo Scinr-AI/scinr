@@ -198,7 +198,7 @@ The extraction engine (`extraction/` module) processes documents in **sliding-wi
 
 **Paragraph anchors and step F:**
 
-Before the first chunk, `ParagraphIndex` (`extraction/paragraphs.py`) splits every page into paragraphs with a deterministic rule (`segment_page()`) and numbers them continuously over the whole document (also in the `fast_extraction` branch). The current pages of the prompt carry a `[[n]]` marker before each paragraph (the previous page does not). The LLM cites each node's paragraphs in `paragraph_ranges`; `extract_chunk()` validates them (invalid ranges are discarded with a warning), strips any copied markers, and the merge steps union the ranges of merged nodes. When the document is complete, step F (`finalize_paragraph_references()`) walks the tree: it overwrites `source_page_ids` from the valid ranges, writes `source_paragraphs` (`"<page>:<from>-<to>"`), `paragraph_segmenter_version` and `info_units_mode`, and, in `info_units_mode="verbatim"`, replaces the node's InfoUnits by one per cited paragraph (`build_verbatim_info_units()`). The index is released when the document finishes and is not passed to ingestion.
+Before the first chunk, `ParagraphIndex` (`extraction/paragraphs.py`) splits every page into paragraphs with a deterministic rule (`segment_page()`) and numbers them continuously over the whole document (also in the `fast_extraction` branch). The current pages of the prompt carry a `[[n]]` marker before each paragraph (the previous page does not). The LLM cites each node's paragraphs in `paragraph_ranges`; `extract_chunk()` validates them (invalid ranges are discarded with a warning), strips any copied markers, and the merge steps union the ranges of merged nodes. When the document is complete, step F (`finalize_paragraph_references()`) walks the tree: it overwrites `source_page_ids` from the valid ranges, writes `source_paragraphs` (`"<page>:<from>-<to>"`), `paragraph_segmenter_version` and `info_units_mode`, and, in `info_units_mode="verbatim"`, replaces the node's InfoUnits by one per cited paragraph (`build_verbatim_info_units()`). In `info_units_mode="auto"` the LLM also decides `summary` or `verbatim` per node; step F keeps that decision and then `resolve_auto_info_units()` (`extraction/info_unit_extraction.py`) builds the InfoUnits: `verbatim` nodes as above, `summary` nodes with one extra LLM call over the node's original paragraphs (falling back to `verbatim` if it fails). The index is released when the document finishes and is not passed to ingestion.
 
 **StructureNode Model:**
 
@@ -212,7 +212,7 @@ Each `StructureNode` has:
 - `source_page_ids`: list of stored page IDs (set by pipeline, not LLM)
 - `source_paragraphs`: informative `"<page>:<from>-<to>"` spans of the paragraphs the node cites (set by pipeline)
 - `paragraph_segmenter_version`: version of the paragraph segmentation rule (set by pipeline)
-- `info_units_mode`: `"summary"` or `"verbatim"`, how the node's InfoUnits were produced (set by pipeline)
+- `info_units_mode`: `"summary"` or `"verbatim"`, how the node's InfoUnits were produced (set by pipeline; in `auto` Stage 1 it is the per-node decision actually applied)
 - `info_units`: list of `InfoUnit` objects — the semantic content extracted from this node
 - `children`: nested `StructureNode` objects
 

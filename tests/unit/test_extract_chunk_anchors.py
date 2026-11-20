@@ -227,3 +227,42 @@ async def test_returns_structure_node_instances(index):
     nodes = await _run(llm, index)
     assert type(nodes[0]) is StructureNode
     assert type(nodes[0].children[0]) is StructureNode
+
+
+# ── auto mode ────────────────────────────────────────────────────────────────
+
+
+async def test_auto_schema_has_decision_and_no_info_units(index):
+    llm = FakeLLM([{"nodes": []}])
+    await _run(llm, index, mode="auto")
+    props = llm.schemas[0].model_json_schema()
+    node_schema = next(v for k, v in props["$defs"].items() if k.endswith("StructureNode"))
+    assert "info_units_mode" in node_schema["required"]
+    assert "info_units" not in node_schema["properties"]
+
+
+async def test_auto_decisions_reach_nodes_including_children(index):
+    payload = {
+        "nodes": [
+            _node(
+                ranges=[(3, 4)],
+                info_units_mode="summary",
+                children=[_node("1_1", ranges=[(4, 4)], info_units_mode="verbatim")],
+            )
+        ]
+    }
+    nodes = await _run(FakeLLM([payload]), index, mode="auto")
+    assert nodes[0].info_units_mode == "summary"
+    assert nodes[0].children[0].info_units_mode == "verbatim"
+
+
+async def test_auto_requires_decision(index):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        await _run(FakeLLM([{"nodes": [_node(ranges=[(3, 4)])]}]), index, mode="auto")
+
+
+async def test_auto_without_index_raises():
+    with pytest.raises(ValueError):
+        await extract_chunk("", ["x"], "", llm=FakeLLM([]), info_units_mode="auto")
