@@ -241,3 +241,11 @@ async def test_search_nodes_validates_before_querying() -> None:
     for bad in ({"limit": 0}, {"skip": -1}, {"labels": ["Nope"]}, {"labels": "Document"}):
         with pytest.raises(NavigationError):
             await nav.search_nodes("ab", **bad)
+
+
+def test_lucene_phrase_quotes_the_text_and_escapes_quotes_and_backslashes():
+    from scinr.newton.navigation.neo4j._power import _lucene_phrase
+
+    assert _lucene_phrase("golden-a::Docs/Sub/a.txt") == '"golden-a::Docs/Sub/a.txt"'
+    assert _lucene_phrase('say "hi"') == '"say \\"hi\\""'
+    assert _lucene_phrase("a\\b") == '"a\\\\b"'

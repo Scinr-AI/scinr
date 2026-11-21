@@ -92,6 +92,11 @@ def _scope_params(sc: Scope) -> dict[str, Any]:
     return {**sc.params(), "scope_catalog_labels": _CATALOG_LABELS}
 
 
+def _lucene_phrase(text: str) -> str:
+    """*text* as one quoted Lucene phrase: its words in that order, no query syntax inside."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 class _PowerMixin(_Neo4jRuntime):
     # Scope notes (navigation/scope.py). These are free graph walks, so the
     # anchor is checked and — when a tenant is given — every intermediate node
@@ -454,6 +459,10 @@ class _PowerMixin(_Neo4jRuntime):
             edges=browse.sort_edges(edges),
             total=len(ordered),
         )
+
+    def _fulltext_text(self, text: str) -> str:
+        """The text of a full-text index query made on behalf of ``search_nodes`` (a phrase)."""
+        return _lucene_phrase(text)
 
     async def search_nodes(
         self,

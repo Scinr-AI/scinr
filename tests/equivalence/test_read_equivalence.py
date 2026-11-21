@@ -53,6 +53,13 @@ KNOWN_DIFFERENCES: dict[str, tuple[str, Callable[[Call], bool]]] = {
         "predicate of the array provenance. The SQL backend answers.",
         lambda call: "created_by_user_id" in call.kwargs or "job_id" in call.kwargs,
     ),
+    "search_nodes": (
+        "A page that skips results (``skip`` > 0) depends on the engine's own full-text ranking of "
+        "the info units (Lucene in Neo4j, the SQL text search elsewhere): each engine truncates its "
+        "candidates to ``skip + limit`` in its own order, so the same page can differ. The calls "
+        "without ``skip`` are equal.",
+        lambda call: bool(call.kwargs.get("skip")),
+    ),
 }
 
 #: Methods whose result is compared as a set of ``uid`` (the engine's own full-text ranking).
