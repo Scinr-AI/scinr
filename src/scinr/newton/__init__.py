@@ -6,9 +6,11 @@ scinr-ingest — Document ingestion and entity extraction pipeline for a knowled
 from scinr.newton.config import (
     StageLLMConfig,
     ThemePath,
+    build_config,
     configure,
     get_available_themes,
     get_config,
+    use_config,
 )
 from scinr.newton.exceptions import (
     ConfigurationError,
@@ -28,6 +30,7 @@ from scinr.newton.exceptions import (
     ModelError,
     NavigationError,
     PreconditionError,
+    QueryTimeoutError,
     ScinrError,
     StorageError,
     TenantAccessError,
@@ -88,6 +91,8 @@ __version__ = "0.6.0"
 __all__ = [
     # Configuration
     "configure",
+    "build_config",
+    "use_config",
     "get_config",
     "get_available_themes",
     "ThemePath",
@@ -107,6 +112,7 @@ __all__ = [
     "ImageStorageError",
     "ConversionError",
     "NavigationError",
+    "QueryTimeoutError",
     "GraphConnectionError",
     "UnsupportedOperationError",
     "FreezeError",

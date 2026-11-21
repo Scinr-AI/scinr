@@ -22,9 +22,9 @@ from scinr.newton.entity_extraction.prompts import (
 )
 from scinr.newton.entity_extraction.schema_composer import compose_extraction_schema
 from scinr.newton.graph import get_graph_store
+from scinr.newton.utils.graph_concurrency import get_graph_semaphore
 from scinr.newton.utils.llm_repair import extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
-from scinr.newton.utils.neo4j_concurrency import get_neo4j_semaphore
 from scinr.newton.utils.uid import make_uid as _make_uid
 
 load_dotenv()
@@ -280,7 +280,7 @@ async def process_single_extraction_target(
     and repair loop, bounding both concurrent LLM calls and the number of
     schemas/prompts alive at once. It is released before any graph write.
     graph writes (write_entities, mark_extracted) are each wrapped in
-    ``get_neo4j_semaphore()`` to prevent connection pool saturation under
+    ``get_graph_semaphore()`` to prevent connection pool saturation under
     parallel load. The semaphore is released between the two writes so other
     coroutines can interleave their graph work.
 
@@ -299,7 +299,7 @@ async def process_single_extraction_target(
         ``{"node_full_id": str, "extraction": Any | None, "error": str | None}``
     """
     node_full_id = target["node_full_id"]
-    neo4j_semaphore = get_neo4j_semaphore()
+    graph_semaphore = get_graph_semaphore()
 
     # The LLM slot is taken FIRST so that the composed schema, prompt and messages
     # of a target only exist while it holds one of the ``llm_concurrency`` slots.
@@ -320,10 +320,10 @@ async def process_single_extraction_target(
         return {"node_full_id": node_full_id, "extraction": None, "error": extract_error}
 
     # ── Write entities (bounded by graph semaphore) ───────────────────────────
-    async with neo4j_semaphore:
+    async with graph_semaphore:
         write_error = await _write_entities(target, extraction, document_name)
     # ── Mark extracted (bounded by graph semaphore) ───────────────────────────
-    async with neo4j_semaphore:
+    async with graph_semaphore:
         mark_error = await _mark_extracted(node_full_id)
 
     error = write_error or mark_error

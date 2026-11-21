@@ -61,6 +61,10 @@ _SQLITE_FTS_TABLE = "info_units_fts"
 #: ``BEGIN IMMEDIATE`` (read-only work that must not queue behind the single writer).
 SQLITE_DEFERRED_OPTION = "sqlite_deferred"
 
+#: Bound parameter that every Postgres ``execute_raw`` text carries in a trailing comment, so
+#: that psycopg uses the extended protocol (one statement only): see ``single_statement``.
+_PG_SINGLE_STATEMENT_PARAM = "_newton_single_statement"
+
 _PG_TRANSIENT_STATES = frozenset({"40001", "40P01", "55P03"})
 _PG_AUTH_STATES = frozenset({"28P01", "28000"})
 _PG_CONNECTION_STATES = frozenset({"57P01", "57P02", "57P03"})
@@ -149,6 +153,18 @@ class Dialect(ABC):
     join into a ``UNION ALL`` subquery (an index scan per branch). See
     ``navigation/sql/_walk.py``.
     """
+
+    raw_refused_keywords: ClassVar[frozenset[str]]
+    """First keywords (upper case) of the statements ``execute_raw`` refuses before sending
+    them: statements that are not queries and act on the transaction, the session, the
+    connection or the engine's files, which the read-only guarantee of :meth:`read_only` does
+    not stop (``COMMIT``, ``SET ROLE``, ``PRAGMA``, ...). A defence in depth: the guarantee
+    itself is :meth:`single_statement` plus :meth:`read_only`.
+    """
+
+    nested_comments: ClassVar[bool] = False
+    """Whether ``/* ... */`` comments nest (Postgres) or end at the first ``*/`` (SQLite);
+    used to find the first keyword of an ``execute_raw`` statement."""
 
     # ── URLs and connections ──────────────────────────────────────────────────
 
@@ -302,6 +318,29 @@ class Dialect(ABC):
         """
 
     @abstractmethod
+    def single_statement(self, query: str, params: dict[str, Any]) -> str:
+        """Return the text of the raw *query* such that the driver runs it as ONE statement.
+
+        A script (``COMMIT; BEGIN READ WRITE; INSERT ...``) must be refused by the engine, not
+        run: its first statement would end the read-only transaction of :meth:`read_only`.
+        May add a bound parameter to *params* (the returned text then refers to it).
+
+        Postgres: psycopg sends a statement *without* parameters with the simple query
+        protocol, which runs every statement of a script; with at least one bound parameter
+        it uses the extended protocol, whose ``Parse`` message the server only accepts with
+        one command (``42601``). So a typed, unused parameter is appended in a comment of its
+        own line. SQLite: unchanged; ``sqlite3`` refuses a second statement itself.
+        """
+
+    @abstractmethod
+    def in_transaction(self, connection: Any) -> bool:
+        """Whether the driver connection behind *connection* is still inside its transaction.
+
+        Read on the client (no round trip): ``execute_raw`` checks after the statement that it
+        did not end the read-only transaction.
+        """
+
+    @abstractmethod
     def use_schema(self, connection: Any, schema: str) -> None:
         """Make unqualified table names of raw SQL resolve in *schema* for the transaction.
 
@@ -310,6 +349,14 @@ class Dialect(ABC):
         Raises:
             ValueError: If *schema* is not a plain identifier.
         """
+
+    def set_statement_timeout(self, connection: Any, milliseconds: int) -> None:
+        """Abort a statement of the current transaction that runs longer than *milliseconds*.
+
+        Postgres: ``SET LOCAL statement_timeout``. SQLite has no server-side timeout: the
+        default does nothing.
+        """
+        return None
 
     @abstractmethod
     def classify_error(self, exc: BaseException) -> ErrorKind | None:
@@ -353,6 +400,18 @@ class PostgresDialect(Dialect):
     json_type = JSONB(none_as_null=True)
     list_type = ARRAY(sa.Text())
     recursive_branches = False
+    nested_comments = True
+    raw_refused_keywords = frozenset(
+        {
+            # transaction control
+            "ABORT", "BEGIN", "COMMIT", "END", "PREPARE", "RELEASE", "ROLLBACK", "SAVEPOINT",
+            "START",
+            # session state (SET ROLE, SET SESSION AUTHORIZATION, search_path, ...)
+            "DEALLOCATE", "DISCARD", "EXECUTE", "LISTEN", "LOAD", "RESET", "SET", "UNLISTEN",
+            # cursors, procedural code, COPY, explicit locks
+            "CALL", "CLOSE", "COPY", "DECLARE", "DO", "FETCH", "LOCK", "MOVE",
+        }
+    )  # fmt: skip
 
     def __init__(self, fulltext_config: str = "simple") -> None:
         self.fulltext_config = self.validate_identifier(fulltext_config)
@@ -476,8 +535,26 @@ class PostgresDialect(Dialect):
         connection.exec_driver_sql("SET TRANSACTION READ ONLY")
         yield
 
+    def single_statement(self, query: str, params: dict[str, Any]) -> str:
+        # An int is dumped with a type (int2), so the server accepts the parameter although
+        # no expression uses it; a str would be sent as "unknown" and refused. The newline
+        # keeps the marker out of a trailing "--" comment of the query (it would still count:
+        # psycopg finds the placeholder anywhere in the text).
+        params[_PG_SINGLE_STATEMENT_PARAM] = 1
+        return f"{query}\n-- :{_PG_SINGLE_STATEMENT_PARAM}"
+
+    def in_transaction(self, connection: Any) -> bool:
+        from psycopg.pq import TransactionStatus
+
+        info = connection.connection.driver_connection.info
+        return bool(info.transaction_status == TransactionStatus.INTRANS)
+
     def use_schema(self, connection: Any, schema: str) -> None:
         connection.exec_driver_sql(f'SET LOCAL search_path TO "{self.validate_identifier(schema)}"')
+
+    def set_statement_timeout(self, connection: Any, milliseconds: int) -> None:
+        # An int formatted by us: never text from the caller.
+        connection.exec_driver_sql(f"SET LOCAL statement_timeout = {int(milliseconds)}")
 
     def classify_error(self, exc: BaseException) -> ErrorKind | None:
         orig = _unwrap(exc)
@@ -529,6 +606,14 @@ class SqliteDialect(Dialect):
     json_type = sa.JSON(none_as_null=True)
     list_type = sa.JSON(none_as_null=True)
     recursive_branches = True
+    # PRAGMA / ATTACH work under ``query_only`` and last beyond the transaction: a PRAGMA
+    # changes the pooled connection (``query_only = OFF``, ``foreign_keys``) or the file
+    # (``journal_mode``), ATTACH creates a file. Read a pragma with its table-valued
+    # function instead (``SELECT * FROM pragma_table_info('documents')``).
+    raw_refused_keywords = frozenset(
+        {"ATTACH", "BEGIN", "COMMIT", "DETACH", "END", "PRAGMA", "RELEASE", "ROLLBACK",
+         "SAVEPOINT", "VACUUM"}
+    )  # fmt: skip
 
     def sync_url(self, url: str) -> str:
         return self._with_driver(url, "sqlite+pysqlite")
@@ -703,6 +788,14 @@ class SqliteDialect(Dialect):
             yield
         finally:
             connection.exec_driver_sql("PRAGMA query_only = OFF")
+
+    def single_statement(self, query: str, params: dict[str, Any]) -> str:
+        # sqlite3 compiles one statement and refuses a non-empty tail before running anything
+        # ("You can only execute one statement at a time").
+        return query
+
+    def in_transaction(self, connection: Any) -> bool:
+        return bool(connection.connection.driver_connection.in_transaction)
 
     def use_schema(self, connection: Any, schema: str) -> None:
         self.validate_identifier(schema)  # one schema per file: nothing to select

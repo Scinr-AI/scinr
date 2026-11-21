@@ -15,7 +15,13 @@ from __future__ import annotations
 from scinr.newton.exceptions import (
     GraphConnectionError,
     NavigationError,
+    QueryTimeoutError,
     UnsupportedOperationError,
 )
 
-__all__ = ["NavigationError", "GraphConnectionError", "UnsupportedOperationError"]
+__all__ = [
+    "NavigationError",
+    "QueryTimeoutError",
+    "GraphConnectionError",
+    "UnsupportedOperationError",
+]

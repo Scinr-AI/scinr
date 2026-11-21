@@ -13,6 +13,7 @@ from scinr.newton.navigation.base import GraphNavigator
 from scinr.newton.navigation.neo4j._annotation import _AnnotationMixin
 from scinr.newton.navigation.neo4j._documents import _DocumentsMixin
 from scinr.newton.navigation.neo4j._entities import _EntitiesMixin
+from scinr.newton.navigation.neo4j._explore import _ExploreMixin
 from scinr.newton.navigation.neo4j._info_units import _InfoUnitsMixin
 from scinr.newton.navigation.neo4j._instances import _ModelInstancesMixin
 from scinr.newton.navigation.neo4j._introspection import _IntrospectionMixin
@@ -29,6 +30,7 @@ class Neo4jGraphNavigator(
     _EntitiesMixin,
     _IntrospectionMixin,
     _PowerMixin,
+    _ExploreMixin,
     GraphNavigator,
 ):
     """Cypher implementation of :class:`GraphNavigator`.

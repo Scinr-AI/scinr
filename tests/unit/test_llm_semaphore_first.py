@@ -59,7 +59,7 @@ def annotation_env(monkeypatch):
         written.append(node_id)
         return None
 
-    monkeypatch.setattr(ann_nodes, "get_neo4j_semaphore", lambda: asyncio.Semaphore(10))
+    monkeypatch.setattr(ann_nodes, "get_graph_semaphore", lambda: asyncio.Semaphore(10))
     monkeypatch.setattr(ann_nodes, "_fetch_node_context", fake_fetch_context)
     monkeypatch.setattr(ann_nodes, "_decide_model", fake_decide_model)
     monkeypatch.setattr(ann_nodes, "_write_decision", fake_write_decision)
@@ -171,7 +171,7 @@ def entity_env(monkeypatch):
         marked.append(node_full_id)
         return None
 
-    monkeypatch.setattr(ent_nodes, "get_neo4j_semaphore", lambda: asyncio.Semaphore(10))
+    monkeypatch.setattr(ent_nodes, "get_graph_semaphore", lambda: asyncio.Semaphore(10))
     monkeypatch.setattr(ent_nodes, "_compose_schema", fake_compose_schema)
     monkeypatch.setattr(ent_nodes, "_extract_entities", fake_extract_entities)
     monkeypatch.setattr(ent_nodes, "_write_entities", fake_write_entities)

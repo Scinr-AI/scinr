@@ -125,6 +125,9 @@ class FakeResult:
     async def data(self) -> list[dict[str, Any]]:
         return list(self._rows)
 
+    async def consume(self) -> None:
+        return None
+
 
 class FakeRecord:
     def __init__(self, data: dict[str, Any]) -> None:
@@ -142,7 +145,10 @@ class FakeTx:
         self._responder = responder
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run(self, cypher: str, **params: Any) -> FakeResult:
+    async def run(
+        self, cypher: str, parameters: dict[str, Any] | None = None, **params: Any
+    ) -> FakeResult:
+        params = {**(parameters or {}), **params}
         self.calls.append((cypher, params))
         rows = self._responder(cypher, params)
         return FakeResult(rows or [])

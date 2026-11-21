@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 
 from scinr.newton import configure
-from scinr.newton.exceptions import GraphConnectionError, NavigationError
+from scinr.newton.exceptions import GraphConnectionError, NavigationError, QueryTimeoutError
 from scinr.newton.navigation.models import NodeSelector
 from scinr.newton.navigation.sql._walk import PATH_SEP, reached, walk
 from scinr.newton.navigation.sql.navigator import SqlGraphNavigator
@@ -139,6 +139,149 @@ async def test_execute_raw_checks_the_dialect_and_the_query(nav) -> None:
         await nav.execute_raw("SELECT 1", dialect="cypher")
     with pytest.raises(NavigationError):
         await nav.execute_raw("   ")
+
+
+async def test_execute_raw_max_rows_returns_one_more_than_the_cap(nav) -> None:
+    query = "SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) AS t ORDER BY n"
+    assert [r["n"] for r in await nav.execute_raw(query, max_rows=2)] == [1, 2, 3]
+    assert len(await nav.execute_raw(query, max_rows=5)) == 5
+    assert len(await nav.execute_raw(query, max_rows=0)) == 1
+    assert len(await nav.execute_raw(query)) == 5
+    assert await nav.execute_raw_one(query, max_rows=2) == {"n": 1}
+
+
+@pytest.mark.parametrize("kwargs", [{"timeout_seconds": 0}, {"timeout_seconds": -1}, {"max_rows": -1}])
+async def test_execute_raw_rejects_invalid_limits(nav, kwargs) -> None:
+    with pytest.raises(NavigationError):
+        await nav.execute_raw("SELECT 1", **kwargs)
+
+
+async def test_execute_raw_timeout_aborts_a_slow_query_on_postgres(nav, sql_backend) -> None:
+    if sql_backend.backend != "postgres":
+        # SQLite has no server-side timeout: the argument is accepted and ignored.
+        assert await nav.execute_raw("SELECT 1 AS one", timeout_seconds=0.5) == [{"one": 1}]
+        return
+    with pytest.raises(QueryTimeoutError) as caught:
+        await nav.execute_raw("SELECT pg_sleep(2)", timeout_seconds=0.5)
+    assert caught.value.code == "57014"
+    assert isinstance(caught.value, NavigationError)
+    # the connection is usable afterwards and a fast query under a timeout succeeds
+    assert await nav.execute_raw("SELECT 1 AS one", timeout_seconds=5) == [{"one": 1}]
+
+
+async def test_execute_raw_error_carries_the_engine_code(nav, sql_backend) -> None:
+    with pytest.raises(NavigationError) as caught:
+        await nav.execute_raw("SELEC 1")
+    assert not isinstance(caught.value, QueryTimeoutError)
+    if sql_backend.backend == "postgres":
+        assert caught.value.code == "42601"
+    else:
+        assert caught.value.code is None
+    # a refused write keeps the read-only message (and, on Postgres, its SQLSTATE)
+    with pytest.raises(NavigationError, match="read-only") as refused:
+        await nav.execute_raw("DELETE FROM documents")
+    if sql_backend.backend == "postgres":
+        assert refused.value.code == "25006"
+
+
+def _seed_one_document() -> None:
+    _insert(
+        sa.insert(T.documents).values(
+            _key='["t","a.txt",1]', tenant_id="t", path="a.txt", version=1, latest=True
+        )
+    )
+
+
+_ESCAPE = (
+    "COMMIT; BEGIN; INSERT INTO documents (_key, tenant_id, path, version) "
+    "VALUES ('k', 't', 'script', 1); COMMIT"
+)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "SELECT 1; SELECT 2",
+        f"SELECT 1; {_ESCAPE}",
+        f"SELECT ';'; {_ESCAPE}",
+        f"SELECT 1 -- c\n; {_ESCAPE}",
+        f"WITH x AS (SELECT 1) SELECT * FROM x; {_ESCAPE}",
+    ],
+)
+async def test_execute_raw_runs_one_statement_only(nav, sql_backend, script) -> None:
+    """A script is refused by the engine before anything runs (the first keyword is a query,
+    so the keyword check lets it through: this is the engine's own guarantee)."""
+    _seed_one_document()
+    with pytest.raises(NavigationError) as caught:
+        await nav.execute_raw(script)
+    if sql_backend.backend == "postgres":
+        # "cannot insert multiple commands into a prepared statement"
+        assert caught.value.code == "42601"
+    else:
+        assert "one statement" in str(caught.value)
+    assert await nav.execute_raw_one("SELECT count(*) AS n FROM documents") == {"n": 1}
+
+
+@pytest.mark.parametrize(
+    "statement", ["COMMIT", "ROLLBACK", "END", "BEGIN", "SAVEPOINT s", "; COMMIT", "/* c */ commit"]
+)
+async def test_execute_raw_refuses_transaction_control(nav, statement) -> None:
+    with pytest.raises(NavigationError, match="refused") as caught:
+        await nav.execute_raw(statement)
+    assert caught.value.code is None
+    assert await nav.execute_raw("SELECT 1 AS one") == [{"one": 1}]
+
+
+async def test_execute_raw_refuses_sqlite_pragmas_and_attach(nav, sql_backend, tmp_path) -> None:
+    if sql_backend.backend != "sqlite":
+        with pytest.raises(NavigationError, match="SET statements are refused"):
+            await nav.execute_raw("SET search_path TO public")
+        return
+    target = tmp_path / "attached.db"
+    for statement in (
+        "PRAGMA query_only = OFF",
+        "PRAGMA journal_mode = DELETE",
+        f"ATTACH '{target}' AS other",
+        f"VACUUM INTO '{tmp_path / 'copy.db'}'",
+    ):
+        with pytest.raises(NavigationError, match="refused"):
+            await nav.execute_raw(statement)
+    assert not target.exists()
+    # a pragma is still readable through its table-valued function
+    rows = await nav.execute_raw(
+        "SELECT name FROM pragma_table_info('documents') WHERE name = 'path'"
+    )
+    assert rows == [{"name": "path"}]
+
+
+async def test_execute_raw_reports_a_statement_that_ends_the_transaction(nav, monkeypatch) -> None:
+    """The last line of defence: without the keyword check, a COMMIT runs (one statement, so
+    nothing can follow it) and is reported instead of returning rows."""
+    _seed_one_document()
+    monkeypatch.setattr(nav._dl, "raw_refused_keywords", frozenset())
+    with pytest.raises(NavigationError, match="ended its read-only transaction"):
+        await nav.execute_raw("COMMIT")
+    # and the script that motivated the guard is still refused by the engine
+    with pytest.raises(NavigationError):
+        await nav.execute_raw(_ESCAPE)
+    monkeypatch.undo()
+    assert await nav.execute_raw_one("SELECT count(*) AS n FROM documents") == {"n": 1}
+
+
+async def test_execute_raw_still_reads_trailing_semicolons_comments_and_markers(
+    nav, sql_backend
+) -> None:
+    assert await nav.execute_raw("SELECT 1 AS one;") == [{"one": 1}]
+    assert await nav.execute_raw("SELECT 1 AS one; -- done") == [{"one": 1}]
+    assert await nav.execute_raw("-- why\nSELECT 1 AS one -- trailing") == [{"one": 1}]
+    assert await nav.execute_raw("SELECT ';' AS s") == [{"s": ";"}]
+    assert await nav.execute_raw("SELECT :v AS v", {"v": "x"}) == [{"v": "x"}]
+    assert await nav.execute_raw("SELECT 'ab' LIKE 'a%' AS m") in ([{"m": True}], [{"m": 1}])
+    assert len(await nav.execute_raw("EXPLAIN SELECT 1")) >= 1
+    if sql_backend.backend == "postgres":
+        # a caller's own single-statement marker (graphApi's) keeps working
+        marked = await nav.execute_raw("SELECT 1 AS one\n-- :caller_marker", {"caller_marker": 1})
+        assert marked == [{"one": 1}]
 
 
 # ── walks ────────────────────────────────────────────────────────────────────

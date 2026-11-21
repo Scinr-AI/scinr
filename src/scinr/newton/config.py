@@ -29,6 +29,10 @@ import dataclasses
 import logging
 import os
 import re
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
@@ -164,6 +168,7 @@ class ScinrConfig:
     sql_url: str = ""
     sql_schema: str = "newton"
     sql_pool_size: int = 10
+    sql_max_engines: int = 64
     sql_fulltext_config: str = "simple"
     sqlite_files_dir: str = ""
     # Converters
@@ -205,8 +210,8 @@ class ScinrConfig:
     verbatim_info_unit_max_chars: int = 4000
     auto_info_units_max_input_chars: int = 10000
     llm_concurrency: int = 4
-    neo4j_concurrency: int = 10
-    neo4j_sync_concurrency: int = 8
+    graph_concurrency: int = 10
+    graph_sync_concurrency: int = 8
     # Consolidation (fast_extraction Stage 1 post-extraction merge step)
     consolidation_token_safety_margin: float = 0.75
     consolidation_max_output_tokens: int | None = None
@@ -236,6 +241,26 @@ class ScinrConfig:
                 value = redact_uri(value)
             parts.append(f"{f.name}={value!r}")
         return f"{type(self).__name__}({', '.join(parts)})"
+
+    @property
+    def neo4j_concurrency(self) -> int:
+        """Deprecated alias of ``graph_concurrency`` (removed in 0.7.0)."""
+        warnings.warn(
+            "neo4j_concurrency is deprecated, use graph_concurrency",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.graph_concurrency
+
+    @property
+    def neo4j_sync_concurrency(self) -> int:
+        """Deprecated alias of ``graph_sync_concurrency`` (removed in 0.7.0)."""
+        warnings.warn(
+            "neo4j_sync_concurrency is deprecated, use graph_sync_concurrency",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.graph_sync_concurrency
 
 
 class _Unset:
@@ -267,14 +292,39 @@ _SQL_URL_SCHEMES = {"postgresql": "postgres", "postgres": "postgres", "sqlite": 
 
 _config: ScinrConfig | None = None
 
+#: Configuration that replaces the global one in the current context (see use_config()).
+_config_override: ContextVar[ScinrConfig | None] = ContextVar(
+    "scinr_config_override", default=None
+)
+
+
+@contextmanager
+def use_config(cfg: ScinrConfig) -> Iterator[ScinrConfig]:
+    """Use *cfg* instead of the global configuration in this context (task / thread copy).
+
+    Overrides only what :func:`get_config` returns: it triggers none of the side effects of
+    :func:`configure`. In particular, ``extra_converters`` of *cfg* are not applied (only
+    ``configure()`` does), and the process-wide caches are not reset: clients and engines are
+    cached per connection parameters, so a different configuration gets its own.
+    """
+    token = _config_override.set(cfg)
+    try:
+        yield cfg
+    finally:
+        _config_override.reset(token)
+
 
 def get_config() -> ScinrConfig:
     """
-    Return the current ScinrConfig singleton.
+    Return the active ScinrConfig: the one set by use_config() in this context, else the
+    global one set by configure().
 
     Raises:
-        ConfigurationError: If configure() has not been called yet.
+        ConfigurationError: If neither use_config() nor configure() has set one.
     """
+    override = _config_override.get()
+    if override is not None:
+        return override
     global _config
     if _config is None:
         raise ConfigurationError(
@@ -292,7 +342,7 @@ def get_config() -> ScinrConfig:
 # ---------------------------------------------------------------------------
 
 
-def configure(
+def build_config(
     # LLM
     llm: Any | None = None,
     repair_llm: Any | None = None,
@@ -328,6 +378,7 @@ def configure(
     sql_url: str | None = None,
     sql_schema: str | None = None,
     sql_pool_size: int | None = None,
+    sql_max_engines: int | None = None,
     sql_fulltext_config: str | None = None,
     sqlite_files_dir: str | None = None,
     # Converters
@@ -367,6 +418,8 @@ def configure(
     full_docstring: bool | None = None,
     extraction_batch_size: int | None = None,
     llm_concurrency: int | None = None,
+    graph_concurrency: int | None = None,
+    graph_sync_concurrency: int | None = None,
     neo4j_concurrency: int | None = None,
     neo4j_sync_concurrency: int | None = None,
     # Consolidation (fast_extraction Stage 1 post-extraction merge step)
@@ -386,9 +439,14 @@ def configure(
     auto_info_units_max_input_chars: int | None = None,
 ) -> ScinrConfig:
     """
-    Configure the scinr-ingest library.
+    Build and validate a ScinrConfig without installing it.
 
-    Parameter resolution order: explicit argument > environment variable > default.
+    Takes exactly the parameters of :func:`configure` and resolves them in the same order
+    (explicit argument > environment variable > default), but assigns no global state and runs
+    no side effects: it does not touch the process-wide configuration, the logging setup, the
+    converter registry or any client cache. Use it with :func:`use_config` to run a block with
+    another configuration. Settings that only :func:`configure` applies (``extra_converters``,
+    log redaction, cache resets) are NOT applied to a configuration used through ``use_config``.
 
     Args:
         llm: LangChain BaseChatModel instance for LLM-dependent stages. Optional — not required
@@ -444,6 +502,10 @@ def configure(
             Env: `SQL_SCHEMA`. Default: `'newton'`.
         sql_pool_size: Connection pool size of each SQL engine (minimum 1).
             Env: `SQL_POOL_SIZE`. Default: `10`.
+        sql_max_engines: Maximum number of SQL engines kept in cache (one per distinct
+            `sql_url`/`sql_schema`/pool/text-search config, and per event loop for the asynchronous
+            ones). The least recently used one is disposed when the limit is exceeded (minimum 1).
+            Env: `SQL_MAX_ENGINES`. Default: `64`.
         sql_fulltext_config: Postgres text-search configuration used by `to_tsvector`.
             Applied only when the schema is created. Env: `SQL_FULLTEXT_CONFIG`.
             Default: `'simple'`.
@@ -571,10 +633,16 @@ def configure(
             >= 1000, otherwise `ConfigurationError` is raised.
             Env: `AUTO_INFO_UNITS_MAX_INPUT_CHARS`. Default: `10000`.
         llm_concurrency: Max concurrent LLM calls (semaphore size, default: `4`).
-        neo4j_concurrency: Max concurrent graph-store sessions during annotation and entity
-            extraction, for any graph backend (Neo4j or SQL; default: `10`).
-        neo4j_sync_concurrency: Max concurrent Stage 2 (sync ingestion) dispatches
-            to asyncio.to_thread() (default: `8`).
+        graph_concurrency: Max concurrent graph-store sessions during annotation and entity
+            extraction, for any graph backend (Neo4j or SQL). Must be >= 1.
+            Env: `GRAPH_CONCURRENCY`. Default: `10`.
+        graph_sync_concurrency: Max concurrent Stage 2 (sync ingestion) dispatches
+            to asyncio.to_thread(), for any graph backend. Must be >= 1.
+            Env: `GRAPH_SYNC_CONCURRENCY`. Default: `8`.
+        neo4j_concurrency: Deprecated alias of `graph_concurrency` (env `NEO4J_CONCURRENCY`);
+            removed in 0.7.0.
+        neo4j_sync_concurrency: Deprecated alias of `graph_sync_concurrency`
+            (env `NEO4J_SYNC_CONCURRENCY`); removed in 0.7.0.
         consolidation_token_safety_margin: Fraction of `max_tokens` used as the
             output-token ceiling for the Stage 1 `fast_extraction` consolidation
             LLM call, when `consolidation_max_output_tokens` is unset. Env:
@@ -617,23 +685,11 @@ def configure(
                 )
 
     Returns:
-        ScinrConfig singleton containing active library settings.
+        The validated ScinrConfig (not installed as the global configuration).
 
     Raises:
         ConfigurationError: If conflicting settings or invalid URIs are supplied.
     """
-    global _config
-
-    # Setup logging first
-    root_had_handlers = bool(logging.getLogger().handlers)
-    logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
-    if not root_had_handlers:
-        # The handler basicConfig just created is ours: make it mask credentials.
-        # An application's own handlers are left alone (see redact_handlers()).
-        from scinr.newton.utils.logging_config import redact_handlers
-
-        redact_handlers()
-
     # Resolved early (moved up from its original position below) because the
     # Bedrock client construction just below needs it to size its connection
     # pool (max_pool_connections) relative to the configured LLM concurrency.
@@ -754,6 +810,9 @@ def configure(
     resolved_sql_schema = sql_schema or os.getenv("SQL_SCHEMA", "newton")
     resolved_sql_pool_size = _resolve_int(
         sql_pool_size, "SQL_POOL_SIZE", 10, "sql_pool_size", minimum=1
+    )
+    resolved_sql_max_engines = _resolve_int(
+        sql_max_engines, "SQL_MAX_ENGINES", 64, "sql_max_engines", minimum=1
     )
     resolved_sql_fulltext_config = sql_fulltext_config or os.getenv("SQL_FULLTEXT_CONFIG", "simple")
     resolved_sqlite_files_dir = sqlite_files_dir or os.getenv("SQLITE_FILES_DIR", "")
@@ -997,16 +1056,23 @@ def configure(
     # before the Bedrock client is constructed, so it's available for the
     # botocore connection pool sizing there too.
 
-    _neo4j_concurrency_env = os.getenv("NEO4J_CONCURRENCY", "10")
-    resolved_neo4j_concurrency = (
-        neo4j_concurrency if neo4j_concurrency is not None else int(_neo4j_concurrency_env)
+    resolved_graph_concurrency = _resolve_graph_concurrency(
+        graph_concurrency,
+        neo4j_concurrency,
+        env="GRAPH_CONCURRENCY",
+        old_env="NEO4J_CONCURRENCY",
+        default=10,
+        name="graph_concurrency",
+        old_name="neo4j_concurrency",
     )
-
-    _neo4j_sync_concurrency_env = os.getenv("NEO4J_SYNC_CONCURRENCY", "8")
-    resolved_neo4j_sync_concurrency = (
-        neo4j_sync_concurrency
-        if neo4j_sync_concurrency is not None
-        else int(_neo4j_sync_concurrency_env)
+    resolved_graph_sync_concurrency = _resolve_graph_concurrency(
+        graph_sync_concurrency,
+        neo4j_sync_concurrency,
+        env="GRAPH_SYNC_CONCURRENCY",
+        old_env="NEO4J_SYNC_CONCURRENCY",
+        default=8,
+        name="graph_sync_concurrency",
+        old_name="neo4j_sync_concurrency",
     )
 
     # ── Consolidation (fast_extraction Stage 1 post-extraction merge step) ────
@@ -1083,7 +1149,7 @@ def configure(
             ]
 
     # ── Build config ──────────────────────────────────────────────────────────
-    _config = ScinrConfig(
+    return ScinrConfig(
         llm=resolved_llm,
         repair_llm=resolved_repair_llm,
         neo4j_uri=resolved_neo4j_uri,
@@ -1131,6 +1197,7 @@ def configure(
         sql_url=resolved_sql_url,
         sql_schema=resolved_sql_schema,
         sql_pool_size=resolved_sql_pool_size,
+        sql_max_engines=resolved_sql_max_engines,
         sql_fulltext_config=resolved_sql_fulltext_config,
         sqlite_files_dir=resolved_sqlite_files_dir,
         extra_converters=extra_converters or {},
@@ -1168,8 +1235,8 @@ def configure(
         verbatim_info_unit_max_chars=resolved_verbatim_max_chars,
         auto_info_units_max_input_chars=resolved_auto_max_chars,
         llm_concurrency=resolved_concurrency,
-        neo4j_concurrency=resolved_neo4j_concurrency,
-        neo4j_sync_concurrency=resolved_neo4j_sync_concurrency,
+        graph_concurrency=resolved_graph_concurrency,
+        graph_sync_concurrency=resolved_graph_sync_concurrency,
         consolidation_token_safety_margin=resolved_consolidation_token_safety_margin,
         consolidation_max_output_tokens=resolved_consolidation_max_output_tokens,
         consolidation_max_input_tokens=resolved_consolidation_max_input_tokens,
@@ -1181,11 +1248,140 @@ def configure(
         llm_stage_configuration=resolved_llm_stage_configuration,
     )
 
+
+def configure(
+    # LLM
+    llm: Any | None = None,
+    repair_llm: Any | None = None,
+    # Neo4j
+    neo4j_uri: str | None = None,
+    neo4j_user: str | None = None,
+    neo4j_password: str | None = None,
+    neo4j_database: str | None = None,
+    # Graph navigation
+    graph_backend: Literal["neo4j", "postgres", "sqlite"] | None = None,
+    # Models
+    enabled_base_themes: list[ThemePath | str] | None = None,
+    enabled_user_themes: list[str] | None = None,
+    extra_models_paths: list[str | Path] | None = None,
+    # Storage
+    storage_backend: Literal["none", "mongodb", "postgres", "sqlite", "custom"] | None = None,
+    mongodb_uri: str | None = None,
+    mongodb_database: str | None = None,
+    mongodb_raw_files_collection: str | None = None,
+    mongodb_pages_collection: str | None = None,
+    mongodb_gridfs_bucket: str | None = None,
+    mongodb_ensure_indexes: bool | None = None,
+    custom_storage: tuple | None = None,
+    # Freeze (document snapshots)
+    freeze_backend: Literal["none", "mongodb", "postgres", "sqlite", "custom"] | None = None,
+    mongodb_frozen_collection: str | None = None,
+    mongodb_frozen_gridfs_bucket: str | None = None,
+    custom_freeze_storage: Any | None = None,
+    # Page images (described embedded images and video frames)
+    mongodb_images_collection: str | None = None,
+    mongodb_images_gridfs_bucket: str | None = None,
+    # SQL (Postgres / SQLite)
+    sql_url: str | None = None,
+    sql_schema: str | None = None,
+    sql_pool_size: int | None = None,
+    sql_max_engines: int | None = None,
+    sql_fulltext_config: str | None = None,
+    sqlite_files_dir: str | None = None,
+    # Converters
+    extra_converters: dict[str, type] | None = None,
+    # PDF
+    mistral_api_key: str | None = None,
+    mistral_ocr_safe_max_pages: int | None = None,
+    mistral_ocr_safe_max_bytes: int | None = None,
+    mistral_ocr_max_retries: int | None = None,
+    mistral_ocr_retry_backoff_seconds: float | None = None,
+    mistral_ocr_chunk_concurrency: int | None = None,
+    mistral_ocr_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
+    mistral_ocr_concurrency: int | None = None,
+    mistral_ocr_image_max_pages: int | None = None,
+    # Multimodal (images, audio, video)
+    vision_llm: Any | None = None,
+    transcriber: Any | None = None,
+    describe_embedded_images: bool | None = None,
+    store_described_images: bool | None = None,
+    store_video_frames: bool | None = None,
+    media_error_strategy: Literal["fail_fast", "best_effort"] | None = None,
+    strip_location: bool | None = None,
+    image_max_side_px: int | None = None,
+    image_min_side_px: int | None = None,
+    max_images_per_page: int | None = None,
+    image_decode_concurrency: int | None = None,
+    media_segment_seconds: int | None = None,
+    media_min_segment_seconds: int | None = None,
+    media_language: str | None = None,
+    max_media_duration_seconds: int | None | _Unset = _UNSET,
+    video_frames_per_minute: float | None = None,
+    media_concurrency: int | None = None,
+    ffmpeg_path: str | None = None,
+    ffprobe_path: str | None = None,
+    # Pipeline behaviour
+    prompt_caching_enabled: bool | None = None,
+    full_docstring: bool | None = None,
+    extraction_batch_size: int | None = None,
+    llm_concurrency: int | None = None,
+    graph_concurrency: int | None = None,
+    graph_sync_concurrency: int | None = None,
+    neo4j_concurrency: int | None = None,
+    neo4j_sync_concurrency: int | None = None,
+    # Consolidation (fast_extraction Stage 1 post-extraction merge step)
+    consolidation_token_safety_margin: float | None = None,
+    consolidation_max_output_tokens: int | None = None,
+    consolidation_max_input_tokens: int | None = None,
+    # Logging
+    log_level: str = "INFO",
+    # Prompt family
+    prompt_family: PromptFamily | Literal["generic", "claude", "gpt_reasoning"] | None = None,
+    # Normalization
+    normalization_enabled: bool | None = None,
+    normalization_batch_size: int | None = None,
+    normalization_llm: Any | None = None,
+    llm_stage_configuration: dict[str, StageLLMConfig] | None = None,
+    verbatim_info_unit_max_chars: int | None = None,
+    auto_info_units_max_input_chars: int | None = None,
+) -> ScinrConfig:
+    """
+    Configure the scinr-ingest library.
+
+    Builds the configuration with :func:`build_config` (same parameters, same resolution order:
+    explicit argument > environment variable > default; see there for each parameter), installs
+    it as the process-wide configuration and applies its side effects: log redaction, converter
+    overrides and the reset of every cache that depends on it (theme registry, Neo4j driver,
+    graph store, MongoDB client, SQL engines, catalog memoization).
+
+    Returns:
+        ScinrConfig singleton containing active library settings.
+
+    Raises:
+        ConfigurationError: If conflicting settings or invalid URIs are supplied.
+    """
+    global _config
+    # Snapshot of the parameters; must stay the first statement (locals() holds only them).
+    params = dict(locals())
+
+    # Setup logging first
+    root_had_handlers = bool(logging.getLogger().handlers)
+    logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
+    if not root_had_handlers:
+        # The handler basicConfig just created is ours: make it mask credentials.
+        # An application's own handlers are left alone (see redact_handlers()).
+        from scinr.newton.utils.logging_config import redact_handlers
+
+        redact_handlers()
+
+    cfg = build_config(**params)
+    _config = cfg
+
     # ── Post-init: apply converter overrides ──────────────────────────────────
-    if _config.extra_converters:
+    if cfg.extra_converters:
         from scinr.newton.converters.registry import apply_converter_overrides
 
-        apply_converter_overrides(_config.extra_converters)
+        apply_converter_overrides(cfg.extra_converters)
 
     # ── Reset lazy singletons that depend on config ───────────────────────────
     try:
@@ -1230,22 +1426,22 @@ def configure(
     except Exception:
         pass  # annotation module may not be initialized yet
 
-    if resolved_llm_stage_configuration:
+    if cfg.llm_stage_configuration:
         stage_summaries = []
-        for stage_name, stage_sc in resolved_llm_stage_configuration.items():
-            stage_llm = stage_sc.llm if stage_sc.llm is not None else resolved_llm
+        for stage_name, stage_sc in cfg.llm_stage_configuration.items():
+            stage_llm = stage_sc.llm if stage_sc.llm is not None else cfg.llm
             resolved_stage = ResolvedStageConfig(
                 stage=stage_name,
                 llm=stage_llm,
                 prompt_family=(
                     stage_sc.prompt_family
                     if stage_sc.prompt_family is not None
-                    else resolved_prompt_family
+                    else cfg.prompt_family
                 ),
                 prompt_caching_enabled=(
                     stage_sc.prompt_caching_enabled
                     if stage_sc.prompt_caching_enabled is not None
-                    else resolved_caching
+                    else cfg.prompt_caching_enabled
                 ),
             )
             llm_label = _llm_label(stage_llm) if stage_sc.llm is not None else "global"
@@ -1258,13 +1454,13 @@ def configure(
 
     log.debug(
         "scinr-ingest configured: storage=%s, graph_backend=%s, llm_concurrency=%d, "
-        "neo4j_concurrency=%d",
-        resolved_storage_backend,
-        resolved_graph_backend,
-        resolved_concurrency,
-        resolved_neo4j_concurrency,
+        "graph_concurrency=%d",
+        cfg.storage_backend,
+        cfg.graph_backend,
+        cfg.llm_concurrency,
+        cfg.graph_concurrency,
     )
-    return _config
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -1289,6 +1485,30 @@ def _resolve_int(value: int | None, env: str, default: int, name: str, *, minimu
     if resolved < minimum:
         raise ConfigurationError(f"{name} must be >= {minimum}. Received: {resolved!r}.")
     return resolved
+
+
+def _resolve_graph_concurrency(
+    value: int | None,
+    old_value: int | None,
+    *,
+    env: str,
+    old_env: str,
+    default: int,
+    name: str,
+    old_name: str,
+) -> int:
+    """Explicit argument > deprecated argument > env > deprecated env > default (>= 1)."""
+    if old_value is not None:
+        warnings.warn(f"{old_name} is deprecated, use {name}", DeprecationWarning, stacklevel=3)
+        if value is not None and value != old_value:
+            raise ConfigurationError(
+                f"{name} and {old_name} differ. Received: {value!r} and {old_value!r}."
+            )
+        value = old_value
+    if value is None and os.getenv(env) is None and os.getenv(old_env) is not None:
+        warnings.warn(f"{old_env} is deprecated, use {env}", DeprecationWarning, stacklevel=3)
+        env = old_env
+    return _resolve_int(value, env, default, name, minimum=1)
 
 
 def _validate_sql_config(
@@ -1613,9 +1833,10 @@ def embedded_images_enabled() -> bool:
     The only condition the PDF, DOCX and PPTX converters and the enrichment
     step check. ``False`` when :func:`configure` has not been called.
     """
-    if _config is None:
+    cfg = _config_override.get() or _config
+    if cfg is None:
         return False
-    return bool(_config.describe_embedded_images and _config.vision_llm is not None)
+    return bool(cfg.describe_embedded_images and cfg.vision_llm is not None)
 
 
 def get_prompt_family(*, stage: str | None = None) -> PromptFamily:
@@ -1680,42 +1901,43 @@ def reset_llm_semaphore() -> None:
 
 _llm_semaphore = None
 
-_neo4j_semaphore = None
+_graph_semaphore = None
 
 
-def get_neo4j_semaphore():
+def get_graph_semaphore():
     """Return (creating if needed) the global asyncio.Semaphore for graph-store session concurrency.
 
     The semaphore bounds the number of concurrent graph-store sessions during
-    annotation (Stage 3) and entity extraction (Stage 4). It is created
-    lazily on the first call using the neo4j_concurrency value from ScinrConfig.
+    annotation (Stage 3) and entity extraction (Stage 4), for any graph backend
+    (Neo4j or SQL). It is created lazily on the first call using the
+    graph_concurrency value from ScinrConfig.
 
-    To change the concurrency at runtime, call configure(neo4j_concurrency=N)
-    followed by reset_neo4j_semaphore() before running the relevant stages.
+    To change the concurrency at runtime, call configure(graph_concurrency=N)
+    followed by reset_graph_semaphore() before running the relevant stages.
     """
     import asyncio
 
-    global _neo4j_semaphore
-    if _neo4j_semaphore is None:
+    global _graph_semaphore
+    if _graph_semaphore is None:
         cfg = get_config()
-        _neo4j_semaphore = asyncio.Semaphore(cfg.neo4j_concurrency)
-    return _neo4j_semaphore
+        _graph_semaphore = asyncio.Semaphore(cfg.graph_concurrency)
+    return _graph_semaphore
 
 
-def reset_neo4j_semaphore() -> None:
-    """Reset the graph-store semaphore (used after configure() changes neo4j_concurrency).
+def reset_graph_semaphore() -> None:
+    """Reset the graph-store semaphore (used after configure() changes graph_concurrency).
 
-    Call this after configure(neo4j_concurrency=N) to ensure the new value
-    takes effect on the next call to get_neo4j_semaphore().
+    Call this after configure(graph_concurrency=N) to ensure the new value
+    takes effect on the next call to get_graph_semaphore().
     """
-    global _neo4j_semaphore
-    _neo4j_semaphore = None
+    global _graph_semaphore
+    _graph_semaphore = None
 
 
-_neo4j_sync_semaphore = None
+_graph_sync_semaphore = None
 
 
-def get_neo4j_sync_semaphore():
+def get_graph_sync_semaphore():
     """Global semaphore bounding how many concurrent dispatches to
     asyncio.to_thread() for Stage 2 (synchronous ingestion) are in flight.
     It must ALWAYS be acquired/released on the event loop (by the caller of
@@ -1724,16 +1946,56 @@ def get_neo4j_sync_semaphore():
     """
     import asyncio
 
-    global _neo4j_sync_semaphore
-    if _neo4j_sync_semaphore is None:
+    global _graph_sync_semaphore
+    if _graph_sync_semaphore is None:
         cfg = get_config()
-        _neo4j_sync_semaphore = asyncio.Semaphore(cfg.neo4j_sync_concurrency)
-    return _neo4j_sync_semaphore
+        _graph_sync_semaphore = asyncio.Semaphore(cfg.graph_sync_concurrency)
+    return _graph_sync_semaphore
+
+
+def reset_graph_sync_semaphore() -> None:
+    """Manual reset after configure(graph_sync_concurrency=N) — NOT
+    auto-invoked from configure(); same manual contract as
+    reset_graph_semaphore()/reset_llm_semaphore()."""
+    global _graph_sync_semaphore
+    _graph_sync_semaphore = None
+
+
+def get_neo4j_semaphore():
+    """Deprecated alias of :func:`get_graph_semaphore` (removed in 0.7.0)."""
+    warnings.warn(
+        "get_neo4j_semaphore is deprecated, use get_graph_semaphore",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_graph_semaphore()
+
+
+def reset_neo4j_semaphore() -> None:
+    """Deprecated alias of :func:`reset_graph_semaphore` (removed in 0.7.0)."""
+    warnings.warn(
+        "reset_neo4j_semaphore is deprecated, use reset_graph_semaphore",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    reset_graph_semaphore()
+
+
+def get_neo4j_sync_semaphore():
+    """Deprecated alias of :func:`get_graph_sync_semaphore` (removed in 0.7.0)."""
+    warnings.warn(
+        "get_neo4j_sync_semaphore is deprecated, use get_graph_sync_semaphore",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_graph_sync_semaphore()
 
 
 def reset_neo4j_sync_semaphore() -> None:
-    """Manual reset after configure(neo4j_sync_concurrency=N) — NOT
-    auto-invoked from configure(); same manual contract as
-    reset_neo4j_semaphore()/reset_llm_semaphore()."""
-    global _neo4j_sync_semaphore
-    _neo4j_sync_semaphore = None
+    """Deprecated alias of :func:`reset_graph_sync_semaphore` (removed in 0.7.0)."""
+    warnings.warn(
+        "reset_neo4j_sync_semaphore is deprecated, use reset_graph_sync_semaphore",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    reset_graph_sync_semaphore()

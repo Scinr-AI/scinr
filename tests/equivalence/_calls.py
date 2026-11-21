@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from scinr.newton.graph.identity import encode_key
 from scinr.newton.navigation.filters import (
     Contains,
     EndsWith,
@@ -681,6 +682,113 @@ def build_calls(dump: dict[str, Any]) -> list[Call]:
         {"from_selector": path_selector, "to_selector": child_selector, "max_hops": 0},
         scoped=False,
     )
+
+    # ── memory summaries, explore & label keys ───────────────────────────────
+    bookkeeping = ["tenant_id", "job_ids", "created_by_user_ids", "embedding"]
+    for method in ("summarize_model_classes", "summarize_model_instance_links", "summarize_sources"):
+        add(method, {})
+        add(method, {"ignore_keys": bookkeeping, "limit": 2})
+    add("summarize_model_classes", {"ignore_keys": ["bad key"]}, scoped=False)
+    add("get_model_instance_links", {"uids": [instance["uid"], MISSING]})
+    add("get_model_instance_links", {"uids": [instance["uid"]], "limit": 1})
+    add("get_model_instance_links", {"uids": []}, scoped=False)
+    add("get_extraction_links", {})
+    add("get_extraction_links", {"document_paths": [doc["path"]], "limit": 2})
+    add("get_extraction_links", {"document_paths": [MISSING]})
+    add("get_extraction_links", {"field_contains": [("model_class", cls[:2])]})
+    add("list_extraction_field_keys", {})
+    add("list_extraction_field_keys", {"document_paths": [doc["path"], MISSING]})
+    add("get_model_instances_in_documents", {"model_class": cls})
+    add(
+        "get_model_instances_in_documents",
+        {"model_class": cls, "document_paths": [doc["path"]], "limit": 1},
+    )
+    add("get_model_instances_in_documents", {"model_class": MISSING})
+    add("search_model_instances", {"text": str(instance["uid"])})
+    add("search_model_instances", {"text": cls[:2], "ignore_keys": bookkeeping, "limit": 3})
+    add("search_model_instances", {"text": ""}, scoped=False)
+    add("list_model_instance_field_keys", {"model_class": cls, "ignore_keys": bookkeeping})
+    add("list_model_instance_field_keys", {"model_class": cls, "sample_limit": 1})
+    add("list_model_instance_field_keys", {"model_class": MISSING})
+    for label in ("ModelInstance", "Document", "ExtractionResult", "Entity", "CatalogModel"):
+        add("get_node_property_keys", {"label": label})
+    add("get_node_property_keys", {"label": "Nope"}, scoped=False)
+
+    # ── node browsing (portable identity) ────────────────────────────────────
+    doc_ref = (
+        "Document",
+        encode_key(
+            "Document",
+            {
+                "tenant_id": doc.get("tenant_id", "__public__"),
+                "path": doc["path"],
+                "version": doc["version"],
+            },
+        ),
+    )
+    catalog_ref = ("CatalogModel", _first(catalog, cls))
+    refs = [
+        doc_ref,
+        ("StructureNode", parent["id"]),
+        ("StructureNode", deep["id"]),
+        ("ModelInstance", instance["uid"]),
+        ("LabeledEntity", linked_entity["uid"]),
+        catalog_ref,
+        ("StructureNode", MISSING),
+    ]
+    model_fields = [n["props"] for n in graph.of_label("ModelField")]
+    if model_fields:
+        refs.append(("ModelField", encode_key("ModelField", model_fields[0])))
+    themes_in_graph = [n["props"] for n in graph.of_label("Theme")]
+    if themes_in_graph:
+        refs.append(("Theme", themes_in_graph[0]["path"]))
+    for label, key in refs:
+        anchor = {"label": label, "key": key}
+        add("get_node", anchor)
+        add("count_node_relationships", anchor)
+        add("expand_node", anchor)
+        add("expand_node", {**anchor, "limit": 1}, only=_one_tenant)
+        add("expand_node", {**anchor, "limit": 1, "skip": 1}, only=_one_tenant)
+        add("expand_node", {**anchor, "limit": None})
+        add("expand_node", {**anchor, "direction": "out"})
+        add("expand_node", {**anchor, "direction": "in", "limit": 2}, only=_one_tenant)
+        add("expand_node", {**anchor, "edge_types": ["HAS_CHILD", "HAS_STRUCTURE", "HAS_EXTRACTION"]})
+        add("expand_node", {**anchor, "neighbor_labels": ["StructureNode", "ModelInstance"]})
+        add("expand_node", {**anchor, "neighbor_labels": ["Section", "CatalogModel"]})
+        add("expand_node", {**anchor, "skip": 1000})
+    add("get_node", {"label": "Document", "key": "not-json"}, scoped=False)
+    add("get_node", {"label": "Document", "key": '["a","b"]'}, scoped=False)
+    add("get_node", {"label": "Nope", "key": "x"}, scoped=False)
+    add("count_node_relationships", {"label": "Nope", "key": "x"}, scoped=False)
+    add("expand_node", {"label": "Document", "key": "not-json"}, scoped=False)
+    add("expand_node", {**dict(zip(("label", "key"), refs[1], strict=True)), "direction": "up"}, scoped=False)
+    add("expand_node", {"label": refs[1][0], "key": refs[1][1], "skip": -1}, scoped=False)
+    add("expand_node", {"label": refs[1][0], "key": refs[1][1], "limit": 0}, scoped=False)
+    add("expand_node", {"label": refs[1][0], "key": refs[1][1], "edge_types": ["bad type"]}, scoped=False)
+    unit_word = str(unit.get("title") or "x").split()[0]
+    doc_name = str(doc.get("name") or doc["path"])
+    search_texts = [
+        doc_name[:3],
+        doc_name.upper()[:4],
+        str(parent["id"]),
+        str(instance["uid"]),
+        cls[:2],
+        unit_word,
+        str(entity.get("value", "zz"))[:3],
+        str(_first(catalog, cls))[:3],
+        "zz-no-match",
+    ]
+    for text in search_texts:
+        add("search_nodes", {"text": text})
+        add("search_nodes", {"text": text, "limit": 2, "skip": 1}, only=_one_tenant)
+    add("search_nodes", {"text": doc_name[:3], "labels": ["Document", "StructureNode"]})
+    add("search_nodes", {"text": cls[:2], "labels": ["ModelInstance", "CatalogModel"], "limit": 1})
+    add("search_nodes", {"text": unit_word, "labels": ["InfoUnit"]})
+    add("search_nodes", {"text": "a"}, scoped=False)
+    add("search_nodes", {"text": ""}, scoped=False)
+    add("search_nodes", {"text": "zz", "labels": ["Nope"]}, scoped=False)
+    add("search_nodes", {"text": "zz", "limit": 0}, scoped=False)
+    add("search_nodes", {"text": "zz", "skip": -1}, scoped=False)
     return calls
 
 

@@ -357,7 +357,7 @@ async def ingest_one(
     """Async wrapper around _load_document_object() for the future
     per-document orchestration engine (Bloque B, does not exist yet).
 
-    Acquires get_neo4j_sync_semaphore() in the event loop BEFORE dispatching
+    Acquires get_graph_sync_semaphore() in the event loop BEFORE dispatching
     to asyncio.to_thread() — never acquire an asyncio.Semaphore inside the
     worker thread it wraps (asyncio.Semaphore requires an active event loop
     and is not usable from a plain worker thread). The semaphore is released
@@ -386,12 +386,12 @@ async def ingest_one(
         document's effective tenant (see ``ingest.raw_file_check``). Nothing is
         written to the graph database in that case.
     """
-    from scinr.newton.config import get_neo4j_sync_semaphore
+    from scinr.newton.config import get_graph_sync_semaphore
     from scinr.newton.ingest.raw_file_check import verify_document
 
     await verify_document(doc, tenant_id)
 
-    semaphore = get_neo4j_sync_semaphore()
+    semaphore = get_graph_sync_semaphore()
     async with semaphore:
         return await asyncio.to_thread(
             _load_document_object,
@@ -418,7 +418,7 @@ async def ingest_one_from_path(
     Analogous to ingest_one() but for a not-yet-loaded JSON extraction file
     on disk, mirroring the existing load_file() vs _load_document_object()
     split in this module. Same semaphore-before-thread contract as
-    ingest_one(): get_neo4j_sync_semaphore() is acquired in the event loop
+    ingest_one(): get_graph_sync_semaphore() is acquired in the event loop
     before dispatching to asyncio.to_thread(), and released only after the
     synchronous work (disk read, validation, insert, and its own
     with_neo4j_retry_sync retries) has fully completed.
@@ -445,12 +445,12 @@ async def ingest_one_from_path(
         document's effective tenant (see ``ingest.raw_file_check``). Nothing is
         written to the graph database in that case.
     """
-    from scinr.newton.config import get_neo4j_sync_semaphore
+    from scinr.newton.config import get_graph_sync_semaphore
     from scinr.newton.ingest.raw_file_check import verify_json_file
 
     await verify_json_file(path, tenant_id)
 
-    semaphore = get_neo4j_sync_semaphore()
+    semaphore = get_graph_sync_semaphore()
     async with semaphore:
         return await asyncio.to_thread(
             load_file,

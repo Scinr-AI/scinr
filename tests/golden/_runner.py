@@ -105,15 +105,15 @@ def configure_harness(**overrides: Any) -> None:
     """
     from scinr.newton.config import (
         configure,
+        reset_graph_semaphore,
+        reset_graph_sync_semaphore,
         reset_llm_semaphore,
-        reset_neo4j_semaphore,
-        reset_neo4j_sync_semaphore,
     )
 
     # The semaphores bind to the event loop of their first use; every scenario has its own.
     reset_llm_semaphore()
-    reset_neo4j_semaphore()
-    reset_neo4j_sync_semaphore()
+    reset_graph_semaphore()
+    reset_graph_sync_semaphore()
     settings: dict[str, Any] = dict(
         llm=ScriptedLLM(),
         neo4j_uri=NEO4J_URI,
@@ -125,8 +125,8 @@ def configure_harness(**overrides: Any) -> None:
         mongodb_database=MONGO_DATABASE,
         extra_models_paths=[MODELS_DIR],
         llm_concurrency=1,
-        neo4j_concurrency=1,
-        neo4j_sync_concurrency=1,
+        graph_concurrency=1,
+        graph_sync_concurrency=1,
         normalization_enabled=True,
         log_level="WARNING",
     )

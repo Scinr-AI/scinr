@@ -81,6 +81,7 @@ ORDER_UNSPECIFIED: dict[str, str] = {
     "list_model_instance_relationship_types": "ORDER BY count only (ties)",
     "list_root_documents": "ORDER BY path, version (the same path in several tenants ties)",
     "get_documents": "ORDER BY path, version (the same path in several tenants ties)",
+    "summarize_sources": "ordered by date then path (the same path in several tenants ties)",
 }
 
 #: Keys of the scope arguments (a call without any of them is not scoped).

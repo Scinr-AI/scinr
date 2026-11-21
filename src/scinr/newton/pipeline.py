@@ -35,7 +35,7 @@ Annotation-only run::
 
 Control concurrency before calling (node-level and graph writes)::
 
-    configure(llm=my_llm, ..., llm_concurrency=8, neo4j_concurrency=20)
+    configure(llm=my_llm, ..., llm_concurrency=8, graph_concurrency=20)
     result = asyncio.run(run_pipeline(input_raw="files/", parallel_docs=4))
 
 Follow progress while the pipeline runs::
@@ -193,7 +193,7 @@ async def run_pipeline(
     .xls) found in *input_raw* are automatically routed to the tabular pipeline.
 
     Concurrency for LLM calls (``llm_concurrency``) and graph writes
-    (``neo4j_concurrency``) must be configured via
+    (``graph_concurrency``) must be configured via
     :func:`~scinr.newton.config.configure` **before** calling this function.
     Use ``parallel_docs`` to control how many documents are processed
     concurrently across all stages.
@@ -1100,7 +1100,7 @@ async def _process_document_unit(
     ``extract_one_file()``, ``ingest_one()``/``ingest_one_from_path()``,
     ``run_annotation()``, ``run_entity_extraction()``) already bounds its own
     real LLM/graph work internally (via ``get_llm_semaphore()`` /
-    ``get_neo4j_sync_semaphore()``) — this function does not add another
+    ``get_graph_sync_semaphore()``) — this function does not add another
     semaphore around those calls.
 
     Soft-abort semantics: as soon as one stage fails for this unit, no

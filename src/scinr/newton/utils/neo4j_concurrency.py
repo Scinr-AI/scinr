@@ -1,13 +1,13 @@
 """
-utils/neo4j_concurrency.py — Compatibility shim for the graph-store concurrency semaphore.
+utils/neo4j_concurrency.py — Deprecated compatibility shim (removed in 0.7.0).
 
-The semaphore logic has moved to config.py alongside get_llm_semaphore() and
-reset_llm_semaphore(). This module re-exports those functions for backward
-compatibility so that existing callers (annotation/nodes.py,
-entity_extraction/nodes.py) do not need to change their imports.
+Use ``scinr.newton.utils.graph_concurrency`` (``get_graph_semaphore`` /
+``reset_graph_semaphore``) instead. The functions re-exported here are the
+deprecated aliases: calling them emits a ``DeprecationWarning`` and delegates to
+the graph semaphore.
 
-To configure concurrency, call configure(neo4j_concurrency=N) followed by
-reset_neo4j_semaphore() before running annotation or entity extraction stages.
+To configure concurrency, call configure(graph_concurrency=N) followed by
+reset_graph_semaphore() before running annotation or entity extraction stages.
 """
 from __future__ import annotations
 

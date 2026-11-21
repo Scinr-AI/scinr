@@ -44,6 +44,11 @@ from typing import Any, Literal
 
 from scinr.newton.exceptions import FreezeError
 from scinr.newton.graph import get_graph_store
+from scinr.newton.graph.identity import (  # noqa: F401 — re-exported: the identity moved to graph/identity.py
+    CATALOG_KEY_FIELDS,
+    UID_LABELS,
+    node_identity,
+)
 from scinr.newton.graph.types import (
     DocumentInfo,
     DocumentSelector,
@@ -68,55 +73,9 @@ SNAPSHOT_SCHEMA_VERSION = 1
 # Node identity (business keys) — shared with ingest/restore.py
 # ---------------------------------------------------------------------------
 
-_DOCUMENT_KEY_FIELDS = ("tenant_id", "path", "version")
-
-# Global catalog nodes: never exported as nodes nor deleted, only referenced
-# as relationship targets by their own key.
-CATALOG_KEY_FIELDS: dict[str, tuple[str, ...]] = {
-    "CatalogModel": ("name",),
-    "ModelField": ("name", "model"),
-    "EntityLabel": ("label",),
-    "Theme": ("path",),
-}
-
-# Per-document and merged node labels keyed by ``uid``.
-UID_LABELS = (
-    "InfoUnit",
-    "ModelDecision",
-    "ProposedModel",
-    "ProposedField",
-    "ComplementaryMatch",
-    "SupplementaryField",
-    "ExtractionResult",
-    "ModelInstance",
-    "Entity",
-    "LabeledEntity",
-)
-
 # Leading digits are allowed: the backend always quotes the name, and the extraction
 # stage writes model-defined rel types such as `5_YEAR_...` that way.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
-
-
-def node_identity(labels: Sequence[str]) -> tuple[str, tuple[str, ...]]:
-    """Return ``(primary label, business-key fields)`` for a node's labels.
-
-    The primary label is the one whose constraint/index backs the key
-    (``StructureNode`` for the multi-label structure nodes). Raises
-    :class:`FreezeError` for a node type the snapshot does not know how to
-    rebuild.
-    """
-    if "Document" in labels:
-        return "Document", _DOCUMENT_KEY_FIELDS
-    if "StructureNode" in labels:
-        return "StructureNode", ("id",)
-    for label, fields in CATALOG_KEY_FIELDS.items():
-        if label in labels:
-            return label, fields
-    for label in UID_LABELS:
-        if label in labels:
-            return label, ("uid",)
-    raise FreezeError(f"Node with labels {list(labels)!r} has no known business key.")
 
 
 def is_catalog(primary_label: str) -> bool:

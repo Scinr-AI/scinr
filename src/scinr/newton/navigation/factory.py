@@ -9,15 +9,23 @@ call sites never name an engine.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
+from scinr.newton.config import ScinrConfig, use_config
 from scinr.newton.navigation.base import GraphNavigator
 
 
-async def get_graph_navigator() -> GraphNavigator:
+async def get_graph_navigator(config: ScinrConfig | None = None) -> GraphNavigator:
     """Return a connected :class:`GraphNavigator` for the configured backend.
 
     The connection is verified eagerly (``connect()`` → ``ping()``).
+
+    Args:
+        config: Configuration to use instead of the active one (see
+            :func:`~scinr.newton.config.build_config`). It applies only while the navigator
+            is created and connected: whoever passes it must call the navigator's methods
+            (and ``close()``) inside ``use_config(config)``, or use :func:`graph_navigator`,
+            which does it for the whole block.
 
     Returns:
         A ready-to-use navigator. The caller is responsible for
@@ -30,6 +38,11 @@ async def get_graph_navigator() -> GraphNavigator:
             :class:`~scinr.newton.exceptions.GraphError`, not a
             :class:`~scinr.newton.exceptions.NavigationError`).
     """
+    with use_config(config) if config is not None else nullcontext():
+        return await _create_navigator()
+
+
+async def _create_navigator() -> GraphNavigator:
     from scinr.newton.config import get_config
     from scinr.newton.exceptions import ConfigurationError
 
@@ -65,18 +78,22 @@ async def get_graph_navigator() -> GraphNavigator:
 
 
 @asynccontextmanager
-async def graph_navigator() -> AsyncIterator[GraphNavigator]:
+async def graph_navigator(config: ScinrConfig | None = None) -> AsyncIterator[GraphNavigator]:
     """Async context manager that yields a connected navigator and closes it.
+
+    With *config*, the navigator and every call made inside the block use it (the whole
+    block, including ``connect`` and ``close``, runs inside ``use_config(config)``).
 
     Example:
         >>> async with graph_navigator() as nav:
         ...     roots = await nav.list_root_documents()
     """
-    nav = await get_graph_navigator()
-    try:
-        yield nav
-    finally:
-        await nav.close()
+    with use_config(config) if config is not None else nullcontext():
+        nav = await get_graph_navigator()
+        try:
+            yield nav
+        finally:
+            await nav.close()
 
 
 __all__ = ["get_graph_navigator", "graph_navigator"]

@@ -1,14 +1,14 @@
 """
-storage/mongodb/client.py — Motor async client singleton + GridFS access.
+storage/mongodb/client.py — Motor async client cache + GridFS access.
 
-A single :class:`~motor.motor_asyncio.AsyncIOMotorClient` instance is kept
-per process.  All repositories in this backend share it to avoid exhausting
-connection-pool resources.
+One :class:`~motor.motor_asyncio.AsyncIOMotorClient` is kept per ``mongodb_uri``
+of the active configuration.  All repositories in this backend share it to avoid
+exhausting connection-pool resources.
 
 Public API
 ----------
 get_client()
-    Return the singleton Motor client (creates it on first call).
+    Return the Motor client of the active configuration (creates it on first call).
 get_db()
     Return the configured Motor database object.
 get_gridfs_bucket(bucket_name=None)
@@ -25,41 +25,46 @@ ensure_indexes_sync()
 from __future__ import annotations
 
 import logging
+import threading
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Singleton client
+# Client cache
 # ---------------------------------------------------------------------------
 
-_client: AsyncIOMotorClient | None = None
+_clients: dict[str, AsyncIOMotorClient] = {}
+_clients_lock = threading.Lock()
 
 
 def get_client() -> AsyncIOMotorClient:
-    """Return the Motor singleton client, creating it on first call.
+    """Return the Motor client of the active configuration, creating it on first call.
 
-    The client is module-level so that it survives across coroutine calls
-    within the same process and reuses the underlying connection pool.
+    One client is cached per ``mongodb_uri`` so that it survives across coroutine
+    calls within the same process and reuses the underlying connection pool; two
+    configurations with different URIs never share a client.
 
     Returns
     -------
     AsyncIOMotorClient
         The shared Motor client instance.
     """
-    global _client
-    if _client is None:
-        from scinr.newton.config import get_config
-        from scinr.newton.utils.redaction import redact_uri
-        cfg = get_config()
-        logger.debug("Creating MongoDB Motor client (URI: %s)", redact_uri(cfg.mongodb_uri))
-        _client = AsyncIOMotorClient(cfg.mongodb_uri)
-    return _client
+    from scinr.newton.config import get_config
+    from scinr.newton.utils.redaction import redact_uri
+
+    cfg = get_config()
+    with _clients_lock:
+        client = _clients.get(cfg.mongodb_uri)
+        if client is None:
+            logger.debug("Creating MongoDB Motor client (URI: %s)", redact_uri(cfg.mongodb_uri))
+            client = _clients[cfg.mongodb_uri] = AsyncIOMotorClient(cfg.mongodb_uri)
+    return client
 
 
 def reset_client() -> None:
-    """Reset the singleton Motor client.
+    """Reset every cached Motor client.
 
     Forces :func:`get_client` to create a new client on the next call.
     Must be called whenever the configuration changes (e.g. after
@@ -68,8 +73,8 @@ def reset_client() -> None:
     verified connections, so the next :func:`get_storage` call pings the
     server and ensures the indexes again.
     """
-    global _client
-    _client = None
+    with _clients_lock:
+        _clients.clear()
     from scinr.newton.storage.factory import reset_mongodb_readiness
     reset_mongodb_readiness()
 
