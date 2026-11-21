@@ -57,6 +57,20 @@ configure(
 configure(graph_backend="sqlite", sql_url="sqlite:///newton.db")
 ```
 
+To navigate a graph other than the globally configured one (for example one database per
+tenant), pass a configuration built with `build_config()` instead of calling `configure()`:
+
+```python
+from scinr.newton import build_config
+from scinr.newton.navigation import graph_navigator
+
+cfg = build_config(graph_backend="postgres", sql_url="postgresql://newton:secret@db:5432/acme")
+async with graph_navigator(config=cfg) as nav:
+    roots = await nav.list_root_documents()
+```
+
+See [Several configurations in one process](sql-graph.md#several-configurations-in-one-process).
+
 The `sql_url` scheme must match `graph_backend`, or `configure()` raises a
 `ConfigurationError`. The SQL backends need `pip install "scinr[postgres]"` or
 `pip install "scinr[sqlite]"`; the default `neo4j` backend needs
@@ -415,6 +429,57 @@ props = await nav.get_model_properties("VariationCodeModel")
 
 ---
 
+## Memory and explore views
+
+Methods that summarize what the extraction left in the graph and let you look inside it. They
+work on every backend and take the usual scope arguments (`tenant_id`, `include_public`,
+`created_by_user_id`, `job_id`). The ones that return a list accept `limit=`.
+
+```python
+acme = nav.scoped(tenant_id="acme", include_public=True)
+IGNORE = ("tenant_id", "job_ids", "created_by_user_ids", "embedding")  # bookkeeping keys
+
+# Counts per class: records = total - empty - placeholders
+classes = await acme.summarize_model_classes(ignore_keys=IGNORE)
+# [ModelClassSummary(model_class, records, empty, placeholders, selectable), ...]
+
+# Relationships between classes, by relationship type
+links = await acme.summarize_model_instance_links(ignore_keys=IGNORE)
+# [ModelLinkSummary(from_class, rel_type, to_class, links, to_empty, from_to_empty), ...]
+
+# The latest version of each source document and what it contributed
+sources = await acme.summarize_sources(ignore_keys=IGNORE)
+# [SourceSummary(path, name, job_ids, added_at, ..., contributions=[SourceContribution]), ...]
+```
+
+An *empty* record has no fields; a *placeholder* has exactly one field and no extraction result
+points at it. `ignore_keys` are the bookkeeping keys that do not count as fields.
+`summarize_sources` assigns a record to a source through its job ids, across every version of
+the same path.
+
+| Method | Returns |
+|---|---|
+| `summarize_model_classes(ignore_keys=, limit=)` | `list[ModelClassSummary]`, by `records` descending |
+| `summarize_model_instance_links(ignore_keys=, limit=)` | `list[ModelLinkSummary]`, by `links` descending |
+| `summarize_sources(ignore_keys=, limit=)` | `list[SourceSummary]`, newest `added_at` first |
+| `get_model_instance_links(uids, limit=)` | `list[ModelInstanceLink]`: relationships between records that touch any of `uids` (both ends in scope) |
+| `get_extraction_links(document_paths=, field_contains=, limit=)` | `list[ExtractionLink]`: extraction result to record, below the documents. Each `(key, value)` of `field_contains` is an AND condition (case-sensitive substring on a property of the extraction result or of the record) |
+| `list_extraction_field_keys(document_paths=)` | `list[str]`: sorted property keys of those extraction results and records (`embedding` included) |
+| `get_model_instances_in_documents(model_class, document_paths=, where=, limit=)` | `list[ModelInstanceRef]`: records of the class extracted from the documents **plus their direct neighbours**, filtered by `where=` |
+| `search_model_instances(text, ignore_keys=, limit=)` | `list[ModelInstanceMatch]`: `uid` equals `text` (`field="uid"`), or a field contains it (case-insensitive). Scans every record of the scope |
+| `list_model_instance_field_keys(model_class, ignore_keys=, sample_limit=200)` | `list[str]`: keys with a non-blank value in the first `sample_limit` records of the class |
+| `get_node_property_keys(label)` | `list[str]`: property keys of the nodes with that label (role labels such as `Section` and catalogue labels accepted; `[]` if none in scope; unknown label raises `NavigationError`) |
+
+```python
+hits  = await acme.search_model_instances("ibuprofen", ignore_keys=IGNORE)
+keys  = await acme.list_model_instance_field_keys("VariationCodeModel", ignore_keys=IGNORE)
+found = await acme.get_model_instances_in_documents(
+    "VariationCodeModel", document_paths=["dossier/module3"], where={"code": "IA"}
+)
+```
+
+---
+
 ## Filtering with `where=`
 
 `get_documents`, `get_structure_nodes`, `find_structure_nodes`,
@@ -570,6 +635,42 @@ sub   = await nav.subgraph(sel, depth=2, max_nodes=200)
 
 ---
 
+## Browsing nodes
+
+Every `GraphNode` carries a portable identity: `node.label` (the primary label, e.g.
+`"Document"`) and `node.key` (the business key as text: the value itself for a single field,
+a compact JSON array for composite keys such as `Document` or `ModelField`). Both are `None`
+for a node without identity. The same pair works on Neo4j, PostgreSQL and SQLite.
+
+```python
+node  = await acme.get_node("Document", '["acme","dir/a.pdf",1]')   # None if absent or out of scope
+count = await acme.count_node_relationships(node.label, node.key)   # [RelationshipCount(type, direction, neighbor_label, count)]
+page  = await acme.expand_node(
+    node.label, node.key,
+    direction="both",              # "out" | "in" | "both"
+    edge_types=["HAS_STRUCTURE"],  # optional filters
+    neighbor_labels=["StructureNode"],
+    skip=0, limit=100,             # limit=None: everything
+)
+# NodeExpansion(nodes=[GraphNode...], edges=[GraphEdge...], total=<distinct neighbours>)
+hits  = await acme.search_nodes("aspirin", labels=["InfoUnit", "ModelInstance"], limit=20)
+# [NodeMatch(node, field)]  exact key matches first (field == "key")
+```
+
+- `expand_node` pages over the distinct neighbours, ordered by (label, key); `edges` are the
+  relationships between the node and the neighbours of the page, with the ends named by
+  `(label, key)` and the real direction. A relationship from the node to itself is not a
+  neighbour.
+- Catalogue nodes (`CatalogModel`, `ModelField`, `EntityLabel`, `Theme`) are visible under any
+  scope; their neighbours are filtered by it.
+- `search_nodes` ignores texts shorter than 2 characters and searches fixed fields per label
+  (for example `Document.name/path`, `StructureNode.title/id`). Neo4j and SQLite lowercase with
+  their own rules, so non-ASCII case folding can differ between engines.
+- An unknown label, a negative `skip`, `limit < 1` or an invalid direction raises
+  `NavigationError`; a malformed key returns an empty result.
+
+---
+
 ## Raw queries (escape hatch)
 
 ```python
@@ -579,6 +680,20 @@ rows = await nav.execute_raw(
 )
 one  = await nav.execute_raw_one("MATCH (d:Document) RETURN count(d) AS c")
 ```
+
+`execute_raw` and `execute_raw_one` also take two keyword-only limits:
+
+```python
+from scinr.newton import QueryTimeoutError
+
+rows = await nav.execute_raw(sql, params, timeout_seconds=5.0, max_rows=1000)
+truncated = len(rows) > 1000    # the result has at most max_rows + 1 rows
+```
+
+`timeout_seconds` aborts the query with `QueryTimeoutError` (Postgres: `statement_timeout` of
+the read-only transaction; Neo4j: the transaction timeout; SQLite ignores it, there is no
+server-side timeout). `max_rows` caps the result at **at most `max_rows + 1`** rows, so
+receiving more than `max_rows` tells you it was truncated. Both default to `None` (no limit).
 
 `execute_raw` is **non-portable** — the query is written in the engine's own
 language, coupling the call to `nav.dialect`. On Neo4j (`nav.dialect ==
@@ -607,6 +722,32 @@ table names need no schema prefix), and SQLite with `PRAGMA query_only`. A
 statement that writes fails with a `NavigationError`. Like on Neo4j,
 `execute_raw` cannot be scoped to a tenant: it is an administrative tool outside
 the isolation contract.
+
+Limits of the SQL `execute_raw`:
+
+- **One statement.** The text is sent as a single statement and the engine refuses a
+  script before running any of it: `SELECT 1; SELECT 2` or
+  `SELECT 1; COMMIT; BEGIN READ WRITE; INSERT ...` raise `NavigationError` (Postgres:
+  `code="42601"`, from the extended protocol; SQLite: `sqlite3` refuses a second statement).
+  A trailing `;` and comments are fine. On Postgres the text carries one extra bound
+  parameter in a trailing comment (`-- :_newton_single_statement`); without any parameter
+  psycopg would use the simple protocol, which runs every statement of a script, so a
+  `COMMIT` could end the read-only transaction and the next statements could write.
+- **No transaction or session statements.** A statement whose first keyword (after
+  whitespace, `;` and comments) acts on the transaction or the session is refused before
+  being sent, with `code=None`: `BEGIN`, `START`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`,
+  `SAVEPOINT`, `RELEASE`, `PREPARE`, `SET` (including `SET ROLE` and `SET TRANSACTION`),
+  `RESET`, `DISCARD`, `DEALLOCATE`, `EXECUTE`, `LISTEN`, `UNLISTEN`, `LOAD`, `DO`, `CALL`,
+  `COPY`, `LOCK` and the cursor commands (`DECLARE`, `FETCH`, `MOVE`, `CLOSE`) on Postgres;
+  `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `PRAGMA`, `ATTACH`, `DETACH`
+  and `VACUUM` on SQLite (read a pragma with its table-valued function:
+  `SELECT * FROM pragma_table_info('documents')`). A statement that still ended the
+  transaction is reported as a `NavigationError` instead of returning rows.
+- **Writes** (`INSERT`, `UPDATE`, `DELETE`, DDL, a data-modifying `WITH`) reach the engine,
+  which refuses them: `NavigationError` with the engine's code (`25006` on Postgres).
+- **Not covered.** Functions with session-level effects that a read-only transaction allows
+  (`pg_advisory_lock`, `set_config(..., false)`, which the end of the transaction undoes) are
+  not parsed for: revoke them from the role if the query comes from untrusted users.
 
 ---
 
@@ -735,11 +876,12 @@ structure node, it is reported in `not_found_page_ids`). See
 
 | Exception | Raised when |
 |---|---|
-| `NavigationError` | bad identifier / property name, malformed `where=`, a write via `execute_raw`, a `dialect=` mismatch |
+| `NavigationError` | bad identifier / property name, malformed `where=`, a write, several statements or a transaction / session statement via `execute_raw`, a `dialect=` mismatch, or a query the engine rejects (then `.code` holds the engine's code: Postgres `SQLSTATE`, Neo4j `code`; `None` otherwise) |
+| `QueryTimeoutError` | an `execute_raw` query exceeded `timeout_seconds` (a `NavigationError`; `.code` is the engine's code) |
 | `GraphConnectionError` | the engine is unreachable (`get_graph_navigator` / `ping`) |
 | `UnsupportedOperationError` | an optional capability (`execute_raw`) is not implemented by the backend |
 
-`UnsupportedOperationError` is a `NavigationError`. `GraphConnectionError` is a
+`UnsupportedOperationError` and `QueryTimeoutError` are `NavigationError`s. `NavigationError.code` lets you report a failure without exposing the engine's message. `GraphConnectionError` is a
 `GraphError` (the same class the write path raises when the engine is down), **not**
 a `NavigationError`. To handle both, catch `(NavigationError, GraphConnectionError)`.
 Everything inherits from `ScinrError`. See the [Exceptions](../api/exceptions.md)

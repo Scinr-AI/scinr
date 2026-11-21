@@ -114,6 +114,73 @@ section of the architecture.
   `4000`, minimum `100`): paragraphs longer than this are split into several InfoUnits in
   `verbatim` mode.
 
+- **Several configurations in one process.** `build_config(**kwargs)` builds a `ScinrConfig`
+  with the same arguments, environment variables and validation as `configure()`, but changes
+  nothing global: no side effects, no cache reset, and `extra_converters` is not applied.
+  `use_config(cfg)` (context manager, both exported from `scinr.newton`) makes `get_config()`
+  return *cfg* in the current context (task or thread copy) instead of the global
+  configuration. `graph_navigator(config=cfg)` runs the whole block (connect, calls, close)
+  inside `use_config(cfg)`. The engines, Neo4j drivers, MongoDB clients and `GraphStore`
+  instances are cached **per connection parameters**, so each configuration gets its own and
+  none is shared by mistake. The asynchronous SQL engines and Neo4j drivers are also keyed by
+  the running event loop. See
+  [Several configurations in one process](docs/user-guides/sql-graph.md#several-configurations-in-one-process).
+- **`sql_max_engines`** (`configure()` / `build_config()` argument, `SQL_MAX_ENGINES`,
+  default `64`, minimum `1`): maximum number of SQL engines kept in cache (synchronous and asynchronous ones are counted separately). The least recently
+  used one is disposed when the limit is exceeded. Each engine has its own pool
+  (`sql_pool_size`), so the connections a process can open grow with
+  `sql_pool_size x number of configurations`.
+- **`execute_raw` / `execute_raw_one` accept `timeout_seconds=` and `max_rows=`**
+  (keyword-only, both default `None` = no limit). `timeout_seconds` aborts the query with the
+  new `QueryTimeoutError`: Postgres uses `statement_timeout` of the read-only transaction,
+  Neo4j the transaction timeout, and SQLite ignores it (it has no server-side timeout).
+  `max_rows` caps the result at **at most `max_rows + 1`** rows, so a caller knows the result
+  was truncated when it receives more than `max_rows`.
+- **`QueryTimeoutError`** (a `NavigationError`, exported from `scinr.newton` and
+  `scinr.newton.navigation`): raised when `execute_raw` exceeds `timeout_seconds`.
+- **Node browsing in the navigation API** (Neo4j, PostgreSQL and SQLite). `GraphNode` gains
+  `label` and `key`: the portable identity of a node (primary label plus the business key
+  encoded as text; composite keys such as `Document` or `ModelField` are a compact JSON
+  array), `None` when the node has no identity. New neutral module `scinr.newton.graph.identity`
+  (`node_identity`, `encode_key`, `decode_key`, `PRIMARY_LABELS`); the old import paths
+  (`ingest.freeze`, `sql.keys`) keep working. New models `GraphEdge`, `RelationshipCount`,
+  `NodeExpansion` and `NodeMatch`, and four read methods on `GraphNavigator` (all with the
+  scope arguments, so `ScopedNavigator` covers them): `get_node(label, key)`,
+  `count_node_relationships(label, key)`, `expand_node(label, key, direction, edge_types,
+  neighbor_labels, skip, limit)` (paginated, stable order, `total` of distinct neighbours) and
+  `search_nodes(text, labels, limit, skip)` (case-insensitive substring over fixed fields per
+  label, exact key matches first, minimum 2 characters). Catalogue nodes are visible to every
+  scope; their neighbours are filtered by it. Custom `GraphNavigator` subclasses must implement
+  the four new abstract methods. See
+  [Browsing nodes](docs/user-guides/graph-navigation.md#browsing-nodes).
+- **`NavigationError.code`**: the engine's own error code (the Postgres `SQLSTATE`, the Neo4j
+  `code`) when the error comes from the database, else `None`.
+- **Nine navigation methods** for the memory and explore views, on every backend (Neo4j,
+  PostgreSQL, SQLite), with the new models `ModelClassSummary`, `ModelLinkSummary`,
+  `SourceContribution`, `SourceSummary`, `ModelInstanceLink`, `ExtractionLink` and
+  `ModelInstanceMatch`:
+  - `summarize_model_classes()`: records of each `model_class`, split into real, empty and
+    placeholder records.
+  - `summarize_model_instance_links()`: relationships between `model_class` pairs by
+    relationship type.
+  - `summarize_sources()`: the latest version of each source document and what it contributed.
+  - `get_model_instance_links(uids)`: direct relationships between records that touch any of
+    the given uids.
+  - `get_extraction_links(document_paths=, field_contains=)`: relationships from extraction
+    results to records below some documents.
+  - `list_extraction_field_keys(document_paths=)`: property keys of those extraction results
+    and records.
+  - `get_model_instances_in_documents(model_class, document_paths=, where=)`: records of a
+    class extracted from some documents, plus their direct neighbours.
+  - `search_model_instances(text)`: records whose `uid` equals the text or whose field text
+    contains it (scans every record of the scope).
+  - `list_model_instance_field_keys(model_class, sample_limit=)`: field keys that have a value
+    in the first records of a class.
+  - `get_node_property_keys(label)`: property keys of the nodes with a label (role labels such
+    as `Section` and catalogue labels are accepted).
+  All take the usual scope arguments (`tenant_id`, `include_public`, `created_by_user_id`,
+  `job_id`).
+
 ### Changed
 
 - **Behaviour change: `run_pipeline()` now defaults to `info_units_mode="auto"`** (before, it
@@ -129,6 +196,11 @@ section of the architecture.
   The golden baseline was regenerated because `StructureNode` writes three new properties.
 - `configure()` validates the three backend axes against the new values and checks `sql_url`
   (present, matching scheme, no mixing of Postgres and SQLite).
+- `execute_raw` on PostgreSQL and SQLite now raises `NavigationError` (with `code` set to the
+  SQLSTATE) when the engine rejects a query (syntax error, a write in a read-only
+  transaction); connection, authentication and transient errors keep their own classes. On
+  Neo4j, `Neo.ClientError.*` errors are also raised as `NavigationError(code=...)` instead of
+  the raw driver exception.
 - Internal helpers shared by every engine moved out of the Neo4j packages and are re-exported
   from their old place: `navigation.neo4j._map` and `navigation.neo4j._safe` re-export
   `navigation._map` / `navigation._safe`; the batch sizes and GC bounds (`DELETE_BATCH_ROWS`,
@@ -140,6 +212,32 @@ section of the architecture.
   ~20k-node corpus). Variable-length walks (`neighbors`, `subgraph`) search an index per edge
   table and direction instead of scanning the relationships (SQLite `neighbors` at depth 4
   from ~17 s to ~50 ms on a 20k-node graph). Results are unchanged.
+
+### Security
+
+- **SQL `execute_raw` runs exactly one statement and cannot leave its read-only
+  transaction.** Without bound parameters psycopg sent the text with the simple query
+  protocol, which runs every statement of a script: `COMMIT; BEGIN READ WRITE; INSERT ...`
+  ended the `READ ONLY` transaction and wrote with the connection's role (under RLS, into
+  the tenants the role may write). Now:
+  - Postgres sends every `execute_raw` text with the extended protocol (the text carries one
+    typed bound parameter in a trailing comment, `-- :_newton_single_statement`), which the
+    server only accepts as one statement: a script raises `NavigationError(code="42601")`
+    before anything runs. SQLite already refused a second statement (`sqlite3`); now tested.
+  - Statements that act on the transaction or the session are refused before being sent
+    (`NavigationError`, `code=None`): Postgres `BEGIN`, `START`, `COMMIT`, `END`, `ROLLBACK`,
+    `ABORT`, `SAVEPOINT`, `RELEASE`, `PREPARE`, `SET`, `RESET`, `DISCARD`, `DEALLOCATE`,
+    `EXECUTE`, `LISTEN`, `UNLISTEN`, `LOAD`, `DO`, `CALL`, `COPY`, `LOCK`, `DECLARE`, `FETCH`,
+    `MOVE`, `CLOSE`; SQLite `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`,
+    `PRAGMA` (which worked under `query_only` and changed the pooled connection or the file:
+    `query_only = OFF`, `journal_mode`), `ATTACH` (it created files), `DETACH`, `VACUUM`.
+    **Behaviour change:** read a SQLite pragma with its table-valued function
+    (`SELECT * FROM pragma_table_info('documents')`).
+  - A statement that still ended the transaction raises `NavigationError` instead of
+    returning rows.
+  - Unchanged: `timeout_seconds`, `max_rows`, and the error mapping (a write is still refused
+    by the engine with its SQLSTATE, e.g. `25006`). New `Dialect` members:
+    `single_statement`, `in_transaction`, `raw_refused_keywords`, `nested_comments`.
 
 ### Known differences
 
@@ -310,7 +408,19 @@ None of these is part of `scinr.newton.__all__`, except where noted.
     instantiators, `_sanitize_rel_type`, `_ROW_BATCH_SIZE`, `RowBatchFactory`...) is in
     `tabular.rows`. `tabular.nodes.write_tabular` no longer opens a driver.
 
+### Changed
+- **`neo4j_concurrency` / `neo4j_sync_concurrency` renamed to `graph_concurrency` /
+  `graph_sync_concurrency`** (env `GRAPH_CONCURRENCY` / `GRAPH_SYNC_CONCURRENCY`,
+  `get_graph_semaphore` / `reset_graph_semaphore`, `get_graph_sync_semaphore` /
+  `reset_graph_sync_semaphore`, `scinr.newton.utils.graph_concurrency`). The old names
+  (arguments, environment variables, `ScinrConfig` attributes, semaphore functions and
+  `utils.neo4j_concurrency`) keep working with a `DeprecationWarning` and will be removed in
+  0.7.0. Passing both names with different values raises `ConfigurationError`. The values
+  already limited every graph backend; only the names change.
+
 ### Fixed
+- `graph_concurrency` and `graph_sync_concurrency` now require a value >= 1 (a `0` created a
+  semaphore that blocked forever).
 - **A mixed tabular + document run no longer splits shared folders across two
   versions.** `run_pipeline` resolved the tabular and the document batch
   versions separately, so an ancestor folder common to both (e.g. `A/` with

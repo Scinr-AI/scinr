@@ -472,7 +472,7 @@ result = await run_pipeline(
 )
 ```
 
-Each document unit is bounded by this semaphore for its entire duration across all stages. Within each stage, additional concurrency control is provided by `llm_concurrency` and `neo4j_concurrency` (configured via `configure()`).
+Each document unit is bounded by this semaphore for its entire duration across all stages. Within each stage, additional concurrency control is provided by `llm_concurrency` and `graph_concurrency` (configured via `configure()`).
 
 > **Default is 5**, not 1. The pipeline processes up to 5 documents concurrently by default.
 
