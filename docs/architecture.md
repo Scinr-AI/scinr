@@ -287,7 +287,7 @@ When `update_mode=True`, the ingestion process:
 
 **Concurrency:**
 
-Stage 2 uses `get_neo4j_sync_semaphore()` (size: `neo4j_sync_concurrency`, default: 8) to bound concurrent dispatches to `asyncio.to_thread()` for the synchronous graph-store operations, whatever the backend. On Neo4j these use the Neo4j Python driver's synchronous API (the async driver is reserved for Stages 3 and 4); on PostgreSQL and SQLite the synchronous engine is a thread-safe pool and `store.sync_scope()` is a no-op.
+Stage 2 uses `get_graph_sync_semaphore()` (size: `graph_sync_concurrency`, default: 8) to bound concurrent dispatches to `asyncio.to_thread()` for the synchronous graph-store operations, whatever the backend. On Neo4j these use the Neo4j Python driver's synchronous API (the async driver is reserved for Stages 3 and 4); on PostgreSQL and SQLite the synchronous engine is a thread-safe pool and `store.sync_scope()` is a no-op.
 
 ---
 
@@ -531,10 +531,10 @@ The global `get_llm_semaphore()` (size: `llm_concurrency`, default: 4) bounds al
 
 Two separate semaphores control graph access:
 
-- **`get_neo4j_semaphore()`** (size: `neo4j_concurrency`, default: 10): Bounds concurrent graph async sessions (Neo4j sessions on Neo4j) during annotation (Stage 3) and entity extraction (Stage 4).
-- **`get_neo4j_sync_semaphore()`** (size: `neo4j_sync_concurrency`, default: 8): Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). Must be acquired/released on the event loop, never inside the worker thread.
+- **`get_graph_semaphore()`** (size: `graph_concurrency`, default: 10): Bounds concurrent graph async sessions (Neo4j sessions on Neo4j) during annotation (Stage 3) and entity extraction (Stage 4).
+- **`get_graph_sync_semaphore()`** (size: `graph_sync_concurrency`, default: 8): Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). Must be acquired/released on the event loop, never inside the worker thread.
 
-The same semaphores are acquired by the stage code whatever the `graph_backend`, so `neo4j_concurrency` and `neo4j_sync_concurrency` also bound the runs on PostgreSQL and SQLite. On the SQL backends the connections are governed by `sql_pool_size` (the pool of each SQL engine), and SQLite additionally serializes writers (`Dialect.max_concurrent_writes`).
+The same semaphores are acquired by the stage code whatever the `graph_backend`, so `graph_concurrency` and `graph_sync_concurrency` also bound the runs on PostgreSQL and SQLite. On the SQL backends the connections are governed by `sql_pool_size` (the pool of each SQL engine), and SQLite additionally serializes writers (`Dialect.max_concurrent_writes`).
 
 ### Per-Document Unit Processing
 
@@ -611,8 +611,8 @@ resolved_neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687"
 | `sql_fulltext_config` | `SQL_FULLTEXT_CONFIG` | `"simple"` | Postgres text-search configuration |
 | `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` | Folder for the binaries kept by the SQLite backend (default: next to the `.db`) |
 | `llm_concurrency` | `LLM_CONCURRENCY` | 4 | Max concurrent LLM calls |
-| `neo4j_concurrency` | `NEO4J_CONCURRENCY` | 10 | Max concurrent Neo4j async sessions |
-| `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches |
+| `graph_concurrency` | `GRAPH_CONCURRENCY` | 10 | Max concurrent graph async sessions (deprecated aliases `neo4j_concurrency` / `NEO4J_CONCURRENCY`, removed in 0.7.0) |
+| `graph_sync_concurrency` | `GRAPH_SYNC_CONCURRENCY` | 8 | Max concurrent sync ingestion dispatches (deprecated aliases `neo4j_sync_concurrency` / `NEO4J_SYNC_CONCURRENCY`, removed in 0.7.0) |
 | `extraction_batch_size` | `EXTRACTION_BATCH_SIZE` | 1 | Pages per extraction chunk |
 | `prompt_family` | `PROMPT_FAMILY` | `"generic"` | Prompt variant family |
 | `normalization_enabled` | `NORMALIZATION_ENABLED` | `True` | Enable tabular normalization (set `False` to disable) |
@@ -836,7 +836,7 @@ scinr.newton/
     ├── llm_factory.py          # LLM instance creation helpers
     ├── llm_retry.py            # LLM call retry with exponential backoff
     ├── llm_repair.py           # JSON repair loop via secondary LLM
-    ├── neo4j_concurrency.py    # Neo4j concurrency utilities
+    ├── graph_concurrency.py    # graph concurrency utilities (neo4j_concurrency.py: deprecated alias)
     ├── document_resolver.py    # resolve_leaf_documents() — folder → leaf resolution (query in graph/neo4j/documents.py)
     ├── logging_config.py       # Structured logging setup
     └── uid.py                  # Deterministic UID generation (make_uid, make_instance_uid)
@@ -1156,7 +1156,7 @@ GraphStore / GraphNavigator / RawFileRepository / PageRepository / FreezeReposit
 
 A new SQL engine (for example DuckDB) is a new dialect, not a new implementation: the stores, the navigator and the repositories are shared. This is what it takes:
 
-1. **Implement the `Dialect` ABC** (`sql/dialect.py`) in a new subclass: set `name`, `json_type` and `list_type`, and implement every abstract method — URLs for the sync and async drivers, `engine_kwargs`, `on_connect` / `on_begin`, `schema_translate_map`, `insert` (with `on_conflict_do_update`), the list and JSON helpers (`append_unique`, `json_set_keys`, `json_remove_keys`, `json_get`, `json_text`, `json_kind`, `json_number`, `json_bool`, `list_contains`, `list_overlaps`), `instance_key_index_sql`, the text helpers (`contains_ci`, `regex_match`, `text_cmp`, `order_text`), the full-text trio (`fulltext_match`, `fulltext_score`, `fulltext_units`), `read_only` (the guarantee behind `execute_raw`), `use_schema`, `classify_error` (transient, unique violation, access denied, connection, authentication, resource), `migration_lock` and `verbatim`. Override `max_concurrent_writes` if the engine has a single writer. Set the class attribute `recursive_branches` (`ClassVar[bool]`) for how the recursive walks of the navigator are built: `True` (SQLite) emits one recursive `SELECT` per edge table and direction, combined with `UNION`, so each branch can search an index; `False` (Postgres) emits a single recursive branch over `UNION ALL`, because Postgres forbids referencing the CTE more than once in the recursive term.
+1. **Implement the `Dialect` ABC** (`sql/dialect.py`) in a new subclass: set `name`, `json_type` and `list_type`, and implement every abstract method — URLs for the sync and async drivers, `engine_kwargs`, `on_connect` / `on_begin`, `schema_translate_map`, `insert` (with `on_conflict_do_update`), the list and JSON helpers (`append_unique`, `json_set_keys`, `json_remove_keys`, `json_get`, `json_text`, `json_kind`, `json_number`, `json_bool`, `list_contains`, `list_overlaps`), `instance_key_index_sql`, the text helpers (`contains_ci`, `regex_match`, `text_cmp`, `order_text`), the full-text trio (`fulltext_match`, `fulltext_score`, `fulltext_units`), `read_only` and `single_statement` (the guarantees behind `execute_raw`: a read-only transaction, and a text the driver can only send as one statement), `in_transaction` (client-side check that the statement did not end the transaction), `use_schema`, `classify_error` (transient, unique violation, access denied, connection, authentication, resource), `migration_lock` and `verbatim`. Override `max_concurrent_writes` if the engine has a single writer. Set `raw_refused_keywords` (the first keywords `execute_raw` refuses: transaction and session statements the read-only guarantee does not stop) and, if comments nest, `nested_comments`. Set the class attribute `recursive_branches` (`ClassVar[bool]`) for how the recursive walks of the navigator are built: `True` (SQLite) emits one recursive `SELECT` per edge table and direction, combined with `UNION`, so each branch can search an index; `False` (Postgres) emits a single recursive branch over `UNION ALL`, because Postgres forbids referencing the CTE more than once in the recursive term.
 2. **Register it in `get_dialect()`** by URL scheme. In `config.py`, the URL scheme goes in `_SQL_URL_SCHEMES` (scheme to backend name) and the backend name in `_SQL_BACKENDS`, `_GRAPH_BACKENDS` and `_STORAGE_BACKENDS` (and in the factories' lists), plus its extra in `pyproject.toml`.
 3. **Write its migrations** in `sql/migrations/<name>/`: `NNNN_description.sql` files numbered from `0001`, with statements separated by a line containing only `-- statement`, reproducing the tables of the other dialects (`{schema}` and `{fulltext_config}` are substituted by the runner). Decide how binaries are stored: the storage tables (`storage_tables()` in `sql/tables.py`) either have `*_chunks` tables (Postgres) or keep a file path (SQLite).
 4. **Add it to the test registries:** the `BACKENDS` dict of `tests/contract/conftest.py` (the `GraphStore` contract) and of `tests/storage_contract/conftest.py`, and the `sql_engine` fixture of `tests/equivalence/conftest.py` (with a neutral dump in `tests/sql/_dump.py`). Every contract test then runs on the new engine.

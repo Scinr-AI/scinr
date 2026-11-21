@@ -18,7 +18,9 @@ Supporting utilities for theme discovery, LLM management, and graph operations.
 
 ## Concurrency
 
-::: scinr.newton.utils.neo4j_concurrency
+::: scinr.newton.utils.graph_concurrency
+
+The deprecated module `scinr.newton.utils.neo4j_concurrency` (`get_neo4j_semaphore`, `reset_neo4j_semaphore`) still works with a `DeprecationWarning` and is removed in 0.7.0.
 
 ## Logging
 

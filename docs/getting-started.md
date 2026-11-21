@@ -422,7 +422,7 @@ configure(
     neo4j_user="neo4j",
     neo4j_password="password",
     llm_concurrency=2,       # Reduce concurrent LLM calls
-    neo4j_concurrency=5,     # Reduce concurrent graph writes
+    graph_concurrency=5,     # Reduce concurrent graph writes
 )
 ```
 

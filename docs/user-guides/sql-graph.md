@@ -250,7 +250,7 @@ The SQL backends are validated against Neo4j with the same scenarios and the sam
 - **Score and order.** The set of results of a full-text search is what the equivalence suite compares; the score, and therefore the order by score, differs between engines. Do not depend on its absolute value.
 - **Regular expressions.** The translator wraps the pattern as `^(?:pattern)$` for every engine. On SQLite the match is a `re.search` of that pattern, and in Python `$` also matches just before a trailing newline, so a value that ends in `\n` can match where Neo4j and PostgreSQL would not. Common syntax (`\d`, classes, alternation, quantifiers) behaves alike; engine-specific constructs (lookarounds, flags, Unicode classes) do not. Write portable patterns if you may switch engines.
 - **Restore (D1).** The Neo4j restore creates a relationship unless one with *all* the same properties already exists between the two nodes. In SQL a relationship is unique by its identity (type, ends and the properties that form part of its `MERGE`: `field_name`, `list_index`, `role`), so a snapshot relationship whose identity already exists with other properties is not created. It only differs for a snapshot holding two relationships of equal identity and different properties, which the pipeline never produces.
-- **`execute_raw`.** It takes **read-only SQL** with `:name` parameters (`dialect="postgres"` or `"sqlite"`, or omitted), not Cypher. The engine enforces it: a `READ ONLY` transaction in Postgres, `PRAGMA query_only` in SQLite; a statement that writes raises `NavigationError`. SQL is not parsed. On Postgres the configured schema is first in the `search_path`, so table names need no prefix; under RLS the query only sees the rows of the role's tenants. A `dialect=` that does not match the backend fails fast.
+- **`execute_raw`.** It takes **read-only SQL** with `:name` parameters (`dialect="postgres"` or `"sqlite"`, or omitted), not Cypher. The engine enforces it: a `READ ONLY` transaction in Postgres, `PRAGMA query_only` in SQLite; a statement that writes raises `NavigationError`. Exactly one statement runs (a script is refused by the engine before anything runs) and transaction or session statements (`COMMIT`, `BEGIN`, `SET`, `RESET`, `PRAGMA`, ...) are refused by their first keyword; the SQL is not otherwise parsed. See [the limits of `execute_raw`](graph-navigation.md#on-postgresql-and-sqlite). On Postgres the configured schema is first in the `search_path`, so table names need no prefix; under RLS the query only sees the rows of the role's tenants. A `dialect=` that does not match the backend fails fast.
 - **`get_graph_summary` filtered by `created_by_user_id` or `job_id`.** On Neo4j this call fails with a `CypherSyntaxError` (the alias of the scoped count is also the variable of the array-provenance predicate); the SQL backends answer it. The equivalence suite records it in `KNOWN_DIFFERENCES` (`tests/equivalence/test_read_equivalence.py`).
 - **`shortest_path`.** The SQL backends run a bidirectional breadth-first search. When several shortest paths have the same length, the one chosen is the smallest by code-point order of its path string, the same on both engines; Neo4j returns one of them without a defined rule.
 - **Variable-length walks and performance.** `neighbors`, `subgraph` and the other variable-length walks search an index per direction and edge table instead of scanning every relationship.
@@ -260,6 +260,47 @@ The SQL backends are validated against Neo4j with the same scenarios and the sam
 - **External Cypher consumers** (for example a service that runs Cypher against the graph, such as `graphApi`) keep working only with Neo4j.
 
 Snapshots are portable: the format is the same on every backend (`SNAPSHOT_SCHEMA_VERSION = 1`), so a backup made on Neo4j can be restored on Postgres or SQLite and the other way round. This is the migration path between engines; there is no dedicated migration tool.
+
+---
+
+## Several configurations in one process
+
+`configure()` sets one global configuration. A service that talks to several databases (for
+example one Postgres database or role per organization) must not call it per request. Build
+a configuration object and activate it for the current context instead:
+
+```python
+from scinr.newton import build_config, use_config, get_graph_navigator
+
+cfg = build_config(graph_backend="postgres", sql_url="postgresql://org_a:secret@db:5432/scinr")
+
+with use_config(cfg):                    # get_config() returns cfg in this task / thread
+    nav = await get_graph_navigator()
+    ...
+
+# or, for a navigator only (connect, calls and close run inside use_config(cfg)):
+async with graph_navigator(config=cfg) as nav:
+    ...
+```
+
+- `build_config()` takes the same arguments, environment variables and validation as
+  `configure()` but changes nothing global: no side effects, no cache reset. `extra_converters`
+  is applied only by `configure()`.
+- `use_config(cfg)` only changes what `get_config()` returns inside the block (a context
+  variable, so concurrent tasks do not see each other's configuration).
+- Engines, Neo4j drivers, MongoDB clients and `GraphStore` instances are cached **per connection
+  parameters**: two configurations with different `sql_url` (or schema, pool size, text-search
+  config) get different engines, and equal ones share one. The asynchronous engines and Neo4j
+  drivers are also keyed by the running event loop.
+- At most `sql_max_engines` SQL engines of each kind (synchronous, asynchronous) are kept (default `64`, env `SQL_MAX_ENGINES`); the
+  least recently used one is disposed when the limit is exceeded.
+
+!!! warning "Connections grow with the number of configurations"
+    Every engine has its own pool of `sql_pool_size` connections (default `10`). A process that
+    uses N distinct configurations can hold up to `sql_pool_size x N` connections to the
+    server (more with the asynchronous and synchronous engines of the same URL, which are
+    separate). Size `sql_pool_size`, `sql_max_engines` and the server's `max_connections`
+    together.
 
 ---
 

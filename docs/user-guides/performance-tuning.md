@@ -85,48 +85,50 @@ The global `get_llm_semaphore()` is sized to `llm_concurrency`. All LLM calls ac
 
 > **Warning:** Setting `llm_concurrency` too high will cause rate-limit errors. Start with the default (4) and increase gradually while monitoring for `429 Too Many Requests` responses.
 
-### Neo4j Concurrency (`neo4j_concurrency`, `neo4j_sync_concurrency`)
+### Graph Concurrency (`graph_concurrency`, `graph_sync_concurrency`)
 
-**Default:** `10` / `8`  **Env vars:** `NEO4J_CONCURRENCY` / `NEO4J_SYNC_CONCURRENCY`
+**Default:** `10` / `8`  **Env vars:** `GRAPH_CONCURRENCY` / `GRAPH_SYNC_CONCURRENCY`
 
-Two separate semaphores control access to the graph. Despite the name they are not Neo4j-specific: the same semaphores bound the annotation, entity-extraction and ingestion stages when the graph is on PostgreSQL or SQLite (see [SQL Backends](#sql-backends-postgresql-and-sqlite)).
+> The former names `neo4j_concurrency` / `neo4j_sync_concurrency` (and `NEO4J_CONCURRENCY` / `NEO4J_SYNC_CONCURRENCY`) still work with a `DeprecationWarning` and are removed in 0.7.0. Both values must be >= 1.
+
+Two separate semaphores control access to the graph. They are not Neo4j-specific: the same semaphores bound the annotation, entity-extraction and ingestion stages when the graph is on PostgreSQL or SQLite (see [SQL Backends](#sql-backends-postgresql-and-sqlite)).
 
 On Neo4j:
 
 ```python
 configure(
     llm=llm,
-    neo4j_concurrency=10,       # Async operations (Stages 3, 4)
-    neo4j_sync_concurrency=8,   # Sync operations (Stage 2)
+    graph_concurrency=10,       # Async operations (Stages 3, 4)
+    graph_sync_concurrency=8,   # Sync operations (Stage 2)
 )
 ```
 
-#### `neo4j_concurrency` — Async Operations
+#### `graph_concurrency` — Async Operations
 
 Bounds concurrent graph async sessions during annotation (Stage 3) and entity extraction (Stage 4). On Neo4j these stages use the async Neo4j driver for read-heavy operations.
 
-#### `neo4j_sync_concurrency` — Sync Operations
+#### `graph_sync_concurrency` — Sync Operations
 
 Bounds concurrent dispatches to `asyncio.to_thread()` for Stage 2 (synchronous ingestion). On Neo4j the sync driver is used for document ingestion because the Neo4j Python driver's synchronous API handles bulk writes efficiently. The semaphore must be acquired and released on the event loop, never inside the worker thread.
 
 #### Recommendations by graph size
 
-| Graph size | `neo4j_concurrency` | `neo4j_sync_concurrency` | Notes |
+| Graph size | `graph_concurrency` | `graph_sync_concurrency` | Notes |
 | :--- | :--- | :--- | :--- |
 | Small (< 1k nodes) | 5-10 | 5-8 | Default settings are fine |
 | Medium (1k-10k) | 10-20 | 8-15 | Monitor Neo4j CPU |
 | Large (10k-100k) | 20-30 | 15-25 | Watch memory and transaction logs |
 | Very large (100k+) | 30-50 | 25-50 | Consider Neo4j cluster |
 
-> **Tip:** If Neo4j CPU is consistently above 80% during ingestion, reduce `neo4j_sync_concurrency`. If the database has ample capacity and ingestion is slow, increase it.
+> **Tip:** If Neo4j CPU is consistently above 80% during ingestion, reduce `graph_sync_concurrency`. If the database has ample capacity and ingestion is slow, increase it.
 
 ### SQL Backends (PostgreSQL and SQLite)
 
-With `graph_backend="postgres"` or `"sqlite"` (see [SQL Graph Backends](sql-graph.md)) the `neo4j_concurrency` and `neo4j_sync_concurrency` semaphores keep bounding the concurrent graph sessions of Stages 2-4, exactly as on Neo4j; the `neo4j_` prefix is historical. Their recommended values above refer to Neo4j load, so start from the defaults and measure.
+With `graph_backend="postgres"` or `"sqlite"` (see [SQL Graph Backends](sql-graph.md)) the `graph_concurrency` and `graph_sync_concurrency` semaphores keep bounding the concurrent graph sessions of Stages 2-4, exactly as on Neo4j; the former `neo4j_concurrency` / `neo4j_sync_concurrency` names remain as deprecated aliases until 0.7.0. Their recommended values above refer to Neo4j load, so start from the defaults and measure.
 
 **`sql_pool_size`** (env `SQL_POOL_SIZE`, default `10`, minimum `1`) sizes the connection pool of each SQL engine.
 
-- **PostgreSQL.** The value is applied as the pool size and as the overflow of each engine (`pool_size` and `max_overflow` are both set to it, so an engine can hold up to twice that many connections under load), with `pool_pre_ping` on. Keep `neo4j_concurrency` and `neo4j_sync_concurrency` within what the server can serve, and the total of connections of all your processes below the server's `max_connections`.
+- **PostgreSQL.** The value is applied as the pool size and as the overflow of each engine (`pool_size` and `max_overflow` are both set to it, so each engine opens up to `2 × sql_pool_size` connections under load), with `pool_pre_ping` on. A `graph_concurrency + graph_sync_concurrency` larger than that only makes the extra sessions wait in the pool. Keep `graph_concurrency` and `graph_sync_concurrency` within what the server can serve, and the total of connections of all your processes below the server's `max_connections`.
 - **SQLite.** SQLite has a **single writer**. newton opens each database in WAL mode with a busy timeout of 30 s, and every transaction starts with `BEGIN IMMEDIATE`, so write transactions queue behind one another instead of failing immediately. `parallel_docs > 1` works, but the writes are serialized, so raising concurrency does not speed up the write-heavy stages; the LLM stages still overlap. The dialect does not use `sql_pool_size`.
 
 Transient SQL errors are retried with the same exponential back-off schedule as the Neo4j retry.
@@ -155,7 +157,7 @@ result = await run_pipeline(
 
 #### How it works
 
-The pipeline uses `asyncio.Semaphore(parallel_docs)` at the document level. Each document is dispatched as an independent task via `asyncio.gather()` and runs through its applicable stages sequentially. Within each stage, additional concurrency control is provided by `llm_concurrency` and `neo4j_concurrency`.
+The pipeline uses `asyncio.Semaphore(parallel_docs)` at the document level. Each document is dispatched as an independent task via `asyncio.gather()` and runs through its applicable stages sequentially. Within each stage, additional concurrency control is provided by `llm_concurrency` and `graph_concurrency`.
 
 #### Recommendations by document profile
 
@@ -542,8 +544,8 @@ llm = ChatOllama(model="llama3")
 configure(
     llm=llm,
     llm_concurrency=2,           # Conservative LLM calls
-    neo4j_concurrency=5,         # Light graph load
-    neo4j_sync_concurrency=5,    # Light sync load
+    graph_concurrency=5,         # Light graph load
+    graph_sync_concurrency=5,    # Light sync load
     extraction_batch_size=1,     # Maximum quality (default)
     normalization_batch_size=5,  # Default
     prompt_caching_enabled=True, # Still useful for small batches
@@ -568,8 +570,8 @@ Balanced configuration for typical production workloads.
 configure(
     llm=llm,
     llm_concurrency=8,           # More parallel LLM calls
-    neo4j_concurrency=15,        # Moderate graph load
-    neo4j_sync_concurrency=12,   # Moderate sync load
+    graph_concurrency=15,        # Moderate graph load
+    graph_sync_concurrency=12,   # Moderate sync load
     extraction_batch_size=2,     # Slightly larger batches
     normalization_batch_size=10, # Larger normalization batches
     prompt_caching_enabled=True, # Significant savings at this scale
@@ -594,8 +596,8 @@ Maximum throughput configuration for large document sets.
 configure(
     llm=llm,
     llm_concurrency=16,          # High parallel LLM calls
-    neo4j_concurrency=25,        # High graph throughput
-    neo4j_sync_concurrency=20,   # High sync throughput
+    graph_concurrency=25,        # High graph throughput
+    graph_sync_concurrency=20,   # High sync throughput
     extraction_batch_size=2,     # Larger extraction batches
     normalization_batch_size=15, # Large normalization batches
     prompt_caching_enabled=True, # Critical for cost at this scale
@@ -649,8 +651,8 @@ Minimize wall-clock time while maintaining acceptable cost.
 configure(
     llm=llm,
     llm_concurrency=16,          # Max parallel LLM calls
-    neo4j_concurrency=30,        # Max graph throughput
-    neo4j_sync_concurrency=25,   # Max sync throughput
+    graph_concurrency=30,        # Max graph throughput
+    graph_sync_concurrency=25,   # Max sync throughput
     extraction_batch_size=1,     # Smaller batches = faster per call
     normalization_batch_size=5,  # Default batch size
     mistral_ocr_chunk_concurrency=4,  # Parallel OCR
@@ -743,13 +745,13 @@ for stage_name in result.stages_executed:
 | :--- | :--- | :--- |
 | Stage 0 (preprocess) is the slowest stage | PDF conversion or OCR bottleneck | Increase `mistral_ocr_chunk_concurrency`, check Mistral API |
 | Stage 1 (extraction) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
-| Stage 2 (ingestion) is the slowest stage | Graph sync concurrency too low | Increase `neo4j_sync_concurrency` |
+| Stage 2 (ingestion) is the slowest stage | Graph sync concurrency too low | Increase `graph_sync_concurrency` |
 | Stage 3 (annotation) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
 | Stage 4 (entity extraction) is the slowest stage | LLM concurrency too low | Increase `llm_concurrency` |
 | High LLM costs per document | Batch sizes too small | Increase `extraction_batch_size` |
 | OCR timeout errors | Large PDFs, low concurrency | Increase `mistral_ocr_chunk_concurrency` |
 | Memory errors (OOM) | Too many parallel documents | Decrease `parallel_docs` |
-| Graph connection pool exhausted | Graph concurrency too high | Decrease `neo4j_concurrency` |
+| Graph connection pool exhausted | Graph concurrency too high | Decrease `graph_concurrency` |
 | Rate limit errors (429) | LLM concurrency too high | Decrease `llm_concurrency` |
 | Inconsistent extraction quality | Batch size too large | Decrease `extraction_batch_size` |
 
@@ -778,8 +780,8 @@ from scinr.newton import get_config
 
 config = get_config()
 print(f"LLM semaphore size: {config.llm_concurrency}")
-print(f"Neo4j async semaphore: {config.neo4j_concurrency}")
-print(f"Neo4j sync semaphore: {config.neo4j_sync_concurrency}")
+print(f"Graph async semaphore: {config.graph_concurrency}")
+print(f"Graph sync semaphore: {config.graph_sync_concurrency}")
 ```
 
 If the LLM stage is slow and `llm_concurrency` is at its maximum, try increasing it. If the graph stages are slow and the semaphore is maxed, try increasing the relevant graph concurrency setting.
@@ -910,7 +912,7 @@ llm = ChatOllama(model="llama3")
 configure(
     llm=llm,
     llm_concurrency=16,           # Max LLM calls for extraction
-    neo4j_concurrency=5,          # Minimal graph load (not used yet)
+    graph_concurrency=5,          # Minimal graph load (not used yet)
 )
 result1 = await run_pipeline(
     input_raw="./docs",
@@ -923,8 +925,8 @@ result1 = await run_pipeline(
 configure(
     llm=llm,
     llm_concurrency=2,            # Minimal LLM (not used)
-    neo4j_concurrency=25,         # Max graph concurrency for ingestion
-    neo4j_sync_concurrency=20,
+    graph_concurrency=25,         # Max graph concurrency for ingestion
+    graph_sync_concurrency=20,
 )
 result2 = await run_pipeline(
     ingestion_input_dir="./data/extracted/",
@@ -936,7 +938,7 @@ result2 = await run_pipeline(
 configure(
     llm=llm,
     llm_concurrency=16,           # Max LLM calls
-    neo4j_concurrency=15,         # Moderate graph load
+    graph_concurrency=15,         # Moderate graph load
 )
 result3 = await run_pipeline(
     stages=["annotation", "entity_extraction"],
@@ -960,7 +962,7 @@ async def adaptive_run(input_dir: str, max_docs: int = 100) -> None:
     configure(
         llm=llm,
         llm_concurrency=4,
-        neo4j_concurrency=10,
+        graph_concurrency=10,
     )
 
     # Process a small batch first
@@ -985,7 +987,7 @@ async def adaptive_run(input_dir: str, max_docs: int = 100) -> None:
     configure(
         llm=llm,
         llm_concurrency=12,
-        neo4j_concurrency=20,
+        graph_concurrency=20,
     )
 
     result = await run_pipeline(
@@ -1011,7 +1013,7 @@ async def batch_run(input_dir: str, batch_size: int = 20) -> None:
     configure(
         llm=llm,
         llm_concurrency=8,
-        neo4j_concurrency=15,
+        graph_concurrency=15,
         parallel_docs=5,
     )
 

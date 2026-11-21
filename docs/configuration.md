@@ -48,8 +48,8 @@ The Neo4j driver is an optional extra (`pip install "scinr[neo4j]"`). The creden
 | `NEO4J_PASSWORD` | *(required)* | Neo4j user password. |
 | `NEO4J_DATABASE` | *(required)* | Neo4j database name |
 | `NEO4J_AUTH` | *(unset)* | Fallback in `user/password` format, used for whichever of `NEO4J_USER` / `NEO4J_PASSWORD` is not set otherwise. |
-| `NEO4J_CONCURRENCY` | `10` | Maximum async Neo4j concurrency. |
-| `NEO4J_SYNC_CONCURRENCY` | `8` | Maximum sync Neo4j concurrency. |
+| `GRAPH_CONCURRENCY` | `10` | Maximum async graph-store concurrency (any graph backend). Must be >= 1. Deprecated alias: `NEO4J_CONCURRENCY` (removed in 0.7.0). |
+| `GRAPH_SYNC_CONCURRENCY` | `8` | Maximum sync graph-store concurrency (any graph backend). Must be >= 1. Deprecated alias: `NEO4J_SYNC_CONCURRENCY` (removed in 0.7.0). |
 | `GRAPH_BACKEND` | `neo4j` | Backend for the graph (the pipeline's write path and the read-only navigation API): `neo4j`, `postgres` or `sqlite`. The Neo4j variables above are required only with `neo4j`; the Neo4j driver is the optional extra `pip install "scinr[neo4j]"`. |
 
 ### Storage and Freeze
@@ -80,6 +80,7 @@ Used when `GRAPH_BACKEND`, `STORAGE_BACKEND` or `FREEZE_BACKEND` is `postgres` o
 | `SQL_URL` | *(required for SQL axes)* | Connection URL shared by every SQL axis: `postgresql://user:pass@host:5432/db` or `sqlite:///path/newton.db` (`sqlite:////abs/path.db` for an absolute path). Its scheme must match the axes, and the axes cannot mix Postgres and SQLite. A driver suffix (`postgresql+psycopg://`) is accepted and ignored. Redacted in logs and in `repr(config)`. |
 | `SQL_SCHEMA` | `newton` | Postgres schema that holds the tables. Ignored by SQLite. Must be a plain identifier. |
 | `SQL_POOL_SIZE` | `10` | Connection pool size of each SQL engine (minimum `1`). |
+| `SQL_MAX_ENGINES` | `64` | Maximum SQL engines kept in cache (separately for the synchronous and the asynchronous ones), one per distinct connection (`sql_url`, `sql_schema`, pool size, text-search config) and, for the asynchronous ones, per event loop (minimum `1`). The least recently used one is disposed when the limit is exceeded. Each engine has its own pool, so a process using several configurations can open up to `SQL_POOL_SIZE` connections per engine. See [Several configurations in one process](user-guides/sql-graph.md#several-configurations-in-one-process). |
 | `SQL_FULLTEXT_CONFIG` | `simple` | Postgres text-search configuration of the full-text index on `info_units`. Applied only when the schema is created. Must be a plain identifier. |
 | `SQLITE_FILES_DIR` | *(empty: `<db path without extension>.files/`)* | Folder for the binaries (raw files, images, snapshots) kept by the SQLite backend. Required for an in-memory database. |
 
@@ -176,8 +177,8 @@ The same settings as the [Neo4j environment variables](#neo4j), passed as lowerc
 | `neo4j_user` | `str \| None` | Username. Required when `graph_backend="neo4j"` (via arg, `NEO4J_USER` or `NEO4J_AUTH`). |
 | `neo4j_password` | `str \| None` | Password. Required when `graph_backend="neo4j"` (via arg, `NEO4J_PASSWORD` or `NEO4J_AUTH`). |
 | `neo4j_database` | `str \| None` | Database name. Required when `graph_backend="neo4j"` (via arg or `NEO4J_DATABASE`). |
-| `neo4j_concurrency` | `int \| None` | Max concurrent async Neo4j sessions. Default `10`. |
-| `neo4j_sync_concurrency` | `int \| None` | Max concurrent sync ingestion dispatches. Default `8`. |
+| `graph_concurrency` | `int \| None` | Max concurrent async graph-store sessions (any graph backend). Default `10`. Deprecated alias: `neo4j_concurrency` (removed in 0.7.0). |
+| `graph_sync_concurrency` | `int \| None` | Max concurrent sync ingestion dispatches. Default `8`. Deprecated alias: `neo4j_sync_concurrency` (removed in 0.7.0). |
 | `graph_backend` | `str \| None` | Graph backend (write path and navigation): `"neo4j"` (default), `"postgres"` or `"sqlite"`. The Neo4j credentials are required only for `"neo4j"`. |
 
 ### SQL Parameters
@@ -189,6 +190,7 @@ The same settings as the [SQL environment variables](#sql-postgresql-and-sqlite)
 | `sql_url` | `str \| None` | Connection URL shared by the SQL axes. Required when any axis is `"postgres"` or `"sqlite"`. Default `""`. |
 | `sql_schema` | `str \| None` | Postgres schema. Default `"newton"`. |
 | `sql_pool_size` | `int \| None` | Connection pool size. Default `10`. |
+| `sql_max_engines` | `int \| None` | Maximum SQL engines kept in cache per kind, sync and async (least recently used is disposed). Minimum `1`. Default `64`. |
 | `sql_fulltext_config` | `str \| None` | Postgres text-search configuration. Default `"simple"`. |
 | `sqlite_files_dir` | `str \| None` | Folder for the SQLite binaries. Default `""` (next to the `.db`). |
 
@@ -383,8 +385,8 @@ configure(
     neo4j_uri="bolt://neo4j.internal:7687",
     neo4j_user="scinr_ingest",
     neo4j_password="secure_password",
-    neo4j_concurrency=10,
-    neo4j_sync_concurrency=8,
+    graph_concurrency=10,
+    graph_sync_concurrency=8,
 
     # PDF / Mistral OCR
     mistral_api_key="your_mistral_key",
@@ -622,8 +624,8 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **Neo4j Password** | `neo4j_password` | `NEO4J_PASSWORD` | *(required)* |
 | **Neo4j Database** | `neo4j_database` | `NEO4J_DATABASE` | *(required)* |
 | **Neo4j Auth** | *(none)* | `NEO4J_AUTH` | Unset (fallback in `user/password` format) |
-| **Neo4j Async Concurrency** | `neo4j_concurrency` | `NEO4J_CONCURRENCY` | `10` |
-| **Neo4j Sync Concurrency** | `neo4j_sync_concurrency` | `NEO4J_SYNC_CONCURRENCY` | `8` |
+| **Graph Async Concurrency** | `graph_concurrency` | `GRAPH_CONCURRENCY` | `10` |
+| **Graph Sync Concurrency** | `graph_sync_concurrency` | `GRAPH_SYNC_CONCURRENCY` | `8` |
 | **Graph Backend** | `graph_backend` | `GRAPH_BACKEND` | `neo4j` (`neo4j`, `postgres`, `sqlite`) |
 | **LLM Concurrency** | `llm_concurrency` | `LLM_CONCURRENCY` | `4` |
 | **Storage Backend** | `storage_backend` | `STORAGE_BACKEND` | `none` (`none`, `mongodb`, `postgres`, `sqlite`, `custom`) |
@@ -643,6 +645,7 @@ For quick lookup, here is every configurable setting with its resolution chain:
 | **SQL URL** | `sql_url` | `SQL_URL` | `""` (required for SQL axes) |
 | **SQL Schema** | `sql_schema` | `SQL_SCHEMA` | `newton` |
 | **SQL Pool Size** | `sql_pool_size` | `SQL_POOL_SIZE` | `10` |
+| **SQL Max Engines** | `sql_max_engines` | `SQL_MAX_ENGINES` | `64` |
 | **SQL Full-text Config** | `sql_fulltext_config` | `SQL_FULLTEXT_CONFIG` | `simple` |
 | **SQLite Files Dir** | `sqlite_files_dir` | `SQLITE_FILES_DIR` | `""` (`<db path>.files/`) |
 | **Mistral API Key** | `mistral_api_key` | `MISTRAL_API_KEY` | `None` |
