@@ -94,10 +94,9 @@ class SqlGraphStore(GraphStore):
         return contextlib.nullcontext()
 
     def close(self) -> None:
-        """Dispose the pool of the synchronous engine, if one was created."""
+        """Dispose the pool of the synchronous engine of the active configuration, if any."""
         with sql_errors():
-            if _engine._sync_engine is not None:
-                _engine._sync_engine.dispose()
+            _engine.dispose_sync_engine()
 
     async def aclose(self) -> None:
         """Dispose both engines; the next call creates new ones."""

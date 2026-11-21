@@ -463,6 +463,80 @@ class GraphSummary(_Base):
 
 
 # ---------------------------------------------------------------------------
+# Memory summaries & explore
+# ---------------------------------------------------------------------------
+
+
+class ModelClassSummary(_Base):
+    """Records of one ``model_class`` split into real, empty and placeholder records.
+
+    A record is *empty* when it has no fields and a *placeholder* when it has exactly one
+    field and no ``ExtractionResult`` points at it (see
+    :meth:`~GraphNavigator.summarize_model_classes`).
+    """
+
+    model_class: str
+    records: int  # total - empty - placeholders
+    empty: int
+    placeholders: int
+    selectable: bool | None = None  # ``CatalogModel.selectable`` of the class, if any
+
+
+class ModelLinkSummary(_Base):
+    """Relationships between two ``model_class`` es through one relationship type."""
+
+    from_class: str
+    rel_type: str
+    to_class: str
+    links: int  # relationships (a)-[r]->(b) between ModelInstance nodes
+    to_empty: int  # of them, those that end at an empty record or a placeholder
+    from_to_empty: int  # distinct ``a`` records that have any of those
+
+
+class SourceContribution(_Base):
+    """Real records of one ``model_class`` carried by exactly this list of job ids."""
+
+    job_ids: list[str]
+    model_class: str
+    records: int  # real records (not empty, not placeholders); may be 0
+
+
+class SourceSummary(_Base):
+    """The latest version of a source document and what it contributed."""
+
+    path: str
+    name: str
+    job_id: str | None = None
+    job_ids: list[str] = Field(default_factory=list)  # latest's job id, then every version's
+    added_at: str | None = None  # ``load_date`` of the latest version, ISO text
+    added_by_id: str | None = None
+    contributions: list[SourceContribution] = Field(default_factory=list)
+
+
+class ModelInstanceLink(_Base):
+    """A direct relationship between two ``:ModelInstance`` nodes."""
+
+    source: ModelInstanceRef
+    rel_type: str
+    target: ModelInstanceRef
+
+
+class ExtractionLink(_Base):
+    """A relationship from an ``:ExtractionResult`` to a ``:ModelInstance``."""
+
+    source: GraphNode  # types=["ExtractionResult"], every property but ``embedding``
+    rel_type: str
+    target: ModelInstanceRef
+
+
+class ModelInstanceMatch(_Base):
+    """A record found by :meth:`~GraphNavigator.search_model_instances`."""
+
+    instance: ModelInstanceRef
+    field: str  # "uid" or the first field (alphabetical) that holds the text
+
+
+# ---------------------------------------------------------------------------
 # Generic / power tools
 # ---------------------------------------------------------------------------
 
@@ -481,10 +555,17 @@ class NodeSelector(BaseModel):
 
 
 class GraphNode(_Base):
-    """A type-tagged node returned by the generic power tools."""
+    """A type-tagged node returned by the generic power tools.
+
+    ``label`` / ``key`` are the portable identity of the node (the same on Neo4j and SQL):
+    the primary label and the business key encoded as text (``graph.identity``). They are
+    ``None`` for a node whose labels or key properties are unknown.
+    """
 
     types: list[str] = Field(default_factory=list)
     properties: dict[str, Any] = Field(default_factory=dict)
+    label: str | None = None
+    key: str | None = None
 
 
 class PathResult(_Base):
@@ -500,6 +581,41 @@ class Subgraph(_Base):
 
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class GraphEdge(_Base):
+    """A relationship with both ends named by their portable identity (``expand_node``)."""
+
+    type: str
+    source_label: str
+    source_key: str
+    target_label: str
+    target_key: str
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class RelationshipCount(_Base):
+    """Relationships of one node of one type and direction towards one neighbour label."""
+
+    type: str
+    direction: Literal["out", "in"]
+    neighbor_label: str
+    count: int
+
+
+class NodeExpansion(_Base):
+    """One page of the direct neighbours of a node and the relationships with them."""
+
+    nodes: list[GraphNode] = Field(default_factory=list)  # neighbours of this page
+    edges: list[GraphEdge] = Field(default_factory=list)  # node <-> the neighbours of this page
+    total: int = 0  # distinct neighbours that meet the filters (every page)
+
+
+class NodeMatch(_Base):
+    """A node found by :meth:`~GraphNavigator.search_nodes`."""
+
+    node: GraphNode
+    field: str  # field where the text was found ("key": exact key; "text": info unit full text)
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +796,8 @@ __all__ = [
     "LabeledEntityRef", "EntityRelation", "Triple",
     "CatalogFieldRef", "CatalogModelRef", "CatalogRelation", "CatalogGraph", "CatalogPresence", "ThemeRef",
     "ModelClassStat", "RoleStat", "EntityLabelStat", "RelTypeStat", "GraphSummary",
+    "ModelClassSummary", "ModelLinkSummary", "SourceContribution", "SourceSummary",
+    "ModelInstanceLink", "ExtractionLink", "ModelInstanceMatch",
     "NodeSelector", "GraphNode", "PathResult", "Subgraph",
     "PageText", "StructureNodeSourcePages", "StructureNodesSourcePages", "OriginalFile",
     "PageImageRef", "PageImageFile",

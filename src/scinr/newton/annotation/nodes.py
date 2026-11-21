@@ -10,9 +10,9 @@ from scinr.newton.annotation.models import AnnotationDecision
 from scinr.newton.annotation.prompts import build_annotation_decision_prompt
 from scinr.newton.config import get_llm, make_system_message
 from scinr.newton.graph import get_graph_store
+from scinr.newton.utils.graph_concurrency import get_graph_semaphore
 from scinr.newton.utils.llm_repair import extract_raw_payload, run_repair_loop
 from scinr.newton.utils.llm_retry import with_llm_retry
-from scinr.newton.utils.neo4j_concurrency import get_neo4j_semaphore
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ async def process_single_annotation_node(
     prompt building and the LLM + repair loop), bounding both the concurrent
     Bedrock calls and the number of per-node contexts/prompts alive at once.
     The graph write happens after the slot is released. Graph reads and writes
-    are each wrapped in ``get_neo4j_semaphore()`` to prevent connection pool
+    are each wrapped in ``get_graph_semaphore()`` to prevent connection pool
     saturation under parallel load.
 
     Args:
@@ -264,7 +264,7 @@ async def process_single_annotation_node(
         ``{"node_id": str, "decision": AnnotationDecision | None, "error": str | None}``
     """
     node_id = node_data.get("node_id", "unknown")
-    neo4j_semaphore = get_neo4j_semaphore()
+    graph_semaphore = get_graph_semaphore()
 
     # The LLM slot is taken FIRST so that the context, prompt and messages of a
     # node only exist while it holds one of the ``llm_concurrency`` slots
@@ -272,7 +272,7 @@ async def process_single_annotation_node(
     # here, holding them). Lock order is always LLM -> graph, never the reverse.
     async with bedrock_semaphore:
         # ── Fetch context (bounded by graph semaphore) ────────────────────────
-        async with neo4j_semaphore:
+        async with graph_semaphore:
             ctx = await _fetch_node_context(node_data)
         if ctx is None:
             return {
@@ -286,7 +286,7 @@ async def process_single_annotation_node(
 
     if decision is not None:
         # ── Write decision (outside the LLM slot, bounded by graph semaphore) ─
-        async with neo4j_semaphore:
+        async with graph_semaphore:
             write_error = await _write_decision(
                 node_data["full_id"], decision, document_name, node_id
             )

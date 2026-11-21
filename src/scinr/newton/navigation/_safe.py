@@ -47,6 +47,18 @@ def safe_idents(values, *, kind: str = "identifier") -> list[str]:
     return [safe_ident(v, kind=kind) for v in values]
 
 
+def safe_keys(values: object, *, kind: str = "property key") -> list[str]:
+    """Validate a collection of property keys (not a bare string), returning them as a list.
+
+    Raises:
+        NavigationError: *values* is a string or not a collection, or a key is not a valid
+            identifier.
+    """
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple, set, frozenset)):
+        raise NavigationError(f"{kind}s must be a list of strings, got {type(values).__name__}.")
+    return safe_idents(values, kind=kind)
+
+
 def resolve_depth(depth: int | None) -> int:
     """Resolve a user-supplied ``depth`` to a concrete positive integer.
 
@@ -70,6 +82,80 @@ def resolve_depth(depth: int | None) -> int:
     return depth
 
 
+def check_raw_limits(timeout_seconds: float | None, max_rows: int | None) -> None:
+    """Validate the ``timeout_seconds`` / ``max_rows`` arguments of ``execute_raw``.
+
+    Raises:
+        NavigationError: *timeout_seconds* is not ``None`` or a number ``> 0``, or
+            *max_rows* is not ``None`` or an ``int >= 0``.
+    """
+    if timeout_seconds is not None and (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not timeout_seconds > 0
+    ):
+        raise NavigationError(
+            f"timeout_seconds must be None or a number > 0, got {timeout_seconds!r}."
+        )
+    if max_rows is not None and (
+        isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows < 0
+    ):
+        raise NavigationError(f"max_rows must be None or an integer >= 0, got {max_rows!r}.")
+
+
+_SQL_WORD_RE = re.compile(r"[A-Za-z_]+")
+_SQL_SPACE = frozenset(" \t\n\r\f\v;")
+
+
+def leading_sql_keyword(query: str, *, nested_comments: bool) -> str | None:
+    """The first word of the SQL *query*, upper-cased, or ``None`` if it does not start with one.
+
+    Skips whitespace, empty statements (``;``), ``--`` comments (ended by ``\\n`` or ``\\r``)
+    and ``/* ... */`` comments (nested when *nested_comments*). Where an engine would read a
+    comment more widely, this reads it more narrowly, so it may find a keyword the engine
+    treats as a comment (a false refusal), never the opposite. An unterminated comment gives
+    ``None``: the engine reports it.
+    """
+    i, n = 0, len(query)
+    while i < n:
+        if query[i] in _SQL_SPACE:
+            i += 1
+        elif query.startswith("--", i):
+            ends = [p for p in (query.find("\n", i), query.find("\r", i)) if p >= 0]
+            if not ends:
+                return None
+            i = min(ends) + 1
+        elif query.startswith("/*", i):
+            depth, i = 1, i + 2
+            while depth and i < n:
+                if nested_comments and query.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif query.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            if depth:
+                return None
+        else:
+            match = _SQL_WORD_RE.match(query, i)
+            return match.group(0).upper() if match else None
+    return None
+
+
+def check_raw_sql(query: str, *, refused: frozenset[str], nested_comments: bool) -> None:
+    """Refuse a raw SQL statement whose first keyword is in *refused* (see
+    ``Dialect.raw_refused_keywords``): transaction control, session state and the like.
+
+    Raises:
+        NavigationError: The statement starts with a refused keyword (``code`` is ``None``).
+    """
+    keyword = leading_sql_keyword(query, nested_comments=nested_comments)
+    if keyword is not None and keyword in refused:
+        raise NavigationError(
+            f"execute_raw runs one read-only query; {keyword} statements are refused."
+        )
+
+
 def assert_read_only(query: str) -> None:
     """Raise if *query* contains a write or side-effecting clause.
 
@@ -89,4 +175,13 @@ def assert_read_only(query: str) -> None:
         )
 
 
-__all__ = ["safe_ident", "safe_idents", "resolve_depth", "assert_read_only"]
+__all__ = [
+    "safe_ident",
+    "safe_idents",
+    "safe_keys",
+    "resolve_depth",
+    "assert_read_only",
+    "check_raw_limits",
+    "check_raw_sql",
+    "leading_sql_keyword",
+]

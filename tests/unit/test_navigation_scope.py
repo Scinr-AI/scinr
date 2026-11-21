@@ -50,7 +50,8 @@ def _public_methods(cls: type) -> dict[str, Any]:
 
 _ARG_BY_NAME: dict[str, Any] = {
     "path": "A/b", "document": "A/b", "node_id": "n1", "node_ids": ["n1"], "uid": "u1",
-    "model_class": "M", "theme": "t", "text": "q", "value_or_uid": "v",
+    "model_class": "M", "theme": "t", "text": "qq", "key": "k1", "value_or_uid": "v",
+    "uids": ["u1"], "label": "ModelInstance",
     "rel_type": "R", "key_fields": {"k": "v"}, "version": 1,
     "selector": NodeSelector(type="Document", key="path", value="x"),
     "from_selector": NodeSelector(type="Document", key="path", value="x"),
@@ -463,6 +464,17 @@ class TestScopedNavigator:
         _, p = drv.last_queries[-1]
         assert p["scope_tenants"] == ["acme", "__public__"]
         assert p["scope_job_ids"] == ["j1", "j2"]
+
+    async def test_fills_the_scope_for_the_summary_and_explore_methods(self):
+        nav, drv = _mk()
+        s = nav.scoped(tenant_id="acme", job_id="j1")
+        await s.summarize_model_classes()
+        await s.get_model_instance_links(["u1"])
+        await s.get_node_property_keys("ModelInstance")
+        for cypher, params in drv.last_queries[-3:]:
+            assert params["scope_tenant"] == "acme" and params["scope_job_ids"] == ["j1"], cypher
+        with pytest.raises(NavigationError, match="outside"):
+            await s.search_model_instances("x", tenant_id="globex")
 
     async def test_rejects_another_tenant(self):
         nav, drv = _mk()

@@ -84,6 +84,7 @@ from scinr.newton.navigation.models import (
     DocumentTree,
     EntityLabelStat,
     EntityRelation,
+    ExtractionLink,
     ExtractionResultRef,
     ExtractionResultWithNode,
     GraphNode,
@@ -91,12 +92,18 @@ from scinr.newton.navigation.models import (
     InfoUnitRef,
     LabeledEntityRef,
     ModelClassStat,
+    ModelClassSummary,
     ModelDecisionRef,
     ModelDecisionWithNode,
+    ModelInstanceLink,
+    ModelInstanceMatch,
     ModelInstanceRef,
     ModelInstanceRelation,
     ModelInstanceTree,
+    ModelLinkSummary,
     NodeDescription,
+    NodeExpansion,
+    NodeMatch,
     NodePath,
     NodeSelector,
     OriginalFile,
@@ -105,9 +112,11 @@ from scinr.newton.navigation.models import (
     PageText,
     PathResult,
     ProposedModelRef,
+    RelationshipCount,
     RelTypeStat,
     RoleStat,
     ScoredInfoUnit,
+    SourceSummary,
     StructureNodeRef,
     StructureNodesSourcePages,
     StructureTree,
@@ -213,6 +222,8 @@ class GraphNavigator(ABC):
         params: Mapping[str, Any] | None = None,
         *,
         dialect: str | None = None,
+        timeout_seconds: float | None = None,
+        max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
         """Run a raw, engine-native **read** query and return raw records.
 
@@ -225,14 +236,25 @@ class GraphNavigator(ABC):
             params: Query parameters (values are always sent parameterised).
             dialect: If given and it does not equal :attr:`dialect`, the call
                 fails immediately.
+            timeout_seconds: Abort the query after this many seconds
+                (:class:`~scinr.newton.exceptions.QueryTimeoutError`). Postgres:
+                ``statement_timeout`` of the read-only transaction; Neo4j: the
+                transaction timeout; SQLite: ignored (it has no server-side timeout).
+                ``None`` = no limit.
+            max_rows: Row cap. The result has **at most** ``max_rows + 1`` rows, so
+                a caller knows the result was truncated when it receives more than
+                ``max_rows``. ``None`` = no cap.
 
         Returns:
             A list of plain dict records (never ``*Ref`` models).
 
         Raises:
             UnsupportedOperationError: If this backend has no raw-query path.
-            NavigationError: If *query* contains a write clause, or *dialect*
-                does not match.
+            QueryTimeoutError: If the query exceeded *timeout_seconds*.
+            NavigationError: If *query* contains a write clause, *dialect* does not
+                match, an argument is invalid or the engine rejects the query; in the
+                last case :attr:`~scinr.newton.exceptions.NavigationError.code` holds
+                the engine's error code (Postgres ``SQLSTATE``, Neo4j ``code``).
         """
         raise UnsupportedOperationError(
             f"{type(self).__name__} (dialect={self.dialect!r}) has no execute_raw"
@@ -244,9 +266,17 @@ class GraphNavigator(ABC):
         params: Mapping[str, Any] | None = None,
         *,
         dialect: str | None = None,
+        timeout_seconds: float | None = None,
+        max_rows: int | None = None,
     ) -> dict[str, Any] | None:
-        """Like :meth:`execute_raw` but return the first record or ``None``."""
-        rows = await self.execute_raw(query, params, dialect=dialect)
+        """Like :meth:`execute_raw` (same arguments) but return the first record or ``None``."""
+        rows = await self.execute_raw(
+            query,
+            params,
+            dialect=dialect,
+            timeout_seconds=timeout_seconds,
+            max_rows=max_rows,
+        )
         return rows[0] if rows else None
 
     # ===================================================================
@@ -1695,6 +1725,108 @@ class GraphNavigator(ABC):
     ) -> Subgraph:
         """Return a bounded neighbourhood of *selector* as ``{nodes, edges}``."""
 
+    # --- Node browsing (portable identity: label + key) ---------------------
+    #
+    # A node is named by ``(label, key)``: its primary label and its business key encoded as
+    # text (``GraphNode.label`` / ``GraphNode.key``), the same on every backend. The four
+    # methods below follow the scope rules of the walks above: a node outside the scope is
+    # ``None`` / empty, a catalogue node is always visible, and the neighbours of a node are
+    # only those inside the scope (or in the catalogue).
+
+    @abstractmethod
+    async def get_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> GraphNode | None:
+        """Return the node with primary *label* and encoded *key*, or ``None``.
+
+        ``None`` too for a malformed *key* and for a node outside the scope.
+
+        Raises:
+            NavigationError: *label* is not a primary label of the graph.
+        """
+
+    @abstractmethod
+    async def count_node_relationships(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[RelationshipCount]:
+        """Count the direct relationships of a node by type, direction and neighbour label.
+
+        Only relationships whose neighbour is inside the scope (or in the catalogue) count; a
+        relationship from the node to itself counts once as ``"out"`` and once as ``"in"``.
+        Ordered by ``count`` descending, ``type``, ``direction``, ``neighbor_label``. A missing
+        or out-of-scope node gives ``[]``.
+        """
+
+    @abstractmethod
+    async def expand_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        edge_types: Sequence[str] | None = None,
+        neighbor_labels: Sequence[str] | None = None,
+        skip: int = 0,
+        limit: int | None = 100,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> NodeExpansion:
+        """Return one page of the direct neighbours of a node and their relationships.
+
+        Neighbours are the distinct nodes one hop away (never the node itself) that are
+        inside the scope or in the catalogue, reached in *direction* through relationships of
+        *edge_types* and whose label (primary, or the role label of a structure node) is in
+        *neighbor_labels*. They are ordered by primary label and key (code point order);
+        ``skip`` / ``limit`` page that order (``limit=None``: all) and ``total`` counts every
+        page. ``edges`` holds every relationship of the requested *edge_types* between the node
+        and the neighbours of this page, whatever its direction, with both ends named.
+
+        Raises:
+            NavigationError: Invalid label, type, ``skip`` or ``limit``.
+        """
+
+    @abstractmethod
+    async def search_nodes(
+        self,
+        text: str,
+        *,
+        labels: Sequence[str] | None = None,
+        limit: int = 20,
+        skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[NodeMatch]:
+        """Find nodes by exact key or by text, in the primary *labels* given (default: all).
+
+        Per label: the node whose key is *text* (``field="key"``); for ``InfoUnit`` the full
+        text search of :meth:`search_info_units` (``field="text"``); for ``ModelInstance``
+        :meth:`search_model_instances` (the field that holds the text); for the rest the first
+        field of ``navigation._search_fields.SEARCH_FIELDS`` whose value contains *text*,
+        ignoring case. Key matches come first, then by label and key. A *text* shorter than
+        two characters finds nothing.
+
+        For ``InfoUnit`` and ``ModelInstance`` the candidates of a page are the best
+        ``skip + limit`` of their own search, so a page is stable only while the data is.
+        """
+
     # ===================================================================
     # I. Source text & original files (graph + storage backend)
     # ===================================================================
@@ -1874,3 +2006,215 @@ class GraphNavigator(ABC):
             self, image_id, tenant_id=tenant_id, include_public=include_public,
             created_by_user_id=created_by_user_id, job_id=job_id,
         )
+
+    # ===================================================================
+    # J. Memory summaries, explore & label keys
+    # ===================================================================
+    #
+    # A record's *fields* are the keys of ``ModelInstanceRef.properties`` (``uid`` and
+    # ``model_class`` are not properties; neither are the internal keys) whose value is not
+    # null, minus ``ignore_keys``. A record is *empty* when it has no fields and a
+    # *placeholder* when it has exactly one field and no ``:ExtractionResult`` has a
+    # relationship to it. Only ``:ModelInstance`` nodes with a ``model_class`` inside the scope
+    # count.
+
+    @abstractmethod
+    async def summarize_model_classes(
+        self,
+        *,
+        ignore_keys: Sequence[str] = (),
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ModelClassSummary]:
+        """Count the records of each ``model_class``: real, empty and placeholders.
+
+        ``records`` is the total minus ``empty`` and ``placeholders``. ``selectable`` is
+        ``CatalogModel.selectable`` of the class (``None`` without a catalogue entry).
+        *ignore_keys* are bookkeeping keys that do not count as fields (for example
+        ``tenant_id``, ``job_ids``, ``created_by_user_ids``, ``embedding``). Ordered by
+        ``records`` descending, then ``model_class``.
+        """
+
+    @abstractmethod
+    async def summarize_model_instance_links(
+        self,
+        *,
+        ignore_keys: Sequence[str] = (),
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ModelLinkSummary]:
+        """Aggregate the relationships between ``:ModelInstance`` nodes.
+
+        One row per ``(from_class, rel_type, to_class)`` with the number of relationships
+        (``links``), how many end at an empty record or a placeholder (``to_empty``) and
+        from how many distinct records they start (``from_to_empty``). Both ends must be
+        inside the scope. Ordered by ``links`` descending, then ``from_class``,
+        ``rel_type``, ``to_class``.
+        """
+
+    @abstractmethod
+    async def summarize_sources(
+        self,
+        *,
+        ignore_keys: Sequence[str] = (),
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[SourceSummary]:
+        """Describe the latest version of every source document and what it added.
+
+        Documents are the ``latest`` ones that are not folders. A record belongs to a
+        source through its job ids (``job_ids``, else ``[job_id]``), across every version of
+        the same path, so records a newer version did not touch still count.
+        ``SourceSummary.job_ids`` lists the latest version's job id and then the job id of
+        every version, newest first, without nulls or repeats. ``contributions`` has one
+        entry per ``(job id list, model_class)`` of the records that share a job id with
+        the source, counting only real records (``records`` can be ``0``). Ordered by
+        ``added_at`` descending (no date last), then ``path``.
+        """
+
+    @abstractmethod
+    async def get_model_instance_links(
+        self,
+        uids: Sequence[str],
+        *,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ModelInstanceLink]:
+        """Direct relationships between ``:ModelInstance`` nodes that touch any of *uids*.
+
+        A relationship is returned when one of *uids* is its source or its target and both
+        ends are inside the scope. No duplicates; ordered by ``source.uid``, ``rel_type``,
+        ``target.uid``.
+        """
+
+    @abstractmethod
+    async def get_extraction_links(
+        self,
+        *,
+        document_paths: Sequence[str] | None = None,
+        field_contains: Sequence[tuple[str, str]] = (),
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ExtractionLink]:
+        """Relationships from extraction results to records, below some documents.
+
+        Walks the ``latest`` documents (those of *document_paths*, or all) down the structure
+        tree (``HAS_STRUCTURE`` / ``HAS_CHILD``, any depth) to ``HAS_EXTRACTION`` and on to
+        ``:ExtractionResult -[r]-> :ModelInstance``. Each ``(key, value)`` of *field_contains*
+        is an AND condition: property *key* of the extraction result **or** of the record
+        contains *value* (case sensitive, strings only); keys must be identifiers. No
+        duplicates; ordered by ``source`` uid, ``rel_type``, ``target.uid``.
+        """
+
+    @abstractmethod
+    async def list_extraction_field_keys(
+        self,
+        *,
+        document_paths: Sequence[str] | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        """Sorted union of the property keys of the extraction results and records that
+        :meth:`get_extraction_links` walks (same documents, no field filter).
+        """
+
+    @abstractmethod
+    async def get_model_instances_in_documents(
+        self,
+        model_class: str,
+        *,
+        document_paths: Sequence[str] | None = None,
+        where: _Where = None,
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ModelInstanceRef]:
+        """Records of *model_class* extracted from the documents, plus their neighbours.
+
+        The records the extraction results of the ``latest`` documents (those of
+        *document_paths*, or all) point at, **and** their direct ``:ModelInstance``
+        neighbours (either direction), keeping those of *model_class* that satisfy
+        ``where=`` (same contract as :meth:`get_model_instances_by_class`). Ordered by ``uid``.
+        """
+
+    @abstractmethod
+    async def search_model_instances(
+        self,
+        text: str,
+        *,
+        ignore_keys: Sequence[str] = (),
+        limit: int | None = None,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[ModelInstanceMatch]:
+        """Find records by ``uid`` or by the text of one of their fields.
+
+        A record matches when its ``uid`` equals *text* (``field="uid"``) or when a field
+        (keys in alphabetical order, ``ignore_keys`` left out) has a value whose text,
+        lower-cased, contains *text* lower-cased (``field`` is the first such key; lists and
+        maps are never matched). Ordered with the ``uid`` matches first, then by ``uid``.
+        Scans every record of the scope.
+
+        Raises:
+            NavigationError: *text* is not a non-empty string.
+        """
+
+    @abstractmethod
+    async def list_model_instance_field_keys(
+        self,
+        model_class: str,
+        *,
+        ignore_keys: Sequence[str] = (),
+        sample_limit: int = 200,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        """Sorted field keys that have a value in the first *sample_limit* records of a class.
+
+        Takes the first *sample_limit* records of *model_class* by ``uid`` and returns the
+        keys (``ignore_keys`` left out) with a non-null value that, when it is text, is not
+        blank.
+        """
+
+    @abstractmethod
+    async def get_node_property_keys(
+        self,
+        label: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        """Sorted property keys of **one** node of *label* inside the scope.
+
+        The node is the first one by its natural key (``path`` for ``Document``, ``id`` for
+        ``StructureNode`` and its role labels, ``uid`` for the other nodes, the catalogue
+        key for catalogue nodes, which have no scope). ``[]`` when there is none.
+
+        Raises:
+            NavigationError: *label* is not a node label of the graph.
+        """

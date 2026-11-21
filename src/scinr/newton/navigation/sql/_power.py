@@ -2,28 +2,42 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 import sqlalchemy as sa
 from sqlalchemy.sql.elements import ColumnElement
 
-from scinr.newton.exceptions import NavigationError
+from scinr.newton.exceptions import GraphQueryError, NavigationError, QueryTimeoutError, ScinrError
 from scinr.newton.ingest.nodes import ROLE_TO_LABEL
+from scinr.newton.navigation import _browse as browse
 from scinr.newton.navigation import _map
-from scinr.newton.navigation._safe import safe_ident
-from scinr.newton.navigation.models import GraphNode, NodeSelector, PathResult, Subgraph
+from scinr.newton.navigation._labels import resolve_label
+from scinr.newton.navigation._safe import check_raw_limits, check_raw_sql, safe_ident
+from scinr.newton.navigation._search_fields import SEARCH_FIELDS, SPECIAL_SEARCH_LABELS
+from scinr.newton.navigation.models import (
+    GraphEdge,
+    GraphNode,
+    NodeExpansion,
+    NodeMatch,
+    NodeSelector,
+    PathResult,
+    RelationshipCount,
+    Subgraph,
+)
 from scinr.newton.navigation.scope import Scope, make_scope
 from scinr.newton.navigation.sql import _bfs as bfs
 from scinr.newton.navigation.sql._bfs import Node
 from scinr.newton.navigation.sql._common import _SqlRuntime
-from scinr.newton.navigation.sql._translate import prop_equals
+from scinr.newton.navigation.sql._translate import Property, contains, prop_equals
 from scinr.newton.navigation.sql._walk import LABEL_SEP, PATH_SEP, walk
 from scinr.newton.sql import tables as T
-from scinr.newton.sql.dialect import SQLITE_DEFERRED_OPTION
+from scinr.newton.sql.dialect import SQLITE_DEFERRED_OPTION, Dialect
 from scinr.newton.sql.engine import get_async_engine
-from scinr.newton.sql.errors import async_sql_errors
+from scinr.newton.sql.errors import translate
 from scinr.newton.sql.names import KEY_COLUMN, LABEL_TABLE
+from scinr.newton.utils.redaction import redact_secrets
 
 #: Global catalogue labels: they carry no tenant, and are the bridge through which a free
 #: graph walk could hop from one tenant's data to another's
@@ -31,6 +45,45 @@ from scinr.newton.sql.names import KEY_COLUMN, LABEL_TABLE
 _CATALOG_LABELS = ("CatalogModel", "ModelField", "EntityLabel", "Theme")
 
 _READ_ONLY_MARKERS = ("read-only", "read only", "readonly")
+
+_DIRECTIONS = ("out", "in", "both")
+
+#: Keys per ``IN (...)`` of the edge lookup of ``expand_node`` (bound-parameter limits).
+_EDGE_BATCH = 500
+
+#: Postgres ``SQLSTATE`` of a statement cancelled by ``statement_timeout``.
+_QUERY_CANCELED = "57014"
+
+
+def _raise_raw_error(exc: Exception, dl: Dialect) -> None:
+    """Raise the ``NavigationError`` family for an engine error of ``execute_raw``.
+
+    A cancelled statement is a :class:`QueryTimeoutError`, a refused write a
+    :class:`NavigationError`, any other rejected query a :class:`NavigationError` with the
+    ``SQLSTATE`` in ``code``; connection / authentication / transient errors keep their
+    ``GraphError`` class. Returns (so the caller re-raises *exc*) when *exc* is not the
+    engine's.
+    """
+    if isinstance(exc, ScinrError):
+        return
+    driver_exc = getattr(exc, "orig", None)
+    if not isinstance(driver_exc, BaseException):
+        driver_exc = exc
+    state = getattr(driver_exc, "sqlstate", None)
+    code = state if isinstance(state, str) and state else None
+    message = redact_secrets(str(driver_exc)) or ""
+    if code == _QUERY_CANCELED:
+        raise QueryTimeoutError(message, code=code) from exc
+    if any(marker in message.lower() for marker in _READ_ONLY_MARKERS):
+        raise NavigationError(
+            "execute_raw is read-only; the statement was refused.", code=code
+        ) from exc
+    translated = translate(exc, dialect=dl)
+    if translated is None:
+        return
+    if isinstance(translated, GraphQueryError):
+        raise NavigationError(str(translated), code=code) from exc
+    raise translated from exc
 
 
 def _by_label(nodes: Iterable[Node]) -> dict[str, list[str]]:
@@ -539,6 +592,288 @@ class _PowerMixin(_SqlRuntime):
                 out.append({"type": row["type"], "props": row["props"] or {}})
         return out
 
+    # -- node browsing (portable identity: label + key) -----------------------
+
+    async def _find_node(
+        self, label: str, key: str, sc: Scope
+    ) -> tuple[tuple[str, str], dict[str, Any]] | None:
+        """``((label, encoded key), node dict)`` of the node ``(label, key)`` inside the scope.
+
+        The scope is the one of the node's own kind (a catalogue node has none). ``None`` when
+        the key is malformed or the node is missing or outside the scope.
+        """
+        ref = browse.node_ref(label, key)
+        if ref is None:
+            return None
+        name = LABEL_TABLE[label]
+        table = T.metadata.tables[name]
+        encoded = browse.encode_ref(ref)
+        conditions: list[ColumnElement[bool]] = [table.c[KEY_COLUMN[label]] == encoded]
+        kind = resolve_label(label).scope_kind
+        if kind is not None:
+            conditions.extend(self._scope(table, sc, kind))
+        row = await self._read_one(sa.select(table).where(*conditions).limit(1))
+        if row is None:
+            return None
+        return (label, encoded), self._node(name, row)
+
+    async def get_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> GraphNode | None:
+        """The node with primary *label* and encoded *key*, if it is inside the scope."""
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        found = await self._find_node(label, key, sc)
+        return _map.graph_node(found[1]) if found else None
+
+    async def count_node_relationships(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[RelationshipCount]:
+        """Relationships of a node by type, direction and neighbour label (``all_edges``)."""
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        found = await self._find_node(label, key, sc)
+        if found is None:
+            return []
+        (a_label, a_key), _ = found
+        index = self._node_index()
+        links = T.all_edges
+        allowed = self._allowed(index, sc)
+        rows: list[tuple[str, str, str, int]] = []
+        for direction, near, far in (
+            ("out", (links.c.src_label, links.c.src_key), (links.c.dst_label, links.c.dst_key)),
+            ("in", (links.c.dst_label, links.c.dst_key), (links.c.src_label, links.c.src_key)),
+        ):
+            conditions: list[ColumnElement[bool]] = [near[0] == a_label, near[1] == a_key]
+            if allowed is not None:
+                conditions.append(allowed)
+            statement = (
+                sa.select(links.c.type, far[0].label("neighbor"), sa.func.count().label("n"))
+                .select_from(
+                    links.join(index, sa.and_(index.c.label == far[0], index.c.key == far[1]))
+                )
+                .where(*conditions)
+                .group_by(links.c.type, far[0])
+            )
+            rows.extend(
+                (r["type"], direction, r["neighbor"], int(r["n"]))
+                for r in await self._read(statement)
+            )
+        return browse.count_relationships(rows)
+
+    async def expand_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        edge_types: Sequence[str] | None = None,
+        neighbor_labels: Sequence[str] | None = None,
+        skip: int = 0,
+        limit: int | None = 100,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> NodeExpansion:
+        """One page of the distinct neighbours of a node and the edges with them."""
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        if direction not in _DIRECTIONS:
+            raise NavigationError(f"direction must be one of {_DIRECTIONS}, got {direction!r}.")
+        browse.check_page(skip, limit, allow_unlimited=True)
+        types = browse.check_edge_types(edge_types)
+        wanted = browse.check_labels(neighbor_labels)
+        found = await self._find_node(label, key, sc)
+        if found is None:
+            return NodeExpansion()
+        anchor, _ = found
+        links = T.all_edges
+        sides = []
+        if direction in ("out", "both"):
+            sides.append((links.c.src_label, links.c.src_key, links.c.dst_label, links.c.dst_key))
+        if direction in ("in", "both"):
+            sides.append((links.c.dst_label, links.c.dst_key, links.c.src_label, links.c.src_key))
+        parts = [
+            sa.select(far_label.label("label"), far_key.label("key")).where(
+                near_label == anchor[0],
+                near_key == anchor[1],
+                *([links.c.type.in_(types)] if types else []),
+            )
+            for near_label, near_key, far_label, far_key in sides
+        ]
+        # distinct neighbours: UNION removes repeats between the two sides, DISTINCT the
+        # several relationships between the same pair
+        joined = parts[0].distinct() if len(parts) == 1 else sa.union(*parts)
+        reached = joined.subquery("reached")
+        index = self._node_index()
+        conditions: list[ColumnElement[bool]] = [
+            sa.not_(sa.and_(reached.c.label == anchor[0], reached.c.key == anchor[1]))
+        ]
+        if wanted:
+            roles = _roles_of(wanted)
+            matches = [index.c.label.in_(wanted)]
+            if roles:
+                matches.append(sa.and_(index.c.label == "StructureNode", index.c.role.in_(roles)))
+            conditions.append(sa.or_(*matches))
+        allowed = self._allowed(index, sc)
+        if allowed is not None:
+            conditions.append(allowed)
+        neighbours = (
+            sa.select(reached.c.label.label("label"), reached.c.key.label("key"))
+            .select_from(
+                reached.join(
+                    index, sa.and_(index.c.label == reached.c.label, index.c.key == reached.c.key)
+                )
+            )
+            .where(*conditions)
+        )
+        counted = await self._read_one(sa.select(sa.func.count()).select_from(neighbours.subquery("n")))
+        total = int(next(iter(counted.values()))) if counted else 0
+        page_query = self._limit(
+            neighbours.order_by(self._dl.order_text(reached.c.label), self._dl.order_text(reached.c.key)),
+            limit,
+            skip,
+        )
+        page = [(r["label"], r["key"]) for r in await self._read(page_query)]
+        if not page:
+            return NodeExpansion(total=total)
+        nodes = await self._fetch_nodes(page)
+        return NodeExpansion(
+            nodes=[_map.graph_node(nodes[p]) for p in page if p in nodes],
+            edges=browse.sort_edges(await self._edges_with(anchor, page, types)),
+            total=total,
+        )
+
+    async def _edges_with(
+        self, anchor: tuple[str, str], page: Sequence[tuple[str, str]], types: Sequence[str] | None
+    ) -> list[GraphEdge]:
+        """Every relationship (of *types*) between *anchor* and the nodes of *page*."""
+        links = T.all_edges
+        edges: list[GraphEdge] = []
+        for start in range(0, len(page), _EDGE_BATCH):
+            chunk = page[start : start + _EDGE_BATCH]
+            keys = _by_label(chunk)
+            outgoing = sa.and_(
+                links.c.src_label == anchor[0],
+                links.c.src_key == anchor[1],
+                sa.or_(
+                    *[
+                        sa.and_(links.c.dst_label == label, links.c.dst_key.in_(group))
+                        for label, group in keys.items()
+                    ]
+                ),
+            )
+            incoming = sa.and_(
+                links.c.dst_label == anchor[0],
+                links.c.dst_key == anchor[1],
+                sa.or_(
+                    *[
+                        sa.and_(links.c.src_label == label, links.c.src_key.in_(group))
+                        for label, group in keys.items()
+                    ]
+                ),
+            )
+            conditions: list[ColumnElement[bool]] = [sa.or_(outgoing, incoming)]
+            if types:
+                conditions.append(links.c.type.in_(list(types)))
+            for row in await self._read(sa.select(links).where(*conditions)):
+                edges.append(
+                    GraphEdge(
+                        type=row["type"],
+                        source_label=row["src_label"],
+                        source_key=row["src_key"],
+                        target_label=row["dst_label"],
+                        target_key=row["dst_key"],
+                        properties=dict(row["props"] or {}),
+                    )
+                )
+        return edges
+
+    async def search_nodes(
+        self,
+        text: str,
+        *,
+        labels: Sequence[str] | None = None,
+        limit: int = 20,
+        skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[NodeMatch]:
+        """Nodes whose key is *text* or with a search field containing it (see the base class)."""
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        browse.check_page(skip, limit)
+        wanted = browse.search_labels(labels)
+        if not isinstance(text, str) or len(text) < browse.MIN_SEARCH_LENGTH:
+            return []
+        scope = {
+            "tenant_id": tenant_id,
+            "include_public": include_public,
+            "created_by_user_id": created_by_user_id,
+            "job_id": job_id,
+        }
+        window = skip + limit
+        hits: list[browse.Hit] = []
+        for label in wanted:
+            if label in SPECIAL_SEARCH_LABELS:
+                hits.extend(await browse.special_hits(self, label, text, window, scope))
+            else:
+                hits.extend(await self._search_label(label, text, sc, window))
+        hits.sort(key=lambda hit: hit.order)
+        page = hits[skip : skip + limit]
+        nodes = await self._fetch_nodes([(h.label, h.key) for h in page if h.node is None])
+        out = []
+        for hit in page:
+            node = hit.node
+            if node is None and (hit.label, hit.key) in nodes:
+                node = _map.graph_node(nodes[(hit.label, hit.key)])
+            if node is not None:
+                out.append(hit.match(node))
+        return out
+
+    async def _search_label(
+        self, label: str, text: str, sc: Scope, window: int
+    ) -> list[browse.Hit]:
+        """The first *window* candidates of one label: its exact key, then its search fields."""
+        table = T.metadata.tables[LABEL_TABLE[label]]
+        key_column = table.c[KEY_COLUMN[label]]
+        needle = text.lower()
+        cases: list[tuple[ColumnElement[bool], str]] = []
+        ref = browse.node_ref(label, text)
+        if ref is not None:
+            cases.append((key_column == browse.encode_ref(ref), "key"))
+        for name in SEARCH_FIELDS.get(label, ()):
+            value = Property(table, name, self._dl).values("string")
+            if value is not None:
+                cases.append((contains(sa.func.lower(value), needle), name))
+        if not cases:
+            return []
+        field = sa.case(*cases)
+        conditions: list[ColumnElement[bool]] = [field.is_not(None)]
+        kind = resolve_label(label).scope_kind
+        if kind is not None:
+            conditions.extend(self._scope(table, sc, kind))
+        statement = (
+            sa.select(key_column.label("key"), field.label("field"))
+            .where(*conditions)
+            .order_by(sa.case((field == "key", 0), else_=1), self._dl.order_text(key_column))
+            .limit(window)
+        )
+        return [browse.Hit(label, r["key"], r["field"]) for r in await self._read(statement)]
+
     # -- raw escape hatch --------------------------------------------------
 
     async def execute_raw(
@@ -547,13 +882,32 @@ class _PowerMixin(_SqlRuntime):
         params: Mapping[str, Any] | None = None,
         *,
         dialect: str | None = None,
+        timeout_seconds: float | None = None,
+        max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Run a read-only SQL query (``:name`` parameters); the engine enforces read-only.
+        """Run ONE read-only SQL query (``:name`` parameters); the engine enforces read-only.
 
         Postgres runs it in a ``READ ONLY`` transaction with the configured schema first in
         the ``search_path`` (so table names need no schema); SQLite with ``PRAGMA
         query_only``. A statement that writes fails and is reported as a
         :class:`NavigationError`.
+
+        Only one statement runs: a script (``SELECT 1; SELECT 2``, ``COMMIT; BEGIN READ
+        WRITE; INSERT ...``) is refused by the engine before anything runs (Postgres: the
+        extended protocol, ``code="42601"``; SQLite: ``sqlite3``). Statements that are not
+        queries and act on the transaction or the session (``COMMIT``, ``BEGIN``, ``SET``,
+        ``RESET``, ``PRAGMA``, ... see ``Dialect.raw_refused_keywords``) are refused before
+        being sent (``code=None``), and a statement that ended the transaction anyway is
+        reported as a :class:`NavigationError`.
+
+        *max_rows*: at most ``max_rows + 1`` rows are read (``fetchmany``); receiving more
+        than ``max_rows`` means the result was truncated. *timeout_seconds*: Postgres sets
+        ``SET LOCAL statement_timeout`` (whole milliseconds, at least 1) and a statement that
+        exceeds it raises :class:`QueryTimeoutError`; SQLite ignores it.
+
+        Engine errors are raised as :class:`NavigationError` carrying the ``SQLSTATE`` (when
+        the driver gives one) in ``code``; connection, authentication, transient and
+        resource errors keep their own :class:`GraphError` classes.
         """
         if dialect is not None and dialect != self.dialect:
             raise NavigationError(
@@ -561,30 +915,42 @@ class _PowerMixin(_SqlRuntime):
             )
         if not isinstance(query, str) or not query.strip():
             raise NavigationError("execute_raw: query must be a non-empty string.")
+        check_raw_limits(timeout_seconds, max_rows)
+        dl = self._dl
+        check_raw_sql(query, refused=dl.raw_refused_keywords, nested_comments=dl.nested_comments)
         from scinr.newton.config import get_config
 
         schema = get_config().sql_schema
-        dl = self._dl
-        statement = sa.text(query)
         values = dict(params or {})
+        # One statement, enforced by the engine (it may add a bound parameter to *values*).
+        statement = sa.text(dl.single_statement(query, values))
+        timeout_ms = (
+            max(1, math.ceil(timeout_seconds * 1000)) if timeout_seconds is not None else None
+        )
 
         def run(connection: Any) -> list[dict[str, Any]]:
             with dl.read_only(connection):
                 dl.use_schema(connection, schema)
+                if timeout_ms is not None:
+                    dl.set_statement_timeout(connection, timeout_ms)
                 result = connection.execute(statement, values)
+                if not dl.in_transaction(connection):
+                    result.close()
+                    raise NavigationError(
+                        "execute_raw: the statement ended its read-only transaction; refused."
+                    )
                 if not result.returns_rows:
                     return []
-                return [dict(row._mapping) for row in result]
+                rows = result.fetchall() if max_rows is None else result.fetchmany(max_rows + 1)
+                result.close()
+                return [dict(row._mapping) for row in rows]
 
         engine = get_async_engine().execution_options(**{SQLITE_DEFERRED_OPTION: True})
         try:
-            async with async_sql_errors(), engine.connect() as connection:
+            async with engine.connect() as connection:
                 return await connection.run_sync(run)
         except Exception as exc:
-            if any(marker in str(exc).lower() for marker in _READ_ONLY_MARKERS):
-                raise NavigationError(
-                    "execute_raw is read-only; the statement was refused."
-                ) from exc
+            _raise_raw_error(exc, dl)
             raise
 
 

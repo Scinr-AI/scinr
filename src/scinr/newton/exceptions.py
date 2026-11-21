@@ -102,7 +102,16 @@ class NavigationError(ScinrError):
     Examples: a malformed identifier or property key, a malformed ``where=``
     selector, a write statement passed to ``execute_raw``, a ``dialect=``
     mismatch, or a ``strict=True`` single-get that found nothing.
+
+    Attributes:
+        code: The database's own error code when the error comes from the engine
+            (the Postgres ``SQLSTATE``, the Neo4j ``code``), else ``None``. It lets a
+            caller report the failure without exposing the engine's message.
     """
+
+    def __init__(self, *args: object, code: str | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 class GraphError(ScinrError):
@@ -167,6 +176,16 @@ class GraphQueryError(GraphError):
     Raised for a query the graph engine rejects (syntax, client errors, ...).
 
     These are programming errors, not conditions to retry.
+    """
+
+
+class QueryTimeoutError(NavigationError):
+    """
+    Raised when a raw query exceeds its ``timeout_seconds`` (``execute_raw``).
+
+    Postgres: ``SQLSTATE 57014`` (``statement_timeout``). Neo4j: a
+    ``Neo.ClientError.Transaction.TransactionTimedOut*`` code. The engine's code is
+    in :attr:`NavigationError.code`.
     """
 
 

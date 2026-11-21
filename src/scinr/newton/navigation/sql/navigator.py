@@ -13,6 +13,7 @@ from scinr.newton.navigation.base import GraphNavigator
 from scinr.newton.navigation.sql._annotation import _AnnotationMixin
 from scinr.newton.navigation.sql._documents import _DocumentsMixin
 from scinr.newton.navigation.sql._entities import _EntitiesMixin
+from scinr.newton.navigation.sql._explore import _ExploreMixin
 from scinr.newton.navigation.sql._info_units import _InfoUnitsMixin
 from scinr.newton.navigation.sql._instances import _ModelInstancesMixin
 from scinr.newton.navigation.sql._introspection import _IntrospectionMixin
@@ -31,6 +32,7 @@ class SqlGraphNavigator(
     _EntitiesMixin,
     _IntrospectionMixin,
     _PowerMixin,
+    _ExploreMixin,
     GraphNavigator,
 ):
     """SQLAlchemy Core implementation of :class:`GraphNavigator`.

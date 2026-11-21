@@ -15,32 +15,51 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 from neo4j import AsyncDriver, AsyncGraphDatabase, Driver, GraphDatabase
 
 from scinr.newton.exceptions import GraphConfigurationError
 
 # ---------------------------------------------------------------------------
-# Async driver singleton
+# Async driver cache
 # ---------------------------------------------------------------------------
-_async_driver: AsyncDriver | None = None
+# One driver per (uri, user, password, event loop): an async driver is bound to the loop it
+# is first used in, and two configurations never share a driver. The loop object itself (not
+# its id(), which a new loop can reuse) is part of the key; the entries of closed loops are
+# dropped when a new driver is created.
+_async_drivers: dict[tuple, AsyncDriver] = {}
+_lock = threading.Lock()
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _driver_key(cfg) -> tuple:
+    return (cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_password, _running_loop())
 
 
 def _reset_async_driver_singleton() -> None:
-    """Invalidate the async driver singleton.
+    """Forget every cached async driver (without closing them).
 
-    Called automatically by configure() when credentials change so the next
-    call to get_async_driver() creates a fresh driver with the new credentials.
+    Called automatically by configure() so the next call to get_async_driver() creates
+    a fresh driver with the new credentials.
     """
-    global _async_driver
-    _async_driver = None
+    with _lock:
+        _async_drivers.clear()
 
 
 def get_async_driver() -> AsyncDriver:
-    """Return a module-level singleton :class:`AsyncDriver` instance.
+    """Return the cached :class:`AsyncDriver` of the active configuration and running loop.
 
-    Credentials are read from ScinrConfig (set via configure()) on each
-    creation. The driver is reused across calls; do NOT close it from
-    individual coroutines.
+    Credentials are read from the active ScinrConfig (``configure()`` or ``use_config()``).
+    One driver is kept per (uri, user, password, event loop) and reused across calls; do NOT
+    close it from individual coroutines.
 
     Connection pool settings
     ------------------------
@@ -54,7 +73,6 @@ def get_async_driver() -> AsyncDriver:
     """
     from scinr.newton.config import get_config  # deferred — avoids circular import
 
-    global _async_driver
     cfg = get_config()
     if not cfg.neo4j_user or not cfg.neo4j_password:
         raise GraphConfigurationError(
@@ -62,17 +80,23 @@ def get_async_driver() -> AsyncDriver:
             "Call configure(neo4j_user=..., neo4j_password=...) first, "
             "or set NEO4J_USER + NEO4J_PASSWORD in your .env file."
         )
-    if _async_driver is None:
-        _async_driver = AsyncGraphDatabase.driver(
-            cfg.neo4j_uri,
-            auth=(cfg.neo4j_user, cfg.neo4j_password),
-            max_connection_pool_size=64,
-            connection_acquisition_timeout=120,
-            liveness_check_timeout=30,
-            max_connection_lifetime=600,
-            keep_alive=True,
-        )
-    return _async_driver
+    key = _driver_key(cfg)
+    with _lock:
+        driver = _async_drivers.get(key)
+        if driver is None:
+            for stale in [k for k in _async_drivers if k[-1] is not None and k[-1].is_closed()]:
+                del _async_drivers[stale]
+            driver = AsyncGraphDatabase.driver(
+                cfg.neo4j_uri,
+                auth=(cfg.neo4j_user, cfg.neo4j_password),
+                max_connection_pool_size=64,
+                connection_acquisition_timeout=120,
+                liveness_check_timeout=30,
+                max_connection_lifetime=600,
+                keep_alive=True,
+            )
+            _async_drivers[key] = driver
+    return driver
 
 
 def get_driver() -> Driver:
@@ -114,12 +138,14 @@ def get_driver() -> Driver:
 
 
 async def close_async_driver() -> None:
-    """Close the async driver singleton, if any, and forget it.
+    """Close the cached async driver of the active configuration and running loop, and forget it.
 
-    Not called by the pipeline (the singleton lives as long as the process);
+    Not called by the pipeline (the driver lives as long as the process);
     :meth:`Neo4jGraphStore.aclose` uses it to release the pool explicitly.
     """
-    global _async_driver
-    driver, _async_driver = _async_driver, None
+    from scinr.newton.config import get_config  # deferred — avoids circular import
+
+    with _lock:
+        driver = _async_drivers.pop(_driver_key(get_config()), None)
     if driver is not None:
         await driver.close()

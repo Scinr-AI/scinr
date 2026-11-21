@@ -228,6 +228,51 @@ async def test_execute_raw_passes_through_read() -> None:
     assert rows == [{"a": 42}]
 
 
+async def test_execute_raw_max_rows_returns_one_more_than_the_cap() -> None:
+    rows = [{"n": i} for i in range(5)]
+    nav, _ = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}], "UNWIND": rows}))
+    assert len(await nav.execute_raw("UNWIND range(0, 4) AS n RETURN n", max_rows=2)) == 3
+    assert len(await nav.execute_raw("UNWIND range(0, 4) AS n RETURN n")) == 5
+    assert await nav.execute_raw_one("UNWIND range(0, 4) AS n RETURN n", max_rows=2) == {"n": 0}
+
+
+@pytest.mark.parametrize("kwargs", [{"timeout_seconds": 0}, {"max_rows": -1}])
+async def test_execute_raw_rejects_invalid_limits(kwargs) -> None:
+    nav, _ = _mk(_resp({"RETURN 1 AS ok": [{"ok": 1}]}))
+    with pytest.raises(NavigationError):
+        await nav.execute_raw("RETURN 1", **kwargs)
+
+
+def _neo4j_error(code: str, message: str):
+    from neo4j.exceptions import Neo4jError
+
+    return Neo4jError._hydrate_neo4j(code=code, message=message)
+
+
+async def test_execute_raw_translates_the_timeout_and_keeps_the_code() -> None:
+    from scinr.newton.exceptions import QueryTimeoutError
+
+    def responder(cypher: str, params: dict):
+        raise _neo4j_error(
+            "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", "timed out"
+        )
+
+    nav, _ = _mk(responder)
+    with pytest.raises(QueryTimeoutError) as caught:
+        await nav.execute_raw("MATCH (n) RETURN n", timeout_seconds=1)
+    assert caught.value.code == "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+
+async def test_execute_raw_wraps_a_client_error_with_its_code() -> None:
+    def responder(cypher: str, params: dict):
+        raise _neo4j_error("Neo.ClientError.Statement.SyntaxError", "Invalid input")
+
+    nav, _ = _mk(responder)
+    with pytest.raises(NavigationError) as caught:
+        await nav.execute_raw("MATC (n) RETURN n")
+    assert caught.value.code == "Neo.ClientError.Statement.SyntaxError"
+
+
 async def test_list_relationship_types_structural_only_query() -> None:
     nav, drv = _mk(_resp({
         "RETURN 1 AS ok": [{"ok": 1}],
@@ -528,3 +573,136 @@ def test_model_class_stat_without_breakdown_leaves_none() -> None:
 
     s = _map.model_class_stat({"model_class": "A", "count": 2}, kind="matched")
     assert (s.count, s.model_instances, s.extraction_results) == (2, None, None)
+
+
+# ── memory summaries, explore & label keys ───────────────────────────────────
+
+_BOOK = ["tenant_id", "job_ids", "created_by_user_ids"]
+
+
+def _mi(uid: str, model_class: str, **props):
+    return {"uid": uid, "model_class": model_class, "tenant_id": "t", **props}
+
+
+async def test_summarize_model_classes_counts_real_empty_and_placeholders() -> None:
+    rows = [
+        {"mi": _mi("a", "Drug", name="x", dose="1"), "extracted": False},
+        {"mi": _mi("b", "Drug"), "extracted": False},
+        {"mi": _mi("c", "Drug", name="y"), "extracted": False},
+        {"mi": _mi("d", "Drug", name="z"), "extracted": True},
+    ]
+    nav, drv = _mk(
+        _resp(
+            {
+                "MATCH (mi:ModelInstance)": rows,
+                "MATCH (cm:CatalogModel)": [{"name": "Drug", "selectable": True}],
+            }
+        )
+    )
+    out = await nav.summarize_model_classes(ignore_keys=_BOOK, tenant_id="t")
+    assert [(s.model_class, s.records, s.empty, s.placeholders, s.selectable) for s in out] == [
+        ("Drug", 2, 1, 1, True)
+    ]
+    cypher, params = drv.last_queries[0]
+    assert "mi.model_class IS NOT NULL" in cypher and params["scope_tenant"] == "t"
+
+
+async def test_summarize_model_instance_links_counts_links_to_empty_records() -> None:
+    rows = [
+        {"from_uid": "a", "from_class": "Drug", "rel_type": "MADE_BY", "b": _mi("c", "Co", n="x"), "extracted": True},
+        {"from_uid": "a", "from_class": "Drug", "rel_type": "MADE_BY", "b": _mi("e", "Co"), "extracted": False},
+    ]
+    nav, _ = _mk(_resp({"MATCH (a:ModelInstance)-[r]->(b:ModelInstance)": rows}))
+    out = await nav.summarize_model_instance_links(ignore_keys=_BOOK)
+    assert [(s.from_class, s.rel_type, s.to_class, s.links, s.to_empty, s.from_to_empty) for s in out] == [
+        ("Drug", "MADE_BY", "Co", 2, 1, 1)
+    ]
+
+
+async def test_summarize_sources_groups_records_by_job() -> None:
+    docs = [{"d": {"path": "a.pdf", "tenant_id": "t", "version": 2, "job_id": "j1", "load_date": "2026-02-01"}}]
+    nav, _ = _mk(
+        _resp(
+            {
+                "d.latest = true": docs,
+                "d.path IN $paths": docs
+                + [{"d": {"path": "a.pdf", "tenant_id": "t", "version": 1, "job_id": "j0", "load_date": "2026-01-01"}}],
+                "MATCH (mi:ModelInstance)": [
+                    {"mi": _mi("a", "Drug", name="x", job_ids=["j1"]), "extracted": True}
+                ],
+            }
+        )
+    )
+    [source] = await nav.summarize_sources(ignore_keys=_BOOK + ["job_ids"], tenant_id="t")
+    assert source.job_ids == ["j1", "j0"]
+    assert [(c.model_class, c.job_ids, c.records) for c in source.contributions] == [("Drug", ["j1"], 1)]
+
+
+async def test_get_model_instance_links_orders_and_limits() -> None:
+    nav, drv = _mk(
+        _resp({"RETURN DISTINCT a": [{"a": _mi("a", "Drug"), "rel_type": "R", "b": _mi("b", "Co")}]})
+    )
+    out = await nav.get_model_instance_links(["a", "a"], limit=5, tenant_id="t")
+    assert [(link.source.uid, link.rel_type, link.target.uid) for link in out] == [("a", "R", "b")]
+    cypher, params = drv.last_queries[0]
+    assert "ORDER BY a.uid, type(r), b.uid LIMIT 5" in cypher and params["uids"] == ["a"]
+    assert await nav.get_model_instance_links([]) == []
+    with pytest.raises(NavigationError):
+        await nav.get_model_instance_links("a")
+
+
+async def test_get_extraction_links_filters_are_parameters() -> None:
+    nav, drv = _mk(_resp({}))
+    await nav.get_extraction_links(
+        document_paths=["a.pdf"], field_contains=[("name", "x'; DROP")], tenant_id="t"
+    )
+    cypher, params = drv.last_queries[0]
+    assert "d.path IN $document_paths" in cypher and "x'; DROP" not in cypher
+    assert params["document_paths"] == ["a.pdf"] and params["fk0"] == "name" and params["fv0"] == "x'; DROP"
+    assert "HAS_STRUCTURE|HAS_CHILD*1.." in cypher and "embedding: null" in cypher
+    for bad in ({"document_paths": []}, {"field_contains": [("bad key", "v")]}):
+        with pytest.raises(NavigationError):
+            await nav.get_extraction_links(**bad)
+
+
+async def test_get_model_instances_in_documents_and_field_keys_queries() -> None:
+    nav, drv = _mk(_resp({}))
+    await nav.get_model_instances_in_documents("Drug", document_paths=["a.pdf"], limit=2)
+    cypher, params = drv.last_queries[0]
+    assert params["model_class"] == "Drug" and "LIMIT 2" in cypher and "mi.model_class = $model_class" in cypher
+    assert await nav.list_extraction_field_keys(document_paths=["a.pdf"]) == []
+    assert "UNWIND keys(n)" in drv.last_queries[-1][0]
+
+
+async def test_search_model_instances_matches_uid_first_then_fields() -> None:
+    rows = [
+        {"mi": _mi("b", "Drug", name="Aspirin"), "extracted": True},
+        {"mi": _mi("aspirin", "Drug", name="x"), "extracted": True},
+    ]
+    nav, _ = _mk(_resp({"MATCH (mi:ModelInstance)": rows}))
+    out = await nav.search_model_instances("aspirin", ignore_keys=_BOOK)
+    assert [(m.instance.uid, m.field) for m in out] == [("aspirin", "uid"), ("b", "name")]
+    with pytest.raises(NavigationError):
+        await nav.search_model_instances("")
+
+
+async def test_list_model_instance_field_keys_skips_blank_text() -> None:
+    nav, drv = _mk(
+        _resp({"MATCH (mi:ModelInstance)": [{"mi": _mi("a", "Drug", name="x", note="  ", dose=None)}]})
+    )
+    assert await nav.list_model_instance_field_keys("Drug", ignore_keys=_BOOK, sample_limit=7) == ["name"]
+    assert "LIMIT 7" in drv.last_queries[0][0]
+    with pytest.raises(NavigationError):
+        await nav.list_model_instance_field_keys("Drug", sample_limit=-1)
+
+
+async def test_get_node_property_keys_scopes_by_label_kind_and_rejects_unknown() -> None:
+    nav, drv = _mk(_resp({"keys(n)": [{"ks": ["uid", "name"]}]}))
+    assert await nav.get_node_property_keys("ModelInstance", tenant_id="t") == ["name", "uid"]
+    cypher, params = drv.last_queries[0]
+    assert "MATCH (n:`ModelInstance`)" in cypher and "ORDER BY n.`uid` LIMIT 1" in cypher
+    assert params["scope_tenant"] == "t"
+    await nav.get_node_property_keys("CatalogModel", tenant_id="t")
+    assert "scope_tenant" not in drv.last_queries[-1][1]  # the catalogue is not scoped
+    with pytest.raises(NavigationError):
+        await nav.get_node_property_keys("Nope")

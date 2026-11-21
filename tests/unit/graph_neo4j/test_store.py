@@ -131,7 +131,7 @@ class TestSkeleton:
     def test_close_is_a_no_op(self):
         Neo4jGraphStore().close()
 
-    async def test_aclose_closes_the_async_singleton(self, monkeypatch):
+    async def test_aclose_closes_the_cached_async_driver(self, monkeypatch):
         _configure()
         fake_async = MagicMock()
 
@@ -139,10 +139,11 @@ class TestSkeleton:
             fake_async.closed = True
 
         fake_async.close = _close
-        monkeypatch.setattr(driver_mod, "_async_driver", fake_async)
+        monkeypatch.setattr(driver_mod, "_driver_key", lambda cfg: ("key",))
+        monkeypatch.setattr(driver_mod, "_async_drivers", {("key",): fake_async})
         await Neo4jGraphStore().aclose()
         assert fake_async.closed is True
-        assert driver_mod._async_driver is None
+        assert driver_mod._async_drivers == {}
 
 
 class TestDriverCredentials:

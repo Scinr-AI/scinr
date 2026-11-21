@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from scinr.newton.exceptions import FreezeError
+from scinr.newton.graph.identity import encode_key, node_identity
 from scinr.newton.navigation.models import (
     CatalogFieldRef,
     CatalogModelRef,
@@ -272,7 +274,15 @@ def triple(row: dict[str, Any], *, node_id: str | None = None) -> Triple:
 def graph_node(n: dict[str, Any]) -> GraphNode:
     labels = [str(x) for x in (n.get("_labels") or [])]
     props = {k: v for k, v in n.items() if k not in _INTERNAL}
-    return GraphNode(raw=_clean(n), types=labels, properties=props)
+    label: str | None = None
+    key: str | None = None
+    try:
+        primary, _ = node_identity(labels)
+        key = encode_key(primary, props)
+        label = primary
+    except (FreezeError, KeyError):
+        pass  # unknown labels or a missing key property: the node has no portable identity
+    return GraphNode(raw=_clean(n), types=labels, properties=props, label=label, key=key)
 
 
 def model_class_stat(row: dict[str, Any], *, kind: str | None = None) -> ModelClassStat:

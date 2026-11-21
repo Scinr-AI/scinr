@@ -2,7 +2,7 @@
 tests/unit/test_ingest_one.py — Unit tests for
 scinr.newton.ingest.loader.ingest_one() / ingest_one_from_path().
 
-Focus: the get_neo4j_sync_semaphore() wiring — the semaphore must bound how
+Focus: the get_graph_sync_semaphore() wiring — the semaphore must bound how
 many asyncio.to_thread() dispatches are in flight simultaneously, and it
 must be acquired/released in the event loop (never inside the worker
 thread it wraps).
@@ -18,7 +18,7 @@ import pytest
 
 from scinr.newton.config import (
     configure,
-    reset_neo4j_sync_semaphore,
+    reset_graph_sync_semaphore,
 )
 from scinr.newton.ingest.loader import ingest_one, ingest_one_from_path
 
@@ -75,21 +75,33 @@ class _ConcurrencyTracker:
         return "ok"
 
 
-@pytest.fixture(autouse=True)
-def _configure_sync_concurrency_1(monkeypatch):
-    """Configure neo4j_sync_concurrency=1 and reset the semaphore before each test."""
+@pytest.fixture(autouse=True, params=["neo4j", "sqlite"])
+def _configure_sync_concurrency_1(request, tmp_path, monkeypatch):
+    """Configure graph_sync_concurrency=1 for each backend and reset the semaphore."""
+    from scinr.newton.sql.engine import reset_engines
+
+    monkeypatch.delenv("GRAPH_SYNC_CONCURRENCY", raising=False)
     monkeypatch.delenv("NEO4J_SYNC_CONCURRENCY", raising=False)
     llm = _make_mock_llm()
-    configure(
-        llm=llm,
-        neo4j_uri=_DUMMY_URI,
-        neo4j_user=_DUMMY_USER,
-        neo4j_password=_DUMMY_PASS,
-        neo4j_sync_concurrency=1,
-    )
-    reset_neo4j_sync_semaphore()
+    if request.param == "neo4j":
+        backend_settings = dict(
+            neo4j_uri=_DUMMY_URI,
+            neo4j_user=_DUMMY_USER,
+            neo4j_password=_DUMMY_PASS,
+        )
+    else:
+        backend_settings = dict(
+            graph_backend="sqlite",
+            storage_backend="sqlite",
+            freeze_backend="sqlite",
+            sql_url=f"sqlite:///{tmp_path}/newton.db",
+            sql_schema="newton",
+        )
+    configure(llm=llm, graph_sync_concurrency=1, **backend_settings)
+    reset_graph_sync_semaphore()
     yield
-    reset_neo4j_sync_semaphore()
+    reset_graph_sync_semaphore()
+    reset_engines()
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +111,7 @@ def _configure_sync_concurrency_1(monkeypatch):
 
 class TestIngestOneSemaphore:
     async def test_ingest_one_respects_sync_concurrency_limit(self):
-        """Two concurrent ingest_one() calls with neo4j_sync_concurrency=1 must
+        """Two concurrent ingest_one() calls with graph_sync_concurrency=1 must
         never run their blocking work simultaneously.
 
         This also indirectly confirms the semaphore is acquired/released in

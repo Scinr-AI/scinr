@@ -5,19 +5,53 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from scinr.newton.exceptions import NavigationError
-from scinr.newton.navigation.models import GraphNode, NodeSelector, PathResult, Subgraph
+from scinr.newton.exceptions import GraphConnectionError, NavigationError, QueryTimeoutError
+from scinr.newton.graph.identity import PRIMARY_LABELS
+from scinr.newton.navigation import _browse as browse
+from scinr.newton.navigation._labels import resolve_label
+from scinr.newton.navigation._search_fields import SEARCH_FIELDS, SPECIAL_SEARCH_LABELS
+from scinr.newton.navigation.models import (
+    GraphEdge,
+    GraphNode,
+    NodeExpansion,
+    NodeMatch,
+    NodeSelector,
+    PathResult,
+    RelationshipCount,
+    Subgraph,
+)
 from scinr.newton.navigation.neo4j import _map
 from scinr.newton.navigation.neo4j._common import _Neo4jRuntime
-from scinr.newton.navigation.neo4j._safe import assert_read_only, safe_ident
+from scinr.newton.navigation.neo4j._safe import assert_read_only, check_raw_limits, safe_ident
 from scinr.newton.navigation.scope import Scope, make_scope
+from scinr.newton.utils.redaction import redact_secrets
 
 #: Global catalogue labels: they carry no tenant, and are the bridge through
 #: which a free graph walk could hop from one tenant's data to another's
 #: (``ModelDecision(A) -[:MATCHED_MODEL]-> CatalogModel <-[:MATCHED_MODEL]- ModelDecision(B)``).
 _CATALOG_LABELS = ["CatalogModel", "ModelField", "EntityLabel", "Theme"]
 
+#: ``code`` prefix of a transaction aborted by its timeout.
+_TIMEOUT_CODE_PREFIX = "Neo.ClientError.Transaction.TransactionTimedOut"
+
 _IS_CATALOG = "any(l IN labels({a}) WHERE l IN $scope_catalog_labels)"
+
+#: ``CASE`` giving the primary label of ``m`` (the order of ``graph.identity.node_identity``);
+#: ``null`` for a node of an unknown kind.
+_PRIMARY_OF_M = (
+    "CASE "
+    + " ".join(f"WHEN '{label}' IN labels(m) THEN '{label}'" for label in PRIMARY_LABELS)
+    + " END"
+)
+
+#: Map projection of every property that is part of some label's key.
+_IDENT_OF_M = "m { " + ", ".join(f".{f}" for f in browse.ident_fields()) + " }"
+
+_DIRECTIONS = ("out", "in", "both")
+
+
+def _where(clauses: list[str]) -> str:
+    return f"WHERE {' AND '.join(clauses)} " if clauses else ""
 
 
 def _sel(selector: NodeSelector, alias: str) -> tuple[str, dict[str, Any]]:
@@ -251,6 +285,266 @@ class _PowerMixin(_Neo4jRuntime):
             edges=list(rec["rels"] or []),
         )
 
+    # -- node browsing (portable identity: label + key) -----------------------
+
+    def _anchor(
+        self, ref: tuple[str, dict[str, Any]], sc: Scope
+    ) -> tuple[str, dict[str, Any], list[str]]:
+        """``(pattern, params, scope clauses)`` of the node ``n`` named by *ref*.
+
+        The scope is the one of the node's own kind (a catalogue node has none).
+        """
+        label, fields = ref
+        props = ", ".join(f"`{name}`: $anchor_{i}" for i, name in enumerate(fields))
+        params: dict[str, Any] = {f"anchor_{i}": value for i, value in enumerate(fields.values())}
+        clauses: list[str] = []
+        kind = resolve_label(label).scope_kind
+        if kind is not None:
+            self._scope_where("n", clauses, params, sc, kind)
+        return f"(n:`{label}` {{{props}}})", params, clauses
+
+    async def get_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> GraphNode | None:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        ref = browse.node_ref(label, key)
+        if ref is None:
+            return None
+        pattern, params, clauses = self._anchor(ref, sc)
+        rec = await self._read_one(
+            f"MATCH {pattern} {_where(clauses)}RETURN n {{ .*, _labels: labels(n) }} AS n LIMIT 1",
+            **params,
+        )
+        return _map.graph_node(rec["n"]) if rec else None
+
+    async def count_node_relationships(
+        self,
+        label: str,
+        key: str,
+        *,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[RelationshipCount]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        ref = browse.node_ref(label, key)
+        if ref is None:
+            return []
+        pattern, params, clauses = self._anchor(ref, sc)
+        params.update(_scope_params(sc))
+        allowed = _allowed("m", sc)
+        neighbour_clauses = [allowed] if allowed else []
+        rows: list[tuple[str, str, str, int]] = []
+        for direction, hop in (("out", "(n)-[r]->(m)"), ("in", "(n)<-[r]-(m)")):
+            found = await self._read(
+                f"MATCH {pattern} {_where(clauses)}"
+                f"MATCH {hop} {_where(neighbour_clauses)}"
+                "RETURN type(r) AS type, labels(m) AS labels, count(r) AS count",
+                **params,
+            )
+            for rec in found:
+                neighbour = browse.primary_label(rec["labels"])
+                if neighbour is not None:
+                    rows.append((rec["type"], direction, neighbour, int(rec["count"])))
+        return browse.count_relationships(rows)
+
+    async def expand_node(
+        self,
+        label: str,
+        key: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        edge_types: Sequence[str] | None = None,
+        neighbor_labels: Sequence[str] | None = None,
+        skip: int = 0,
+        limit: int | None = 100,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> NodeExpansion:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        if direction not in _DIRECTIONS:
+            raise NavigationError(f"direction must be one of {_DIRECTIONS}, got {direction!r}.")
+        browse.check_page(skip, limit, allow_unlimited=True)
+        types = browse.check_edge_types(edge_types)
+        wanted = browse.check_labels(neighbor_labels)
+        ref = browse.node_ref(label, key)
+        if ref is None:
+            return NodeExpansion()
+        pattern, params, clauses = self._anchor(ref, sc)
+        params.update(_scope_params(sc))
+        params["edge_types"] = types
+        params["neighbor_labels"] = wanted
+        hop = {"out": "(n)-[r]->(m)", "in": "(n)<-[r]-(m)", "both": "(n)-[r]-(m)"}[direction]
+        neighbour_clauses = [
+            "m <> n",
+            "($edge_types IS NULL OR type(r) IN $edge_types)",
+            "($neighbor_labels IS NULL OR any(l IN labels(m) WHERE l IN $neighbor_labels))",
+        ]
+        allowed = _allowed("m", sc)
+        if allowed:
+            neighbour_clauses.append(allowed)
+        # The neighbours are ordered in Python (by primary label and encoded key: a composite
+        # key has no Cypher expression), so the first read brings only their identity.
+        found = await self._read(
+            f"MATCH {pattern} {_where(clauses)}"
+            f"MATCH {hop} {_where(neighbour_clauses)}"
+            "WITH DISTINCT n, m "
+            f"WITH n, m, {_PRIMARY_OF_M} AS label WHERE label IS NOT NULL "
+            f"RETURN elementId(n) AS anchor, elementId(m) AS eid, label, {_IDENT_OF_M} AS ident",
+            **params,
+        )
+        neighbours: dict[tuple[str, str], str] = {}
+        anchor_id = None
+        for rec in found:
+            anchor_id = rec["anchor"]
+            neighbour_key = browse.ident_key(rec["label"], rec["ident"])
+            if neighbour_key is not None:
+                neighbours[(rec["label"], neighbour_key)] = rec["eid"]
+        ordered = sorted(neighbours)
+        stop = None if limit is None else skip + limit
+        page = ordered[skip:stop]
+        if not page:
+            return NodeExpansion(total=len(ordered))
+        by_eid = {neighbours[pair]: pair for pair in page}
+        node_rows = await self._read(
+            "MATCH (m) WHERE elementId(m) IN $eids "
+            "RETURN elementId(m) AS eid, m { .*, _labels: labels(m) } AS m",
+            eids=list(by_eid),
+        )
+        by_pair = {by_eid[r["eid"]]: _map.graph_node(r["m"]) for r in node_rows if r["eid"] in by_eid}
+        edge_rows = await self._read(
+            "MATCH (n) WHERE elementId(n) = $anchor "
+            "MATCH (m) WHERE elementId(m) IN $eids "
+            "MATCH (n)-[r]-(m) WHERE ($edge_types IS NULL OR type(r) IN $edge_types) "
+            "RETURN elementId(m) AS eid, type(r) AS type, properties(r) AS props, "
+            "startNode(r) = n AS outgoing",
+            anchor=anchor_id,
+            eids=list(by_eid),
+            edge_types=types,
+        )
+        anchor_pair = (ref[0], browse.encode_ref(ref))
+        edges = []
+        for rec in edge_rows:
+            if rec["eid"] not in by_eid:
+                continue
+            near = by_eid[rec["eid"]]
+            source, target = (anchor_pair, near) if rec["outgoing"] else (near, anchor_pair)
+            edges.append(
+                GraphEdge(
+                    type=rec["type"],
+                    source_label=source[0],
+                    source_key=source[1],
+                    target_label=target[0],
+                    target_key=target[1],
+                    properties=dict(rec["props"] or {}),
+                )
+            )
+        return NodeExpansion(
+            nodes=[by_pair[pair] for pair in page if pair in by_pair],
+            edges=browse.sort_edges(edges),
+            total=len(ordered),
+        )
+
+    async def search_nodes(
+        self,
+        text: str,
+        *,
+        labels: Sequence[str] | None = None,
+        limit: int = 20,
+        skip: int = 0,
+        tenant_id: str | None = None,
+        include_public: bool = False,
+        created_by_user_id: str | Sequence[str] | None = None,
+        job_id: str | Sequence[str] | None = None,
+    ) -> list[NodeMatch]:
+        sc = make_scope(tenant_id, include_public, created_by_user_id, job_id)
+        browse.check_page(skip, limit)
+        wanted = browse.search_labels(labels)
+        if not isinstance(text, str) or len(text) < browse.MIN_SEARCH_LENGTH:
+            return []
+        scope = {
+            "tenant_id": tenant_id,
+            "include_public": include_public,
+            "created_by_user_id": created_by_user_id,
+            "job_id": job_id,
+        }
+        hits: list[browse.Hit] = []
+        element_ids: dict[tuple[str, str], str] = {}
+        for label in wanted:
+            if label in SPECIAL_SEARCH_LABELS:
+                hits.extend(await browse.special_hits(self, label, text, skip + limit, scope))
+            else:
+                hits.extend(await self._search_label(label, text, sc, element_ids))
+        hits.sort(key=lambda hit: hit.order)
+        page = hits[skip : skip + limit]
+        missing = [element_ids[(hit.label, hit.key)] for hit in page if hit.node is None]
+        fetched: dict[tuple[str, str], GraphNode] = {}
+        if missing:
+            by_eid = {element_ids[(hit.label, hit.key)]: (hit.label, hit.key) for hit in page if hit.node is None}
+            for rec in await self._read(
+                "MATCH (m) WHERE elementId(m) IN $eids "
+                "RETURN elementId(m) AS eid, m { .*, _labels: labels(m) } AS m",
+                eids=missing,
+            ):
+                if rec["eid"] in by_eid:
+                    fetched[by_eid[rec["eid"]]] = _map.graph_node(rec["m"])
+        out = []
+        for hit in page:
+            node = hit.node or fetched.get((hit.label, hit.key))
+            if node is not None:
+                out.append(hit.match(node))
+        return out
+
+    async def _search_label(
+        self,
+        label: str,
+        text: str,
+        sc: Scope,
+        element_ids: dict[tuple[str, str], str],
+    ) -> list[browse.Hit]:
+        """Candidates of one label (``SEARCH_FIELDS`` and the exact key); records their ids."""
+        params: dict[str, Any] = {"needle": text.lower()}
+        clauses: list[str] = []
+        kind = resolve_label(label).scope_kind
+        if kind is not None:
+            self._scope_where("n", clauses, params, sc, kind)
+        cases = []
+        ref = browse.node_ref(label, text)
+        if ref is not None:
+            tests = []
+            for i, (name, value) in enumerate(ref[1].items()):
+                tests.append(f"n.`{name}` = $key_{i}")
+                params[f"key_{i}"] = value
+            cases.append(f"WHEN {' AND '.join(tests)} THEN 'key'")
+        for name in SEARCH_FIELDS.get(label, ()):
+            cases.append(f"WHEN toLower(n.`{name}`) CONTAINS $needle THEN '{name}'")
+        if not cases:
+            return []
+        identity = "n { " + ", ".join(f".{f}" for f in browse.ident_fields()) + " }"
+        rows = await self._read(
+            f"MATCH (n:`{label}`) {_where(clauses)}"
+            f"WITH n, CASE {' '.join(cases)} END AS field WHERE field IS NOT NULL "
+            f"RETURN elementId(n) AS eid, field, {identity} AS ident",
+            **params,
+        )
+        hits = []
+        for rec in rows:
+            node_key = browse.ident_key(label, rec["ident"])
+            if node_key is not None:
+                element_ids[(label, node_key)] = rec["eid"]
+                hits.append(browse.Hit(label, node_key, rec["field"]))
+        return hits
+
     # -- raw escape hatch --------------------------------------------------
 
     async def execute_raw(
@@ -259,10 +553,48 @@ class _PowerMixin(_Neo4jRuntime):
         params: Mapping[str, Any] | None = None,
         *,
         dialect: str | None = None,
+        timeout_seconds: float | None = None,
+        max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
         if dialect is not None and dialect != self.dialect:
             raise NavigationError(
                 f"execute_raw called with dialect={dialect!r} on a {self.dialect!r} backend"
             )
         assert_read_only(query)
-        return await self._read(query, **dict(params or {}))
+        check_raw_limits(timeout_seconds, max_rows)
+        from neo4j import unit_of_work
+        from neo4j.exceptions import Neo4jError, ServiceUnavailable
+
+        from scinr.newton.graph.neo4j.retry import with_neo4j_retry
+
+        driver = self._live_driver()
+        values = dict(params or {})
+
+        async def _tx(tx: Any) -> list[dict[str, Any]]:
+            result = await tx.run(query, values)
+            rows: list[dict[str, Any]] = []
+            async for record in result:
+                rows.append(record.data())
+                if max_rows is not None and len(rows) > max_rows:
+                    break
+            await result.consume()
+            return rows
+
+        work = unit_of_work(timeout=timeout_seconds)(_tx) if timeout_seconds is not None else _tx
+
+        async def _run() -> list[dict[str, Any]]:
+            async with driver.session(database=self._database()) as session:
+                return await session.execute_read(work)
+
+        try:
+            return await with_neo4j_retry(_run)
+        except Neo4jError as exc:
+            code = getattr(exc, "code", None)
+            message = redact_secrets(str(getattr(exc, "message", None) or exc))
+            if isinstance(code, str) and code.startswith(_TIMEOUT_CODE_PREFIX):
+                raise QueryTimeoutError(message, code=code) from exc
+            if isinstance(code, str) and code.startswith("Neo.ClientError."):
+                raise NavigationError(message, code=code) from exc
+            raise
+        except ServiceUnavailable as exc:
+            raise GraphConnectionError(redact_secrets(str(exc))) from exc
