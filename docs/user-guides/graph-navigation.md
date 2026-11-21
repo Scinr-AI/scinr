@@ -666,6 +666,10 @@ hits  = await acme.search_nodes("aspirin", labels=["InfoUnit", "ModelInstance"],
 - `search_nodes` ignores texts shorter than 2 characters and searches fixed fields per label
   (for example `Document.name/path`, `StructureNode.title/id`). Neo4j and SQLite lowercase with
   their own rules, so non-ASCII case folding can differ between engines.
+- `search_nodes` also looks into `InfoUnit` text with the engine's own full-text search, so a
+  page that skips results (`skip` > 0) can differ between Neo4j and SQL: each engine keeps
+  `skip + limit` candidates in its own ranking. The text is searched as a phrase; Lucene syntax
+  (`:`, `/`, quotes...) is escaped in Neo4j.
 - An unknown label, a negative `skip`, `limit < 1` or an invalid direction raises
   `NavigationError`; a malformed key returns an empty result.
 

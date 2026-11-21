@@ -200,7 +200,8 @@ async def special_hits(
     if exact is not None and exact.key is not None:
         hits[exact.key] = Hit(label, exact.key, "key", exact)
     if label == "InfoUnit":
-        for unit in await nav.search_info_units(text, limit=window, **scope):
+        query = getattr(nav, "_fulltext_text", lambda t: t)(text)  # Neo4j: Lucene syntax escaped
+        for unit in await nav.search_info_units(query, limit=window, **scope):
             node = _map.graph_node({**unit.raw, "_labels": ["InfoUnit"]})
             if node.key is not None and node.key not in hits:
                 hits[node.key] = Hit(label, node.key, "text", node)
